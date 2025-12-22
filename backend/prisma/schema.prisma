@@ -1,0 +1,306 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============= USER & ROLE MANAGEMENT =============
+
+model Role {
+  id          String       @id @default(uuid())
+  name        String       @unique // SUPER_ADMIN, ADMIN, CUSTOMER
+  description String?
+  isSystem    Boolean      @default(false) // System roles cannot be deleted
+  permissions Permission[]
+  adminUsers  AdminUser[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+}
+
+model Permission {
+  id          String   @id @default(uuid())
+  name        String   @unique
+  description String?
+  roles       Role[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AdminUser {
+  id                    String                @id @default(uuid())
+  email                 String                @unique
+  password              String
+  firstName             String
+  lastName              String
+  phone                 String?
+  isActive              Boolean               @default(true)
+  roleId                String
+  role                  Role                  @relation(fields: [roleId], references: [id])
+  customersCreated      Customer[]            @relation("CreatedByAdmin")
+  contractsCreated      HirePurchaseContract[] @relation("ContractCreatedBy")
+  auditLogs             AuditLog[]
+  createdAt             DateTime              @default(now())
+  updatedAt             DateTime              @updatedAt
+}
+
+// ============= CUSTOMER MANAGEMENT =============
+
+model Customer {
+  id                  String                @id @default(uuid())
+  membershipId        String                @unique // System-generated unique ID
+  email               String?               @unique
+  password            String?               // Set during account activation
+  firstName           String
+  lastName            String
+  phone               String
+  address             String?
+  nationalId          String?
+  dateOfBirth         DateTime?
+  photoUrl            String?               // Customer passport photo
+  isActivated         Boolean               @default(false)
+  activatedAt         DateTime?
+  createdById         String
+  createdBy           AdminUser             @relation("CreatedByAdmin", fields: [createdById], references: [id])
+  contracts           HirePurchaseContract[]
+  payments            PaymentTransaction[]
+  notifications       NotificationLog[]
+  hubtelPreapprovals  HubtelPreapproval[]
+  createdAt           DateTime              @default(now())
+  updatedAt           DateTime              @updatedAt
+}
+
+// ============= PRODUCT & INVENTORY =============
+
+model ProductCategory {
+  id          String    @id @default(uuid())
+  name        String    @unique
+  description String?
+  products    Product[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+model Product {
+  id              String           @id @default(uuid())
+  name            String
+  description     String?
+  basePrice       Float
+  categoryId      String
+  category        ProductCategory  @relation(fields: [categoryId], references: [id])
+  inventoryItems  InventoryItem[]
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+}
+
+model InventoryItem {
+  id                String                @id @default(uuid())
+  productId         String
+  product           Product               @relation(fields: [productId], references: [id])
+  serialNumber      String                @unique // IMEI or Serial Number
+  status            String                @default("AVAILABLE") // AVAILABLE, SOLD, RESERVED
+  lockStatus        String?               @default("UNLOCKED") // LOCKED, UNLOCKED
+  registeredUnder   String?               // Name registered under (optional)
+  contractId        String?               @unique
+  contract          HirePurchaseContract? @relation(fields: [contractId], references: [id])
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+}
+
+// ============= HIRE PURCHASE CONTRACTS =============
+
+model HirePurchaseContract {
+  id                  String               @id @default(uuid())
+  contractNumber      String               @unique
+  customerId          String
+  customer            Customer             @relation(fields: [customerId], references: [id])
+  inventoryItem       InventoryItem?
+  totalPrice          Float
+  depositAmount       Float
+  financeAmount       Float               // totalPrice - depositAmount
+  installmentAmount   Float
+  paymentFrequency    String              // DAILY, WEEKLY, MONTHLY
+  totalInstallments   Int
+  gracePeriodDays     Int                 @default(0)
+  penaltyPercentage   Float               @default(0)
+  startDate           DateTime
+  endDate             DateTime
+  status              String              @default("ACTIVE") // ACTIVE, COMPLETED, DEFAULTED, CANCELLED
+  totalPaid           Float               @default(0)
+  outstandingBalance  Float
+  ownershipTransferred Boolean            @default(false)
+  signatureUrl        String?             // Customer signature image
+  paymentMethod       String?             // HUBTEL_REGULAR, HUBTEL_DIRECT_DEBIT, MANUAL, CASH
+  mobileMoneyNetwork  String?             // MTN, VODAFONE, AIRTELTIGO
+  mobileMoneyNumber   String?             // Phone number for auto-debit
+  createdById         String
+  createdBy           AdminUser           @relation("ContractCreatedBy", fields: [createdById], references: [id])
+  installments        InstallmentSchedule[]
+  payments            PaymentTransaction[]
+  penalties           Penalty[]
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+}
+
+model InstallmentSchedule {
+  id              String               @id @default(uuid())
+  contractId      String
+  contract        HirePurchaseContract @relation(fields: [contractId], references: [id])
+  installmentNo   Int
+  dueDate         DateTime
+  amount          Float
+  paidAmount      Float                @default(0)
+  status          String               @default("PENDING") // PENDING, PARTIAL, PAID, OVERDUE
+  paidAt          DateTime?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@unique([contractId, installmentNo])
+}
+
+// ============= PAYMENTS =============
+
+model PaymentTransaction {
+  id                  String               @id @default(uuid())
+  transactionRef      String               @unique
+  contractId          String
+  contract            HirePurchaseContract @relation(fields: [contractId], references: [id])
+  customerId          String
+  customer            Customer             @relation(fields: [customerId], references: [id])
+  amount              Float
+  paymentMethod       String               @default("MOBILE_MONEY")
+  mobileMoneyProvider String?              // MTN, VODAFONE, AIRTELTIGO
+  mobileMoneyNumber   String?
+  status              String               @default("PENDING") // PENDING, SUCCESS, FAILED
+  externalRef         String?              // Reference from Mobile Money gateway
+  paymentDate         DateTime?
+  metadata            String?              // JSON string for additional data
+  retryCount          Int                  @default(0)
+  lastRetryAt         DateTime?
+  nextRetryAt         DateTime?
+  failureReason       String?
+  isAutoRetryEnabled  Boolean              @default(true)
+  maxRetries          Int                  @default(3)
+  retries             PaymentRetry[]
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+}
+
+model PaymentRetry {
+  id                String             @id @default(uuid())
+  paymentId         String
+  payment           PaymentTransaction @relation(fields: [paymentId], references: [id])
+  attemptNumber     Int
+  status            String             // PENDING, SUCCESS, FAILED
+  transactionRef    String?            // Hubtel transaction reference
+  externalRef       String?
+  responseCode      String?
+  responseMessage   String?
+  failureReason     String?
+  attemptedAt       DateTime           @default(now())
+  completedAt       DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@index([paymentId, attemptNumber])
+}
+
+model Penalty {
+  id          String               @id @default(uuid())
+  contractId  String
+  contract    HirePurchaseContract @relation(fields: [contractId], references: [id])
+  amount      Float
+  reason      String
+  appliedDate DateTime             @default(now())
+  isPaid      Boolean              @default(false)
+  paidAt      DateTime?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+}
+
+model HubtelPreapproval {
+  id                    String   @id @default(uuid())
+  customerId            String
+  customer              Customer @relation(fields: [customerId], references: [id])
+  customerMsisdn        String
+  channel               String   // mtn-gh-direct-debit, vodafone-gh-direct-debit
+  clientReferenceId     String   @unique
+  hubtelPreapprovalId   String?  @unique
+  verificationType      String?  // USSD, OTP
+  otpPrefix             String?
+  status                String   @default("PENDING") // PENDING, APPROVED, FAILED, EXPIRED, CANCELLED
+  approvedAt            DateTime?
+  expiresAt             DateTime?
+  metadata              String?  // JSON string for additional data
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([customerId, customerMsisdn, channel])
+}
+
+// ============= AUDIT LOGGING =============
+
+model AuditLog {
+  id          String    @id @default(uuid())
+  userId      String?
+  user        AdminUser? @relation(fields: [userId], references: [id])
+  action      String
+  entity      String
+  entityId    String?
+  oldValues   String?   // JSON string
+  newValues   String?   // JSON string
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime  @default(now())
+}
+
+// ============= NOTIFICATION SYSTEM =============
+
+model NotificationSettings {
+  id                        String   @id @default(uuid())
+  daysBeforeDue             Int      @default(3)        // Days before due date to send reminder
+  sendSMS                   Boolean  @default(true)     // Enable SMS notifications
+  sendEmail                 Boolean  @default(true)     // Enable email notifications
+  reminderFrequency         String   @default("ONCE")   // ONCE, DAILY, WEEKLY
+  enableOverdueReminders    Boolean  @default(true)     // Send reminders for overdue payments
+  overdueReminderFrequency  String   @default("DAILY")  // DAILY, WEEKLY
+  smsTemplate               String?  // Custom SMS template
+  emailTemplate             String?  // Custom email template
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+}
+
+model RetrySettings {
+  id                      String   @id @default(uuid())
+  enableAutoRetry         Boolean  @default(true)
+  maxRetryAttempts        Int      @default(3)
+  retryIntervalHours      Int      @default(24)        // Hours between retry attempts
+  retrySchedule           String   @default("1,3,7")   // Days to retry (comma-separated)
+  notifyOnFailure         Boolean  @default(true)
+  notifyCustomerOnFailure Boolean  @default(true)
+  sendSMSOnFailure        Boolean  @default(true)
+  failureSMSTemplate      String?  @default("Dear {customerName}, your payment of GHS {amount} failed due to insufficient funds. Please ensure you have enough balance for the next retry.")
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+}
+
+model NotificationLog {
+  id              String   @id @default(uuid())
+  customerId      String
+  customer        Customer @relation(fields: [customerId], references: [id])
+  contractId      String?
+  installmentId   String?
+  type            String   // SMS, EMAIL
+  status          String   // SENT, FAILED, PENDING
+  message         String
+  recipient       String   // Phone number or email
+  errorMessage    String?
+  sentAt          DateTime?
+  createdAt       DateTime @default(now())
+}
