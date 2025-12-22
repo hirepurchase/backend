@@ -69,4 +69,33 @@ router.get('/server-ip', async (req, res) => {
   }
 });
 
+// Test outbound IP by making request to webhook.site
+router.get('/test-outbound-ip', async (req, res) => {
+  try {
+    const axios = require('axios');
+    const webhookUrl = 'https://webhook.site/c92df202-4bb7-475a-8be3-bc208137339e';
+
+    console.log('Making test request to webhook.site to verify outbound IP...');
+
+    await axios.post(webhookUrl, {
+      message: 'Test from DigitalOcean server',
+      timestamp: new Date().toISOString(),
+      purpose: 'Verify outbound IP address for Hubtel whitelisting'
+    });
+
+    res.json({
+      success: true,
+      message: 'Request sent to webhook.site',
+      instruction: 'Check https://webhook.site/#!/c92df202-4bb7-475a-8be3-bc208137339e to see the source IP address',
+      note: 'The IP shown in webhook.site is the exact IP that Hubtel will see'
+    });
+  } catch (error: any) {
+    console.error('Test outbound IP error:', error);
+    res.status(500).json({
+      error: 'Failed to test outbound IP',
+      details: error.message
+    });
+  }
+});
+
 export default router;
