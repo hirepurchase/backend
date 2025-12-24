@@ -139,6 +139,8 @@ model HirePurchaseContract {
   paymentMethod       String?             // HUBTEL_REGULAR, HUBTEL_DIRECT_DEBIT, MANUAL, CASH
   mobileMoneyNetwork  String?             // MTN, VODAFONE, AIRTELTIGO
   mobileMoneyNumber   String?             // Phone number for auto-debit
+  hubtelPreapprovalId String?             // Link to HubtelPreapproval for direct debit
+  hubtelPreapproval   HubtelPreapproval?  @relation(fields: [hubtelPreapprovalId], references: [id])
   createdById         String
   createdBy           AdminUser           @relation("ContractCreatedBy", fields: [createdById], references: [id])
   installments        InstallmentSchedule[]
@@ -225,21 +227,22 @@ model Penalty {
 }
 
 model HubtelPreapproval {
-  id                    String   @id @default(uuid())
+  id                    String                  @id @default(uuid())
   customerId            String
-  customer              Customer @relation(fields: [customerId], references: [id])
+  customer              Customer                @relation(fields: [customerId], references: [id])
   customerMsisdn        String
-  channel               String   // mtn-gh-direct-debit, vodafone-gh-direct-debit
-  clientReferenceId     String   @unique
-  hubtelPreapprovalId   String?  @unique
-  verificationType      String?  // USSD, OTP
+  channel               String                  // mtn-gh-direct-debit, vodafone-gh-direct-debit
+  clientReferenceId     String                  @unique
+  hubtelPreapprovalId   String?                 @unique
+  verificationType      String?                 // USSD, OTP
   otpPrefix             String?
-  status                String   @default("PENDING") // PENDING, APPROVED, FAILED, EXPIRED, CANCELLED
+  status                String                  @default("PENDING") // PENDING, APPROVED, FAILED, EXPIRED, CANCELLED
   approvedAt            DateTime?
   expiresAt             DateTime?
-  metadata              String?  // JSON string for additional data
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  metadata              String?                 // JSON string for additional data
+  contracts             HirePurchaseContract[]  // Contracts using this preapproval
+  createdAt             DateTime                @default(now())
+  updatedAt             DateTime                @updatedAt
 
   @@index([customerId, customerMsisdn, channel])
 }

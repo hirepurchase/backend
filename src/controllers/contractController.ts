@@ -382,6 +382,7 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
             lastName: true,
           },
         },
+        hubtelPreapproval: true,
       },
     });
 
