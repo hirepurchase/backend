@@ -323,43 +323,17 @@ export default function HubtelTestPage() {
 
       {/* Important Notice */}
       <div className="mb-6 p-4 bg-yellow-50 border-l-4 border-yellow-400 rounded">
-        <div className="flex justify-between items-start">
-          <div className="flex">
-            <AlertCircle className="h-5 w-5 text-yellow-400 mr-3 flex-shrink-0 mt-0.5" />
-            <div>
-              <h3 className="font-semibold text-yellow-800 mb-1">Before Testing</h3>
-              <ul className="text-sm text-yellow-700 space-y-1">
-                <li>• Ensure your server IP is whitelisted by Hubtel</li>
-                <li>• Verify HUBTEL_POS_SALES_ID, HUBTEL_API_KEY, and HUBTEL_API_SECRET are set correctly</li>
-                <li>• Make sure the backend test endpoints are deployed</li>
-                <li>• Use real Ghana mobile numbers (0244..., 0554..., etc.)</li>
-              </ul>
-            </div>
+        <div className="flex">
+          <AlertCircle className="h-5 w-5 text-yellow-400 mr-3 flex-shrink-0 mt-0.5" />
+          <div>
+            <h3 className="font-semibold text-yellow-800 mb-1">Before Testing</h3>
+            <ul className="text-sm text-yellow-700 space-y-1">
+              <li>• Ensure your server IP is whitelisted by Hubtel</li>
+              <li>• Verify HUBTEL_POS_SALES_ID, HUBTEL_API_KEY, and HUBTEL_API_SECRET are set correctly</li>
+              <li>• Make sure the backend test endpoints are deployed</li>
+              <li>• Use real Ghana mobile numbers (0244..., 0554..., etc.)</li>
+            </ul>
           </div>
-          <Button
-            onClick={async () => {
-              try {
-                const response = await api.get("/hubtel-test/test-outbound-ip");
-                toast({
-                  title: "IP Test Sent",
-                  description: response.data.message,
-                });
-                console.log("IP Test Result:", response.data);
-                window.open("https://webhook.site/#!/c92df202-4bb7-475a-8be3-bc208137339e", "_blank");
-              } catch (error: any) {
-                toast({
-                  title: "Error",
-                  description: error.response?.data?.error || "Failed to test IP",
-                  variant: "destructive",
-                });
-              }
-            }}
-            variant="outline"
-            className="whitespace-nowrap"
-          >
-            <RefreshCw className="h-4 w-4 mr-2" />
-            Test Outbound IP
-          </Button>
         </div>
       </div>
 
