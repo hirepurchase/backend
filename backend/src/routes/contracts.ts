@@ -5,6 +5,7 @@ import {
   getContractById,
   getCustomerContracts,
   updateOverdueInstallments,
+  updateContract,
   cancelContract,
   transferOwnership,
   deleteContract,
@@ -24,6 +25,7 @@ router.post('/', authenticateAdmin, requirePermission('CREATE_CONTRACT'), contra
 router.get('/', authenticateAdmin, getAllContracts);
 router.get('/installments/pending', authenticateAdmin, getAllPendingInstallments);
 router.get('/admin/:id', authenticateAdmin, getContractById);
+router.put('/:id', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), updateContract);
 router.post('/update-overdue', authenticateAdmin, updateOverdueInstallments);
 router.post('/:id/reschedule', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), rescheduleInstallments);
 router.put('/:contractId/installments/:installmentId', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), editInstallment);
