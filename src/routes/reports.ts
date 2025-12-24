@@ -6,6 +6,7 @@ import {
   getInventoryReport,
   getDashboardStats,
   getPreapprovalsReport,
+  getIncomeReport,
 } from '../controllers/reportController';
 import { authenticateAdmin, requirePermission } from '../middleware/auth';
 
@@ -20,5 +21,6 @@ router.get('/payments', authenticateAdmin, requirePermission('VIEW_REPORTS'), ge
 router.get('/defaults', authenticateAdmin, requirePermission('VIEW_REPORTS'), getDefaultReport);
 router.get('/inventory', authenticateAdmin, requirePermission('VIEW_REPORTS'), getInventoryReport);
 router.get('/preapprovals', authenticateAdmin, requirePermission('VIEW_REPORTS'), getPreapprovalsReport);
+router.get('/income', authenticateAdmin, requirePermission('VIEW_REPORTS'), getIncomeReport);
 
 export default router;

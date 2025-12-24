@@ -476,3 +476,125 @@ export async function getPreapprovalsReport(req: AuthenticatedRequest, res: Resp
     res.status(500).json({ error: 'Failed to fetch preapprovals report' });
   }
 }
+
+// Income Report (Payments by Method)
+export async function getIncomeReport(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { startDate, endDate, paymentMethod, status } = req.query;
+
+    // Build where clause for filtering
+    const where: any = {
+      status: status ? (status as string) : { in: ['SUCCESS', 'PENDING', 'FAILED'] },
+    };
+
+    // Filter by date range
+    if (startDate || endDate) {
+      where.createdAt = {};
+      if (startDate) {
+        where.createdAt.gte = new Date(startDate as string);
+      }
+      if (endDate) {
+        const endDateTime = new Date(endDate as string);
+        endDateTime.setHours(23, 59, 59, 999);
+        where.createdAt.lte = endDateTime;
+      }
+    }
+
+    // Filter by payment method
+    if (paymentMethod && paymentMethod !== 'ALL') {
+      where.paymentMethod = paymentMethod;
+    }
+
+    // Fetch payments
+    const payments = await prisma.paymentTransaction.findMany({
+      where,
+      include: {
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            membershipId: true,
+            phone: true,
+          },
+        },
+        contract: {
+          select: {
+            id: true,
+            contractNumber: true,
+            totalPrice: true,
+            outstandingBalance: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    // Calculate statistics
+    const successfulPayments = payments.filter(p => p.status === 'SUCCESS');
+    const totalIncome = successfulPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+
+    // Group by payment method
+    const byPaymentMethod: any = {
+      HUBTEL_DIRECT_DEBIT: { count: 0, amount: 0 },
+      HUBTEL_MOMO: { count: 0, amount: 0 },
+      HUBTEL_REGULAR: { count: 0, amount: 0 },
+      CASH: { count: 0, amount: 0 },
+      BANK_TRANSFER: { count: 0, amount: 0 },
+      MOBILE_MONEY: { count: 0, amount: 0 },
+      OTHER: { count: 0, amount: 0 },
+    };
+
+    successfulPayments.forEach(payment => {
+      const method = payment.paymentMethod || 'OTHER';
+      if (byPaymentMethod[method]) {
+        byPaymentMethod[method].count++;
+        byPaymentMethod[method].amount += Number(payment.amount);
+      } else {
+        byPaymentMethod.OTHER.count++;
+        byPaymentMethod.OTHER.amount += Number(payment.amount);
+      }
+    });
+
+    // Group by status
+    const byStatus = {
+      SUCCESS: payments.filter(p => p.status === 'SUCCESS').length,
+      PENDING: payments.filter(p => p.status === 'PENDING').length,
+      FAILED: payments.filter(p => p.status === 'FAILED').length,
+    };
+
+    // Group by date (daily totals for last 30 days or date range)
+    const dailyTotals: any = {};
+    successfulPayments.forEach(payment => {
+      const date = new Date(payment.paymentDate || payment.createdAt).toISOString().split('T')[0];
+      if (!dailyTotals[date]) {
+        dailyTotals[date] = 0;
+      }
+      dailyTotals[date] += Number(payment.amount);
+    });
+
+    const stats = {
+      totalPayments: payments.length,
+      successfulPayments: successfulPayments.length,
+      pendingPayments: byStatus.PENDING,
+      failedPayments: byStatus.FAILED,
+      totalIncome,
+      averagePayment: successfulPayments.length > 0 ? totalIncome / successfulPayments.length : 0,
+      byPaymentMethod,
+      byStatus,
+      dailyTotals: Object.entries(dailyTotals)
+        .map(([date, amount]) => ({ date, amount }))
+        .sort((a, b) => a.date.localeCompare(b.date)),
+    };
+
+    res.json({
+      payments,
+      stats,
+    });
+  } catch (error) {
+    console.error('Get income report error:', error);
+    res.status(500).json({ error: 'Failed to fetch income report' });
+  }
+}

@@ -525,6 +525,9 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
 
     const contract = await prisma.hirePurchaseContract.findUnique({
       where: { id },
+      include: {
+        customer: true,
+      },
     });
 
     if (!contract) {
@@ -542,6 +545,10 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
     if (penaltyPercentage !== undefined) {
       updateData.penaltyPercentage = Number(penaltyPercentage);
     }
+
+    // Track if switching to Direct Debit
+    let switchingToDirectDebit = false;
+    let preapprovalDetails = null;
 
     if (paymentMethod !== undefined) {
       // Handle "NO_PREFERENCE" as null
@@ -562,6 +569,98 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
           }
           updateData.mobileMoneyNetwork = mobileMoneyNetwork.toUpperCase();
           updateData.mobileMoneyNumber = mobileMoneyNumber;
+
+          // Check if switching to Direct Debit
+          if (paymentMethod === 'HUBTEL_DIRECT_DEBIT' && contract.paymentMethod !== 'HUBTEL_DIRECT_DEBIT') {
+            switchingToDirectDebit = true;
+
+            // Validate network supports Direct Debit
+            const validDirectDebitNetworks = ['MTN', 'VODAFONE', 'TELECEL'];
+            if (!validDirectDebitNetworks.includes(mobileMoneyNetwork.toUpperCase())) {
+              res.status(400).json({
+                error: 'Direct Debit only supports MTN, VODAFONE, and TELECEL networks'
+              });
+              return;
+            }
+
+            // Check if customer already has an approved preapproval for this network
+            const { formatPhoneForHubtel, initiatePreapproval } = require('../services/hubtelService');
+            const formattedPhone = formatPhoneForHubtel(mobileMoneyNumber);
+
+            const existingPreapproval = await prisma.hubtelPreapproval.findFirst({
+              where: {
+                customerId: contract.customerId,
+                customerMsisdn: formattedPhone,
+                status: 'APPROVED',
+              },
+            });
+
+            if (existingPreapproval) {
+              // Link the existing preapproval to the contract
+              updateData.hubtelPreapprovalId = existingPreapproval.id;
+              preapprovalDetails = {
+                status: 'ALREADY_APPROVED',
+                preapprovalId: existingPreapproval.id,
+                message: 'Contract linked to existing approved preapproval',
+              };
+            } else {
+              // Initiate new preapproval
+              try {
+                const clientReferenceId = `PREAPPR-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
+
+                const preapprovalResponse = await initiatePreapproval({
+                  customerId: contract.customerId,
+                  customerPhone: mobileMoneyNumber,
+                  network: mobileMoneyNetwork.toUpperCase(),
+                  clientReferenceId,
+                });
+
+                preapprovalDetails = {
+                  status: 'INITIATED',
+                  clientReferenceId: preapprovalResponse.clientReferenceId,
+                  hubtelPreapprovalId: preapprovalResponse.hubtelPreapprovalId,
+                  verificationType: preapprovalResponse.verificationType,
+                  otpPrefix: preapprovalResponse.otpPrefix,
+                  message: preapprovalResponse.verificationType === 'USSD'
+                    ? 'Customer will receive USSD prompt on their phone'
+                    : 'Customer will receive OTP via SMS',
+                };
+
+                // Link the newly created preapproval to the contract
+                const newPreapproval = await prisma.hubtelPreapproval.findUnique({
+                  where: { clientReferenceId: preapprovalResponse.clientReferenceId },
+                });
+                if (newPreapproval) {
+                  updateData.hubtelPreapprovalId = newPreapproval.id;
+                }
+
+                // Create audit log for preapproval
+                await createAuditLog({
+                  userId: req.user!.id,
+                  action: 'INITIATE_PREAPPROVAL_ON_CONTRACT_AMENDMENT',
+                  entity: 'HubtelPreapproval',
+                  entityId: clientReferenceId,
+                  newValues: {
+                    contractId: id,
+                    customerId: contract.customerId,
+                    network: mobileMoneyNetwork.toUpperCase(),
+                    clientReferenceId,
+                    verificationType: preapprovalResponse.verificationType,
+                  },
+                  ipAddress: req.ip,
+                  userAgent: req.headers['user-agent'],
+                });
+              } catch (preapprovalError: any) {
+                console.error('Failed to initiate preapproval:', preapprovalError);
+                // Don't fail the contract update, just warn about preapproval failure
+                preapprovalDetails = {
+                  status: 'FAILED',
+                  message: `Contract updated but preapproval failed: ${preapprovalError.message}`,
+                  error: preapprovalError.message,
+                };
+              }
+            }
+          }
         } else {
           // Clear mobile money details if switching away from Hubtel
           updateData.mobileMoneyNetwork = null;
@@ -579,10 +678,35 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
       data: updateData,
     });
 
-    res.json({
+    // Create audit log
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'UPDATE_CONTRACT',
+      entity: 'HirePurchaseContract',
+      entityId: id,
+      oldValues: {
+        gracePeriodDays: contract.gracePeriodDays,
+        penaltyPercentage: contract.penaltyPercentage,
+        paymentMethod: contract.paymentMethod,
+        mobileMoneyNetwork: contract.mobileMoneyNetwork,
+        mobileMoneyNumber: contract.mobileMoneyNumber,
+      },
+      newValues: updateData,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    const response: any = {
       message: 'Contract updated successfully',
       contract: updatedContract,
-    });
+    };
+
+    // Include preapproval details if Direct Debit was initiated
+    if (switchingToDirectDebit && preapprovalDetails) {
+      response.preapproval = preapprovalDetails;
+    }
+
+    res.json(response);
   } catch (error) {
     console.error('Update contract error:', error);
     res.status(500).json({ error: 'Failed to update contract' });
