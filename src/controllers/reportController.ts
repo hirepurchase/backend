@@ -426,3 +426,53 @@ export async function getDashboardStats(req: AuthenticatedRequest, res: Response
     res.status(500).json({ error: 'Failed to fetch dashboard statistics' });
   }
 }
+
+// Preapprovals Report
+export async function getPreapprovalsReport(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const preapprovals = await prisma.hubtelPreapproval.findMany({
+      include: {
+        customer: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            membershipId: true,
+            phone: true,
+            email: true,
+          },
+        },
+        contracts: {
+          select: {
+            id: true,
+            contractNumber: true,
+            totalPrice: true,
+            outstandingBalance: true,
+            status: true,
+          },
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    // Calculate statistics
+    const stats = {
+      total: preapprovals.length,
+      approved: preapprovals.filter(p => p.status === 'APPROVED').length,
+      pending: preapprovals.filter(p => p.status === 'PENDING').length,
+      failed: preapprovals.filter(p => p.status === 'FAILED').length,
+      expired: preapprovals.filter(p => p.status === 'EXPIRED').length,
+      cancelled: preapprovals.filter(p => p.status === 'CANCELLED').length,
+    };
+
+    res.json({
+      preapprovals,
+      stats,
+    });
+  } catch (error) {
+    console.error('Get preapprovals report error:', error);
+    res.status(500).json({ error: 'Failed to fetch preapprovals report' });
+  }
+}

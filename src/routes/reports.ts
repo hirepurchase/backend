@@ -5,6 +5,7 @@ import {
   getDefaultReport,
   getInventoryReport,
   getDashboardStats,
+  getPreapprovalsReport,
 } from '../controllers/reportController';
 import { authenticateAdmin, requirePermission } from '../middleware/auth';
 
@@ -18,5 +19,6 @@ router.get('/sales', authenticateAdmin, requirePermission('VIEW_REPORTS'), getSa
 router.get('/payments', authenticateAdmin, requirePermission('VIEW_REPORTS'), getPaymentReport);
 router.get('/defaults', authenticateAdmin, requirePermission('VIEW_REPORTS'), getDefaultReport);
 router.get('/inventory', authenticateAdmin, requirePermission('VIEW_REPORTS'), getInventoryReport);
+router.get('/preapprovals', authenticateAdmin, requirePermission('VIEW_REPORTS'), getPreapprovalsReport);
 
 export default router;
