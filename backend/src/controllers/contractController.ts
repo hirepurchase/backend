@@ -516,6 +516,71 @@ export async function updateOverdueInstallments(req: AuthenticatedRequest, res: 
   }
 }
 
+// Update contract (Admin only)
+export async function updateContract(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const { gracePeriodDays, penaltyPercentage, paymentMethod, mobileMoneyNetwork, mobileMoneyNumber } = req.body;
+
+    const contract = await prisma.hirePurchaseContract.findUnique({
+      where: { id },
+    });
+
+    if (!contract) {
+      res.status(404).json({ error: 'Contract not found' });
+      return;
+    }
+
+    // Prepare update data
+    const updateData: any = {};
+
+    if (gracePeriodDays !== undefined) {
+      updateData.gracePeriodDays = Number(gracePeriodDays);
+    }
+
+    if (penaltyPercentage !== undefined) {
+      updateData.penaltyPercentage = Number(penaltyPercentage);
+    }
+
+    if (paymentMethod !== undefined) {
+      updateData.paymentMethod = paymentMethod;
+
+      // If switching to Hubtel, require network and number
+      if (paymentMethod === 'HUBTEL_MOMO' || paymentMethod === 'HUBTEL_DIRECT_DEBIT') {
+        if (!mobileMoneyNetwork || !mobileMoneyNumber) {
+          res.status(400).json({
+            error: 'Mobile money network and number are required for Hubtel payment method'
+          });
+          return;
+        }
+        updateData.mobileMoneyNetwork = mobileMoneyNetwork.toUpperCase();
+        updateData.mobileMoneyNumber = mobileMoneyNumber;
+      } else {
+        // Clear mobile money details if switching away from Hubtel
+        updateData.mobileMoneyNetwork = null;
+        updateData.mobileMoneyNumber = null;
+      }
+    } else if (mobileMoneyNetwork !== undefined || mobileMoneyNumber !== undefined) {
+      // Allow updating mobile money details independently
+      if (mobileMoneyNetwork) updateData.mobileMoneyNetwork = mobileMoneyNetwork.toUpperCase();
+      if (mobileMoneyNumber) updateData.mobileMoneyNumber = mobileMoneyNumber;
+    }
+
+    const updatedContract = await prisma.hirePurchaseContract.update({
+      where: { id },
+      data: updateData,
+    });
+
+    res.json({
+      message: 'Contract updated successfully',
+      contract: updatedContract,
+    });
+  } catch (error) {
+    console.error('Update contract error:', error);
+    res.status(500).json({ error: 'Failed to update contract' });
+  }
+}
+
 // Cancel contract (Admin only)
 export async function cancelContract(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {

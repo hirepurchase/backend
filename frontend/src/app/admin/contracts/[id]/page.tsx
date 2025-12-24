@@ -10,6 +10,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import api from '@/lib/api';
 import { formatCurrency, formatDate, getStatusColor } from '@/lib/utils';
 import { useToast } from '@/hooks/useToast';
@@ -34,6 +35,9 @@ export default function ContractDetailsPage() {
   const [editFormData, setEditFormData] = useState({
     gracePeriodDays: '',
     penaltyPercentage: '',
+    paymentMethod: '',
+    mobileMoneyNetwork: '',
+    mobileMoneyNumber: '',
   });
 
   useEffect(() => {
@@ -48,6 +52,9 @@ export default function ContractDetailsPage() {
       setEditFormData({
         gracePeriodDays: response.data.gracePeriodDays?.toString() || '0',
         penaltyPercentage: response.data.penaltyPercentage?.toString() || '0',
+        paymentMethod: response.data.paymentMethod || '',
+        mobileMoneyNetwork: response.data.mobileMoneyNetwork || '',
+        mobileMoneyNumber: response.data.mobileMoneyNumber || '',
       });
     } catch (error: any) {
       toast({
@@ -62,10 +69,29 @@ export default function ContractDetailsPage() {
 
   const handleAmendContract = async () => {
     try {
-      await api.put(`/contracts/${params.id}`, {
+      const updateData: any = {
         gracePeriodDays: Number(editFormData.gracePeriodDays),
         penaltyPercentage: Number(editFormData.penaltyPercentage),
-      });
+      };
+
+      if (editFormData.paymentMethod) {
+        updateData.paymentMethod = editFormData.paymentMethod;
+
+        if (editFormData.paymentMethod === 'HUBTEL_MOMO' || editFormData.paymentMethod === 'HUBTEL_DIRECT_DEBIT') {
+          if (!editFormData.mobileMoneyNetwork || !editFormData.mobileMoneyNumber) {
+            toast({
+              title: 'Error',
+              description: 'Mobile money network and number are required for Hubtel payment method',
+              variant: 'destructive',
+            });
+            return;
+          }
+          updateData.mobileMoneyNetwork = editFormData.mobileMoneyNetwork;
+          updateData.mobileMoneyNumber = editFormData.mobileMoneyNumber;
+        }
+      }
+
+      await api.put(`/contracts/${params.id}`, updateData);
 
       toast({
         title: 'Success',
@@ -431,6 +457,71 @@ export default function ContractDetailsPage() {
                 <p className="text-xs text-gray-500 mt-1">
                   Percentage penalty for late payments
                 </p>
+              </div>
+            </div>
+
+            <div className="mt-6">
+              <h3 className="text-lg font-semibold mb-4">Payment Method</h3>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div>
+                  <Label>Payment Method</Label>
+                  <Select
+                    value={editFormData.paymentMethod}
+                    onValueChange={(value) => setEditFormData({ ...editFormData, paymentMethod: value })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select payment method" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">No preference</SelectItem>
+                      <SelectItem value="HUBTEL_MOMO">Hubtel Mobile Money</SelectItem>
+                      <SelectItem value="HUBTEL_DIRECT_DEBIT">Hubtel Direct Debit</SelectItem>
+                      <SelectItem value="CASH">Cash</SelectItem>
+                      <SelectItem value="BANK_TRANSFER">Bank Transfer</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-gray-500 mt-1">
+                    Preferred payment collection method
+                  </p>
+                </div>
+
+                {(editFormData.paymentMethod === 'HUBTEL_MOMO' || editFormData.paymentMethod === 'HUBTEL_DIRECT_DEBIT') && (
+                  <>
+                    <div>
+                      <Label>Mobile Money Network</Label>
+                      <Select
+                        value={editFormData.mobileMoneyNetwork}
+                        onValueChange={(value) => setEditFormData({ ...editFormData, mobileMoneyNetwork: value })}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select network" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="MTN">MTN</SelectItem>
+                          <SelectItem value="VODAFONE">Vodafone</SelectItem>
+                          <SelectItem value="TELECEL">Telecel</SelectItem>
+                          <SelectItem value="AIRTELTIGO">AirtelTigo</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-gray-500 mt-1">
+                        Customer mobile money provider
+                      </p>
+                    </div>
+
+                    <div>
+                      <Label>Mobile Money Number</Label>
+                      <Input
+                        type="text"
+                        value={editFormData.mobileMoneyNumber}
+                        onChange={(e) => setEditFormData({ ...editFormData, mobileMoneyNumber: e.target.value })}
+                        placeholder="e.g., 0244123456"
+                      />
+                      <p className="text-xs text-gray-500 mt-1">
+                        Customer mobile money number
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
             <div className="flex gap-4 mt-6">
