@@ -1,0 +1,45 @@
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment variables (IMPORTANT: Never commit .env files)
+.env
+.env.local
+.env.development
+.env.test
+.env.*.local
+
+# Build output (dist will be built on server)
+dist/
+build/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Uploads (user files - these should be on server only)
+uploads/*
+!uploads/.gitkeep
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Prisma generated files (will be generated on server)
+/generated/prisma
+
+# Temporary files
+tmp/
+temp/
+*.tmp
