@@ -543,22 +543,29 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
     }
 
     if (paymentMethod !== undefined) {
-      updateData.paymentMethod = paymentMethod;
-
-      // If switching to Hubtel, require network and number
-      if (paymentMethod === 'HUBTEL_MOMO' || paymentMethod === 'HUBTEL_DIRECT_DEBIT') {
-        if (!mobileMoneyNetwork || !mobileMoneyNumber) {
-          res.status(400).json({
-            error: 'Mobile money network and number are required for Hubtel payment method'
-          });
-          return;
-        }
-        updateData.mobileMoneyNetwork = mobileMoneyNetwork.toUpperCase();
-        updateData.mobileMoneyNumber = mobileMoneyNumber;
-      } else {
-        // Clear mobile money details if switching away from Hubtel
+      // Handle "NO_PREFERENCE" as null
+      if (paymentMethod === 'NO_PREFERENCE') {
+        updateData.paymentMethod = null;
         updateData.mobileMoneyNetwork = null;
         updateData.mobileMoneyNumber = null;
+      } else {
+        updateData.paymentMethod = paymentMethod;
+
+        // If switching to Hubtel, require network and number
+        if (paymentMethod === 'HUBTEL_MOMO' || paymentMethod === 'HUBTEL_DIRECT_DEBIT') {
+          if (!mobileMoneyNetwork || !mobileMoneyNumber) {
+            res.status(400).json({
+              error: 'Mobile money network and number are required for Hubtel payment method'
+            });
+            return;
+          }
+          updateData.mobileMoneyNetwork = mobileMoneyNetwork.toUpperCase();
+          updateData.mobileMoneyNumber = mobileMoneyNumber;
+        } else {
+          // Clear mobile money details if switching away from Hubtel
+          updateData.mobileMoneyNetwork = null;
+          updateData.mobileMoneyNumber = null;
+        }
       }
     } else if (mobileMoneyNetwork !== undefined || mobileMoneyNumber !== undefined) {
       // Allow updating mobile money details independently
