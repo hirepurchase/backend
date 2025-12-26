@@ -79,6 +79,52 @@ export async function adminLogin(req: Request, res: Response): Promise<void> {
   }
 }
 
+// Verify Membership ID (check if it exists and is not activated)
+export async function verifyMembershipId(req: Request, res: Response): Promise<void> {
+  try {
+    const { membershipId } = req.body;
+
+    if (!membershipId) {
+      res.status(400).json({ error: 'Membership ID is required' });
+      return;
+    }
+
+    const customer = await prisma.customer.findUnique({
+      where: { membershipId },
+      select: {
+        id: true,
+        membershipId: true,
+        firstName: true,
+        lastName: true,
+        isActivated: true,
+      },
+    });
+
+    if (!customer) {
+      res.status(404).json({ error: 'Invalid membership ID. Please check and try again.' });
+      return;
+    }
+
+    if (customer.isActivated) {
+      res.status(400).json({ error: 'This account has already been activated. Please login instead.' });
+      return;
+    }
+
+    // Return success with customer info (but not sensitive data)
+    res.json({
+      valid: true,
+      customer: {
+        membershipId: customer.membershipId,
+        firstName: customer.firstName,
+        lastName: customer.lastName,
+      },
+    });
+  } catch (error) {
+    console.error('Verify membership ID error:', error);
+    res.status(500).json({ error: 'Failed to verify membership ID' });
+  }
+}
+
 // Customer Activation (first-time setup)
 export async function activateCustomerAccount(req: Request, res: Response): Promise<void> {
   try {

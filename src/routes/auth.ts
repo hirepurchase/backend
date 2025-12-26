@@ -2,6 +2,7 @@ import { Router } from 'express';
 import {
   adminLogin,
   customerLogin,
+  verifyMembershipId,
   activateCustomerAccount,
   getCurrentAdmin,
   getCurrentCustomer,
@@ -17,6 +18,7 @@ router.get('/admin/me', authenticateAdmin, getCurrentAdmin);
 
 // Customer authentication
 router.post('/customer/login', customerLogin);
+router.post('/customer/verify-membership', verifyMembershipId);
 router.post('/customer/activate', activateCustomerAccount);
 router.get('/customer/me', authenticateCustomer, getCurrentCustomer);
 router.put('/customer/me', authenticateCustomer, updateOwnProfile);
