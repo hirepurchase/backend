@@ -465,10 +465,13 @@ export async function addBulkInventoryItems(req: AuthenticatedRequest, res: Resp
 export async function updateInventoryItem(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { id } = req.params;
-    const { lockStatus, registeredUnder } = req.body;
+    const { productId, lockStatus, registeredUnder } = req.body;
 
     const existingItem = await prisma.inventoryItem.findUnique({
       where: { id },
+      include: {
+        product: true,
+      },
     });
 
     if (!existingItem) {
@@ -476,14 +479,31 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
       return;
     }
 
+    // If productId is being changed, validate the new product exists
+    if (productId && productId !== existingItem.productId) {
+      const newProduct = await prisma.product.findUnique({
+        where: { id: productId },
+      });
+
+      if (!newProduct) {
+        res.status(404).json({ error: 'New product not found' });
+        return;
+      }
+    }
+
     const updatedItem = await prisma.inventoryItem.update({
       where: { id },
       data: {
+        productId: productId !== undefined ? productId : existingItem.productId,
         lockStatus: lockStatus !== undefined ? lockStatus : existingItem.lockStatus,
         registeredUnder: registeredUnder !== undefined ? registeredUnder : existingItem.registeredUnder,
       },
       include: {
-        product: true,
+        product: {
+          include: {
+            category: true,
+          },
+        },
       },
     });
 
@@ -492,8 +512,12 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
       action: 'UPDATE_INVENTORY_ITEM',
       entity: 'InventoryItem',
       entityId: updatedItem.id,
-      oldValues: { lockStatus: existingItem.lockStatus, registeredUnder: existingItem.registeredUnder },
-      newValues: { lockStatus, registeredUnder },
+      oldValues: {
+        productId: existingItem.productId,
+        lockStatus: existingItem.lockStatus,
+        registeredUnder: existingItem.registeredUnder
+      },
+      newValues: { productId, lockStatus, registeredUnder },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
