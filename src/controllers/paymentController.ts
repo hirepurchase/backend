@@ -364,8 +364,17 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
     }
 
     // Update contract totals
-    const newTotalPaid = contract.totalPaid + payment.amount;
-    const newOutstandingBalance = contract.outstandingBalance - payment.amount;
+    // CORRECTED LOGIC: totalPaid = deposit + sum of all successful payments
+    const allSuccessfulPayments = await tx.paymentTransaction.findMany({
+      where: {
+        contractId: contract.id,
+        status: 'SUCCESS',
+      },
+    });
+
+    const paymentsSum = allSuccessfulPayments.reduce((sum, p) => sum + p.amount, 0);
+    const newTotalPaid = contract.depositAmount + paymentsSum;
+    const newOutstandingBalance = contract.totalPrice - newTotalPaid;
 
     const contractUpdate: Record<string, unknown> = {
       totalPaid: newTotalPaid,
