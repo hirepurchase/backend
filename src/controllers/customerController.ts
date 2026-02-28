@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import bcrypt from 'bcryptjs';
+import { randomUUID } from 'crypto';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendWelcomeNotification } from '../services/notificationService';
@@ -70,6 +71,7 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
 
     const customer = await prisma.customer.create({
       data: {
+        id_uuid: randomUUID(),
         membershipId,
         firstName: firstName.toUpperCase(),
         lastName: lastName.toUpperCase(),

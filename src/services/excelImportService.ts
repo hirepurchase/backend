@@ -1,4 +1,5 @@
 import * as XLSX from "xlsx";
+import { randomUUID } from "crypto";
 import prisma from "../config/database";
 import bcrypt from "bcryptjs";
 import {
@@ -123,6 +124,7 @@ export async function importCustomers(
         // Create customer
         await prisma.customer.create({
           data: {
+            id_uuid: randomUUID(),
             membershipId,
             firstName: row.firstName.trim().toUpperCase(),
             lastName: row.lastName.trim().toUpperCase(),

@@ -101,7 +101,7 @@ export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Re
       data: {
         transactionRef,
         contractId,
-        customerId_uuid: contract.customer?.id_uuid,
+        customerId_uuid: contract.customerId_uuid,
         amount: paymentAmount,
         paymentMethod: 'MOBILE_MONEY',
         mobileMoneyProvider: paymentProvider,
@@ -449,7 +449,7 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
       return;
     }
 
-    if (!contract.customer?.id_uuid) {
+    if (!contract.customerId_uuid) {
       res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
       return;
     }
@@ -463,6 +463,10 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
       where: { id_uuid: contract.customerId_uuid },
       select: { id_uuid: true },
     });
+    if (!customer?.id_uuid) {
+      res.status(500).json({ error: 'Customer not found for contract. Please contact support.' });
+      return;
+    }
 
     const paymentAmount = Number(amount);
     if (paymentAmount > contract.outstandingBalance) {
@@ -482,7 +486,7 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
       data: {
         transactionRef,
         contractId,
-        customerId_uuid: customer?.id_uuid,
+        customerId_uuid: customer.id_uuid,
         amount: paymentAmount,
         paymentMethod: paymentMethod || 'CASH',
         externalRef: reference,
@@ -610,7 +614,7 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
       data: {
         transactionRef,
         contractId,
-        customerId_uuid: contract.customer?.id_uuid,
+        customerId_uuid: contract.customerId_uuid,
         amount: paymentAmount,
         paymentMethod: 'HUBTEL_MOMO',
         mobileMoneyProvider: network.toUpperCase(),
@@ -1063,7 +1067,7 @@ export async function initiateHubtelRegularPayment(req: AuthenticatedRequest, re
       data: {
         transactionRef,
         contractId,
-        customerId_uuid: contract.customer?.id_uuid,
+        customerId_uuid: contract.customerId_uuid,
         amount: paymentAmount,
         paymentMethod: 'HUBTEL_REGULAR',
         mobileMoneyProvider: network.toUpperCase(),
@@ -1154,7 +1158,7 @@ export async function initiateDirectDebitPayment(req: AuthenticatedRequest, res:
     // Check if customer has approved preapproval
     const preapproval = await prisma.hubtelPreapproval.findFirst({
       where: {
-        customerId_uuid: contract.customer?.id_uuid,
+        customerId_uuid: contract.customerId_uuid,
         customerMsisdn: formatPhoneForHubtel(contract.mobileMoneyNumber),
         status: 'APPROVED',
       },

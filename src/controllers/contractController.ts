@@ -1333,8 +1333,7 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
       data: {
         transactionRef,
         contractId,
-        customerId: contract.customerId_uuid,
-        customerId_uuid: customer?.id_uuid,
+        customerId_uuid: customer.id_uuid,
         amount: paymentAmount,
         paymentMethod: paymentMethod || 'CASH',
         externalRef: reference,
