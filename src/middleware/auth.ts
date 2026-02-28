@@ -104,9 +104,13 @@ export async function authenticateCustomer(
 
     const customerPayload = verified.payload as CustomerPayload;
 
+    const where = customerPayload.legacyId
+      ? { id_uuid: customerPayload.id }
+      : { id: customerPayload.id };
+
     // Verify customer still exists and is activated
-    const customer = await prisma.customer.findUnique({
-      where: { id: customerPayload.id },
+    const customer = await prisma.customer.findFirst({
+      where,
     });
 
     if (!customer || !customer.isActivated) {
@@ -115,7 +119,8 @@ export async function authenticateCustomer(
     }
 
     req.user = {
-      id: customer.id,
+      id: customer.id_uuid || customer.id,
+      legacyId: customer.id,
       membershipId: customer.membershipId,
       email: customer.email,
     };
@@ -176,8 +181,11 @@ export async function authenticateAny(
       req.userType = 'admin';
     } else {
       const customerPayload = verified.payload as CustomerPayload;
-      const customer = await prisma.customer.findUnique({
-        where: { id: customerPayload.id },
+      const where = customerPayload.legacyId
+        ? { id_uuid: customerPayload.id }
+        : { id: customerPayload.id };
+      const customer = await prisma.customer.findFirst({
+        where,
       });
 
       if (!customer || !customer.isActivated) {
@@ -186,7 +194,8 @@ export async function authenticateAny(
       }
 
       req.user = {
-        id: customer.id,
+        id: customer.id_uuid || customer.id,
+        legacyId: customer.id,
         membershipId: customer.membershipId,
         email: customer.email,
       };

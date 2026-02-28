@@ -1,7 +1,12 @@
 import * as XLSX from "xlsx";
 import prisma from "../config/database";
 import bcrypt from "bcryptjs";
-import { generateMembershipId, generateContractNumber } from "../utils/helpers";
+import {
+  generateMembershipId,
+  generateContractNumber,
+  sanitizePhoneNumber,
+  validatePhoneNumber,
+} from "../utils/helpers";
 
 interface ImportResult {
   success: boolean;
@@ -81,9 +86,18 @@ export async function importCustomers(
           continue;
         }
 
+        const normalizedPhone = sanitizePhoneNumber(row.phone);
+        if (!validatePhoneNumber(normalizedPhone)) {
+          result.errors.push(
+            `Row ${i + 2}: Invalid phone number format (${row.phone})`
+          );
+          result.failed++;
+          continue;
+        }
+
         // Check if phone already exists
         const existingCustomer = await prisma.customer.findFirst({
-          where: { phone: row.phone },
+          where: { phone: normalizedPhone },
         });
 
         if (existingCustomer) {
@@ -112,7 +126,7 @@ export async function importCustomers(
             membershipId,
             firstName: row.firstName.trim().toUpperCase(),
             lastName: row.lastName.trim().toUpperCase(),
-            phone: row.phone.trim(),
+            phone: normalizedPhone,
             email: row.email ? row.email.trim().toLowerCase() : null,
             address: row.address || null,
             nationalId: row.nationalId || null,
@@ -371,7 +385,15 @@ export async function importContracts(
         }
 
         // Convert to strings and trim
-        const customerPhone = String(row.customerPhone).trim();
+        const rawCustomerPhone = String(row.customerPhone).trim();
+        const customerPhone = sanitizePhoneNumber(rawCustomerPhone);
+        if (!validatePhoneNumber(customerPhone)) {
+          result.errors.push(
+            `Row ${i + 2}: Invalid phone number format (${rawCustomerPhone})`
+          );
+          result.failed++;
+          continue;
+        }
         const productSerial = String(row.productSerial).trim();
         const paymentFrequency = String(row.paymentFrequency)
           .toUpperCase()
@@ -457,13 +479,21 @@ export async function importContracts(
             break;
         }
 
+        if (!customer.id_uuid) {
+          result.errors.push(
+            `Row ${i + 2}: Customer UUID missing for phone ${customerPhone}`
+          );
+          result.failed++;
+          continue;
+        }
+
         // Create contract in transaction
         await prisma.$transaction(async (tx) => {
           // Create contract
           const contract = await tx.hirePurchaseContract.create({
             data: {
               contractNumber,
-              customerId: customer.id,
+              customerId_uuid: customer.id_uuid,
               totalPrice,
               depositAmount,
               financeAmount,
@@ -485,7 +515,12 @@ export async function importContracts(
           });
 
           // Create installment schedule
-          const installmentSchedule = [];
+          const installmentSchedule: Array<{
+            contractId: string;
+            installmentNo: number;
+            dueDate: Date;
+            amount: number;
+          }> = [];
           let currentDate = new Date(startDate);
 
           for (let inst = 1; inst <= Number(row.totalInstallments); inst++) {

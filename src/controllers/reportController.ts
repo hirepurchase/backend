@@ -1,10 +1,29 @@
 import { Response } from 'express';
 import prisma from '../config/database';
 import { AuthenticatedRequest } from '../types';
+import { getCache, setCache } from '../services/cacheService';
+
+const REPORT_CACHE_TTL_SECONDS = Number(process.env.REPORT_CACHE_TTL_SECONDS || 90);
+
+function buildReportCacheKey(prefix: string, req: AuthenticatedRequest): string {
+  const query = req.query as Record<string, unknown>;
+  const queryString = Object.keys(query)
+    .sort()
+    .map((key) => `${key}:${String(query[key])}`)
+    .join('|');
+  return `${prefix}|${queryString || 'no-query'}`;
+}
 
 // Sales Report
 export async function getSalesReport(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const cacheKey = buildReportCacheKey('report:sales', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const { startDate, endDate, groupBy = 'day' } = req.query;
 
     const where: Record<string, unknown> = {};
@@ -96,7 +115,7 @@ export async function getSalesReport(req: AuthenticatedRequest, res: Response): 
       bySalesPerson[salesPersonId].value += c.totalPrice;
     });
 
-    res.json({
+    const payload = {
       summary,
       byCategory: Object.entries(byCategory).map(([name, data]) => ({
         category: name,
@@ -104,7 +123,10 @@ export async function getSalesReport(req: AuthenticatedRequest, res: Response): 
       })),
       bySalesPerson: Object.values(bySalesPerson),
       contracts: contracts.slice(0, 100), // Limit detailed records
-    });
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
   } catch (error) {
     console.error('Get sales report error:', error);
     res.status(500).json({ error: 'Failed to generate sales report' });
@@ -114,6 +136,13 @@ export async function getSalesReport(req: AuthenticatedRequest, res: Response): 
 // Payment Report
 export async function getPaymentReport(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const cacheKey = buildReportCacheKey('report:payments', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const { startDate, endDate, status } = req.query;
 
     const where: Record<string, unknown> = {};
@@ -166,10 +195,13 @@ export async function getPaymentReport(req: AuthenticatedRequest, res: Response)
       },
     };
 
-    res.json({
+    const payload = {
       summary,
       payments: payments.slice(0, 100),
-    });
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
   } catch (error) {
     console.error('Get payment report error:', error);
     res.status(500).json({ error: 'Failed to generate payment report' });
@@ -179,6 +211,13 @@ export async function getPaymentReport(req: AuthenticatedRequest, res: Response)
 // Default Report
 export async function getDefaultReport(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const cacheKey = buildReportCacheKey('report:defaults', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     // Get all active contracts with overdue installments
     const contracts = await prisma.hirePurchaseContract.findMany({
       where: {
@@ -265,10 +304,13 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
       },
     };
 
-    res.json({
+    const payload = {
       summary,
       defaulters,
-    });
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
   } catch (error) {
     console.error('Get default report error:', error);
     res.status(500).json({ error: 'Failed to generate default report' });
@@ -278,6 +320,13 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
 // Inventory Report
 export async function getInventoryReport(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const cacheKey = buildReportCacheKey('report:inventory', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const { categoryId, status } = req.query;
 
     const where: Record<string, unknown> = {};
@@ -325,10 +374,13 @@ export async function getInventoryReport(req: AuthenticatedRequest, res: Respons
       outOfStock: inventory.filter(i => i.inventory.available === 0 && i.product.isActive),
     };
 
-    res.json({
+    const payload = {
       summary,
       inventory,
-    });
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
   } catch (error) {
     console.error('Get inventory report error:', error);
     res.status(500).json({ error: 'Failed to generate inventory report' });
@@ -338,6 +390,13 @@ export async function getInventoryReport(req: AuthenticatedRequest, res: Respons
 // Dashboard Statistics
 export async function getDashboardStats(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const cacheKey = buildReportCacheKey('report:dashboard', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const today = new Date();
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     const startOfWeek = new Date(today);
@@ -398,7 +457,7 @@ export async function getDashboardStats(req: AuthenticatedRequest, res: Response
       }),
     ]);
 
-    res.json({
+    const payload = {
       customers: {
         total: totalCustomers,
       },
@@ -420,7 +479,10 @@ export async function getDashboardStats(req: AuthenticatedRequest, res: Response
         overdueInstallments,
       },
       recentContracts,
-    });
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
   } catch (error) {
     console.error('Get dashboard stats error:', error);
     res.status(500).json({ error: 'Failed to fetch dashboard statistics' });
@@ -430,6 +492,13 @@ export async function getDashboardStats(req: AuthenticatedRequest, res: Response
 // Preapprovals Report
 export async function getPreapprovalsReport(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const cacheKey = buildReportCacheKey('report:preapprovals', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const preapprovals = await prisma.hubtelPreapproval.findMany({
       include: {
         customer: {
@@ -467,10 +536,13 @@ export async function getPreapprovalsReport(req: AuthenticatedRequest, res: Resp
       cancelled: preapprovals.filter(p => p.status === 'CANCELLED').length,
     };
 
-    res.json({
+    const payload = {
       preapprovals,
       stats,
-    });
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
   } catch (error) {
     console.error('Get preapprovals report error:', error);
     res.status(500).json({ error: 'Failed to fetch preapprovals report' });
@@ -480,6 +552,13 @@ export async function getPreapprovalsReport(req: AuthenticatedRequest, res: Resp
 // Income Report (Payments by Method)
 export async function getIncomeReport(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const cacheKey = buildReportCacheKey('report:income', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const { startDate, endDate, paymentMethod, status } = req.query;
 
     // Build where clause for filtering
@@ -589,10 +668,13 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
         .sort((a, b) => a.date.localeCompare(b.date)),
     };
 
-    res.json({
+    const payload = {
       payments,
       stats,
-    });
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
   } catch (error) {
     console.error('Get income report error:', error);
     res.status(500).json({ error: 'Failed to fetch income report' });

@@ -145,7 +145,7 @@ export async function retryMultiplePayments(
       return;
     }
 
-    const results = [];
+    const results: Array<Record<string, any>> = [];
     let succeeded = 0;
     let failed = 0;
 

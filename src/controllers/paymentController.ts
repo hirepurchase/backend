@@ -19,7 +19,7 @@ import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber } from
 // Initiate payment (Customer)
 export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const customerId = req.user!.id;
+    const customerUuid = req.user!.id;
     const { contractId, amount, phoneNumber, provider } = req.body;
 
     // Validate required fields
@@ -61,7 +61,12 @@ export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Re
       return;
     }
 
-    if (contract.customerId !== customerId) {
+    if (!contract.customer?.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
+    if (contract.customerId_uuid !== customerUuid) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -96,7 +101,7 @@ export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Re
       data: {
         transactionRef,
         contractId,
-        customerId,
+        customerId_uuid: contract.customer?.id_uuid,
         amount: paymentAmount,
         paymentMethod: 'MOBILE_MONEY',
         mobileMoneyProvider: paymentProvider,
@@ -114,7 +119,7 @@ export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Re
       phoneNumber: sanitizedPhone,
       provider: paymentProvider as 'MTN' | 'VODAFONE' | 'AIRTELTIGO',
       contractId,
-      customerId,
+      customerId: customerUuid,
       reference: transactionRef,
     });
 
@@ -192,7 +197,7 @@ export async function getPaymentStatus(req: AuthenticatedRequest, res: Response)
     }
 
     // Check ownership for customers
-    if (req.userType === 'customer' && payment.customerId !== req.user!.id) {
+    if (req.userType === 'customer' && payment.customerId_uuid !== req.user!.id) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -408,7 +413,7 @@ export async function getContractPayments(req: AuthenticatedRequest, res: Respon
     }
 
     // Check ownership for customers
-    if (req.userType === 'customer' && contract.customerId !== req.user!.id) {
+    if (req.userType === 'customer' && contract.customerId_uuid !== req.user!.id) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -444,10 +449,20 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
       return;
     }
 
+    if (!contract.customer?.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
     if (contract.status !== 'ACTIVE') {
       res.status(400).json({ error: 'Contract is not active' });
       return;
     }
+
+    const customer = await prisma.customer.findUnique({
+      where: { id_uuid: contract.customerId_uuid },
+      select: { id_uuid: true },
+    });
 
     const paymentAmount = Number(amount);
     if (paymentAmount > contract.outstandingBalance) {
@@ -467,7 +482,7 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
       data: {
         transactionRef,
         contractId,
-        customerId: contract.customerId,
+        customerId_uuid: customer?.id_uuid,
         amount: paymentAmount,
         paymentMethod: paymentMethod || 'CASH',
         externalRef: reference,
@@ -513,7 +528,7 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
 // Initiate Hubtel payment (Customer)
 export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const customerId = req.user!.id;
+    const customerUuid = req.user!.id;
     const { contractId, amount, phoneNumber, network } = req.body;
 
     // Validate required fields
@@ -555,7 +570,12 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
       return;
     }
 
-    if (contract.customerId !== customerId) {
+    if (!contract.customer?.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
+    if (contract.customerId_uuid !== customerUuid) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -590,7 +610,7 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
       data: {
         transactionRef,
         contractId,
-        customerId,
+        customerId_uuid: contract.customer?.id_uuid,
         amount: paymentAmount,
         paymentMethod: 'HUBTEL_MOMO',
         mobileMoneyProvider: network.toUpperCase(),
@@ -654,7 +674,7 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
         contract: {
           select: {
             contractNumber: true,
-            customerId: true,
+            customerId_uuid: true,
           },
         },
       },
@@ -666,7 +686,7 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
     }
 
     // Check if user has access
-    if (req.userType === 'customer' && payment.contract.customerId !== req.user!.id) {
+    if (req.userType === 'customer' && payment.contract.customerId_uuid !== req.user!.id) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -759,16 +779,23 @@ export async function initiateDirectDebitPreapproval(req: AuthenticatedRequest, 
     }
 
     // Check if customer exists
-    const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+    const customer = await prisma.customer.findUnique({
+      where: { id_uuid: customerId },
+      select: { id_uuid: true },
+    });
     if (!customer) {
       res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+    if (!customer.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
       return;
     }
 
     // Check if already has an active preapproval for this network
     const existingPreapproval = await prisma.hubtelPreapproval.findFirst({
       where: {
-        customerId,
+        customerId_uuid: customer.id_uuid,
         customerMsisdn: formatPhoneForHubtel(phoneNumber),
         status: 'APPROVED',
       },
@@ -944,7 +971,7 @@ export async function getCustomerPreapprovals(req: AuthenticatedRequest, res: Re
     const { customerId } = req.params;
 
     const preapprovals = await prisma.hubtelPreapproval.findMany({
-      where: { customerId },
+      where: { customerId_uuid: customerId },
       orderBy: { createdAt: 'desc' },
     });
 
@@ -1000,8 +1027,13 @@ export async function initiateHubtelRegularPayment(req: AuthenticatedRequest, re
       return;
     }
 
+    if (!contract.customer?.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
     // Check ownership for customers
-    if (customerId && contract.customerId !== customerId) {
+    if (customerId && contract.customerId_uuid !== customerId) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -1031,7 +1063,7 @@ export async function initiateHubtelRegularPayment(req: AuthenticatedRequest, re
       data: {
         transactionRef,
         contractId,
-        customerId: contract.customerId,
+        customerId_uuid: contract.customer?.id_uuid,
         amount: paymentAmount,
         paymentMethod: 'HUBTEL_REGULAR',
         mobileMoneyProvider: network.toUpperCase(),
@@ -1122,7 +1154,7 @@ export async function initiateDirectDebitPayment(req: AuthenticatedRequest, res:
     // Check if customer has approved preapproval
     const preapproval = await prisma.hubtelPreapproval.findFirst({
       where: {
-        customerId: contract.customerId,
+        customerId_uuid: contract.customer?.id_uuid,
         customerMsisdn: formatPhoneForHubtel(contract.mobileMoneyNumber),
         status: 'APPROVED',
       },
@@ -1155,7 +1187,7 @@ export async function initiateDirectDebitPayment(req: AuthenticatedRequest, res:
       data: {
         transactionRef,
         contractId,
-        customerId: contract.customerId,
+        customerId_uuid: contract.customer?.id_uuid,
         amount: paymentAmount,
         paymentMethod: 'HUBTEL_DIRECT_DEBIT',
         mobileMoneyProvider: contract.mobileMoneyNetwork,

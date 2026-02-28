@@ -11,7 +11,10 @@
     "db:push": "prisma db push",
     "db:seed": "ts-node prisma/seed.ts",
     "db:studio": "prisma studio",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "customers:activate-from-contracts": "ts-node src/scripts/activateCustomersFromContracts.ts",
+    "customers:normalize-phones": "ts-node src/scripts/normalizeCustomerPhones.ts",
+    "customers:resolve-duplicate-phones": "ts-node src/scripts/resolveDuplicatePhones.ts"
   },
   "keywords": [
     "hirepurchase",

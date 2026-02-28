@@ -251,7 +251,7 @@ export async function retryPayment(paymentId: string): Promise<{
         customerLastName: payment.contract.customer.lastName,
         customerEmail: payment.contract.customer.email || undefined,
         customerPhone: payment.contract.customer.phone,
-        customerId: payment.contract.customer.id,
+        customerId: payment.contract.customer.id_uuid!,
         contractNumber: payment.contract.contractNumber,
         contractId: payment.contract.id,
         amount: payment.amount,
@@ -288,7 +288,7 @@ export async function retryAllEligiblePayments(): Promise<{
 }> {
   const payments = await getPaymentsForRetry();
 
-  const results = [];
+  const results: Array<Record<string, any>> = [];
   let succeeded = 0;
   let failed = 0;
 
@@ -333,7 +333,7 @@ export async function getFailedPayments(filters?: {
   }
 
   if (filters?.customerId) {
-    where.customerId = filters.customerId;
+    where.customerId_uuid = filters.customerId;
   }
 
   const [payments, total] = await Promise.all([

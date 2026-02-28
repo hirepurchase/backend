@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import { retryAllEligiblePayments } from './paymentRetryService';
+import { enqueueSingletonJob } from './backgroundJobService';
 
 // Schedule payment retries to run every 6 hours
 export function startPaymentRetryScheduler() {
@@ -10,20 +11,26 @@ export function startPaymentRetryScheduler() {
   console.log(`📅 Cron schedule: ${cronSchedule} (every 6 hours)`);
 
   cron.schedule(cronSchedule, async () => {
-    try {
-      console.log('🔄 Running automatic payment retry process...');
-      const result = await retryAllEligiblePayments();
+    const enqueued = enqueueSingletonJob('payment-retry-auto', async () => {
+      try {
+        console.log('🔄 Running automatic payment retry process...');
+        const result = await retryAllEligiblePayments();
 
-      console.log('✅ Payment retry process completed');
-      console.log(`📊 Processed: ${result.processed}`);
-      console.log(`✅ Succeeded: ${result.succeeded}`);
-      console.log(`❌ Failed: ${result.failed}`);
+        console.log('✅ Payment retry process completed');
+        console.log(`📊 Processed: ${result.processed}`);
+        console.log(`✅ Succeeded: ${result.succeeded}`);
+        console.log(`❌ Failed: ${result.failed}`);
 
-      if (result.processed === 0) {
-        console.log('ℹ️  No payments eligible for retry at this time');
+        if (result.processed === 0) {
+          console.log('ℹ️  No payments eligible for retry at this time');
+        }
+      } catch (error) {
+        console.error('❌ Error in payment retry scheduler:', error);
       }
-    } catch (error) {
-      console.error('❌ Error in payment retry scheduler:', error);
+    });
+
+    if (!enqueued) {
+      console.log('⏭️  Skipping retry tick - previous retry job still running');
     }
   });
 

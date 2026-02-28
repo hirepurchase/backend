@@ -1,6 +1,7 @@
 import { sendPaymentReminder, sendOverdueNotification } from './notificationService';
 import prisma from '../config/database';
 import cron from 'node-cron';
+import { enqueueSingletonJob } from './backgroundJobService';
 
 // Check for upcoming payments and send reminders
 export async function checkUpcomingPayments(): Promise<void> {
@@ -57,7 +58,7 @@ export async function checkUpcomingPayments(): Promise<void> {
 
       const existingReminder = await prisma.notificationLog.findFirst({
         where: {
-          customerId: customer.id,
+          customerId_uuid: customer.id_uuid!,
           installmentId: installment.id,
           type: 'SMS',
           createdAt: {
@@ -80,7 +81,7 @@ export async function checkUpcomingPayments(): Promise<void> {
         customerLastName: customer.lastName,
         customerEmail: customer.email || undefined,
         customerPhone: customer.phone,
-        customerId: customer.id,
+        customerId: customer.id_uuid!,
         contractNumber: installment.contract.contractNumber,
         contractId: installment.contract.id,
         installmentId: installment.id,
@@ -157,7 +158,7 @@ export async function checkOverduePayments(): Promise<void> {
 
       const lastReminder = await prisma.notificationLog.findFirst({
         where: {
-          customerId: customer.id,
+          customerId_uuid: customer.id_uuid!,
           installmentId: installment.id,
           type: 'SMS',
           message: {
@@ -204,7 +205,7 @@ export async function checkOverduePayments(): Promise<void> {
         customerLastName: customer.lastName,
         customerEmail: customer.email || undefined,
         customerPhone: customer.phone,
-        customerId: customer.id,
+        customerId: customer.id_uuid!,
         contractNumber: installment.contract.contractNumber,
         contractId: installment.contract.id,
         installmentId: installment.id,
@@ -231,15 +232,25 @@ export function initializeNotificationScheduler(): void {
   console.log('Initializing notification scheduler...');
 
   // Run upcoming payment check every day at 9:00 AM
-  cron.schedule('0 9 * * *', async () => {
-    console.log('Running scheduled upcoming payment check');
-    await checkUpcomingPayments();
+  cron.schedule('0 9 * * *', () => {
+    const enqueued = enqueueSingletonJob('notifications-upcoming', async () => {
+      console.log('Running scheduled upcoming payment check');
+      await checkUpcomingPayments();
+    });
+    if (!enqueued) {
+      console.log('Skipping upcoming payment check - previous job still running');
+    }
   });
 
   // Run overdue payment check every day at 10:00 AM
-  cron.schedule('0 10 * * *', async () => {
-    console.log('Running scheduled overdue payment check');
-    await checkOverduePayments();
+  cron.schedule('0 10 * * *', () => {
+    const enqueued = enqueueSingletonJob('notifications-overdue', async () => {
+      console.log('Running scheduled overdue payment check');
+      await checkOverduePayments();
+    });
+    if (!enqueued) {
+      console.log('Skipping overdue payment check - previous job still running');
+    }
   });
 
   console.log('Notification scheduler initialized');

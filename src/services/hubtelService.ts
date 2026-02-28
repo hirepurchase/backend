@@ -224,10 +224,19 @@ export async function initiatePreapproval(params: {
 
     console.log('Hubtel Preapproval Response:', response.data);
 
+    const customer = await prisma.customer.findUnique({
+      where: { id_uuid: params.customerId },
+      select: { id_uuid: true },
+    });
+
+    if (!customer?.id_uuid) {
+      throw new Error('Customer UUID missing. Please contact support.');
+    }
+
     // Store preapproval in database
     await prisma.hubtelPreapproval.create({
       data: {
-        customerId: params.customerId,
+        customerId_uuid: customer.id_uuid,
         customerMsisdn: formattedPhone,
         channel: channel,
         clientReferenceId: params.clientReferenceId,
@@ -557,7 +566,7 @@ export async function processHubtelCallback(callbackData: HubtelCallback): Promi
             customerLastName: contract.customer.lastName,
             customerEmail: contract.customer.email || undefined,
             customerPhone: contract.customer.phone,
-            customerId: contract.customer.id,
+            customerId: contract.customer.id_uuid!,
             contractNumber: contract.contractNumber,
             contractId: contract.id,
             amount: payment.amount,

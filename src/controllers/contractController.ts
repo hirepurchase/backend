@@ -3,12 +3,14 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendContractConfirmation } from '../services/notificationService';
 import { AuthenticatedRequest, PaymentFrequency } from '../types';
+import bcrypt from 'bcryptjs';
 import {
   generateContractNumber,
   calculateInstallmentSchedule,
   calculateEndDate,
   isOverdue,
   calculatePenalty,
+  sanitizePhoneNumber,
 } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
 
@@ -75,9 +77,15 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     }
 
     // Validate customer exists
-    const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+    const customer = await prisma.customer.findUnique({
+      where: { id_uuid: customerId },
+    });
     if (!customer) {
       res.status(400).json({ error: 'Customer not found' });
+      return;
+    }
+    if (!customer.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
       return;
     }
 
@@ -143,13 +151,17 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       }
     }
 
+    const normalizedPhone = sanitizePhoneNumber(customer.phone);
+    const shouldSetPassword = !customer.password;
+    const hashedPhonePassword = shouldSetPassword ? await bcrypt.hash(normalizedPhone, 12) : null;
+
     // Create contract and update inventory in a transaction
     const contract = await prisma.$transaction(async (tx) => {
       // Create the contract
       const newContract = await tx.hirePurchaseContract.create({
         data: {
           contractNumber,
-          customerId,
+          customerId_uuid: customer.id_uuid,
           totalPrice: Number(totalPrice),
           depositAmount: Number(depositAmount),
           financeAmount,
@@ -188,6 +200,17 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
           contractId: newContract.id,
           lockStatus: lockStatus || undefined,
           registeredUnder: registeredUnder || undefined,
+        },
+      });
+
+      // Activate customer account on first contract creation
+      await tx.customer.update({
+        where: { id_uuid: customerId },
+        data: {
+          isActivated: true,
+          activatedAt: customer.activatedAt || new Date(),
+          ...(shouldSetPassword ? { password: hashedPhonePassword } : {}),
+          phone: normalizedPhone,
         },
       });
 
@@ -286,7 +309,7 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
     const where: Record<string, unknown> = {};
 
     if (status) where.status = status;
-    if (customerId) where.customerId = customerId;
+    if (customerId) where.customerId_uuid = customerId;
 
     if (search) {
       where.OR = [
@@ -305,6 +328,7 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
           customer: {
             select: {
               id: true,
+              id_uuid: true,
               membershipId: true,
               firstName: true,
               lastName: true,
@@ -392,7 +416,7 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
     }
 
     // Check ownership for customers
-    if (req.userType === 'customer' && contract.customerId !== req.user!.id) {
+    if (req.userType === 'customer' && contract.customerId_uuid !== req.user!.id) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -408,9 +432,18 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
 export async function getCustomerContracts(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const customerId = req.user!.id;
+    const customer = await prisma.customer.findFirst({
+      where: { id_uuid: customerId },
+      select: { id: true },
+    });
+
+    if (!customer) {
+      res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
 
     const contracts = await prisma.hirePurchaseContract.findMany({
-      where: { customerId },
+      where: { customerId_uuid: customerId },
       include: {
         inventoryItem: {
           include: {
@@ -548,7 +581,7 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
 
     // Track if switching to Direct Debit
     let switchingToDirectDebit = false;
-    let preapprovalDetails = null;
+    let preapprovalDetails: null | Record<string, unknown> = null;
 
     if (paymentMethod !== undefined) {
       // Handle "NO_PREFERENCE" as null
@@ -589,7 +622,7 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
 
             const existingPreapproval = await prisma.hubtelPreapproval.findFirst({
               where: {
-                customerId: contract.customerId,
+                customerId_uuid: contract.customerId_uuid,
                 customerMsisdn: formattedPhone,
                 status: 'APPROVED',
               },
@@ -609,7 +642,7 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
                 const clientReferenceId = `PREAPPR-${Date.now()}-${Math.random().toString(36).substring(2, 8).toUpperCase()}`;
 
                 const preapprovalResponse = await initiatePreapproval({
-                  customerId: contract.customerId,
+                  customerId: contract.customerId_uuid,
                   customerPhone: mobileMoneyNumber,
                   network: mobileMoneyNetwork.toUpperCase(),
                   clientReferenceId,
@@ -642,7 +675,7 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
                   entityId: clientReferenceId,
                   newValues: {
                     contractId: id,
-                    customerId: contract.customerId,
+                    customerId: contract.customerId_uuid,
                     network: mobileMoneyNetwork.toUpperCase(),
                     clientReferenceId,
                     verificationType: preapprovalResponse.verificationType,
@@ -884,7 +917,7 @@ export async function deleteContract(req: AuthenticatedRequest, res: Response): 
       entityId: id,
       oldValues: {
         contractNumber: contract.contractNumber,
-        customerId: contract.customerId,
+        customerId: contract.customerId_uuid,
         totalPrice: contract.totalPrice,
       },
       ipAddress: req.ip,
@@ -1245,6 +1278,15 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
       return;
     }
 
+    const customer = await prisma.customer.findUnique({
+      where: { id_uuid: contract.customerId_uuid },
+      select: { id_uuid: true },
+    });
+    if (!customer?.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
     const installment = await prisma.installmentSchedule.findUnique({
       where: { id: installmentId },
     });
@@ -1291,7 +1333,8 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
       data: {
         transactionRef,
         contractId,
-        customerId: contract.customerId,
+        customerId: contract.customerId_uuid,
+        customerId_uuid: customer?.id_uuid,
         amount: paymentAmount,
         paymentMethod: paymentMethod || 'CASH',
         externalRef: reference,

@@ -4,7 +4,7 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendWelcomeNotification } from '../services/notificationService';
 import { AuthenticatedRequest, CustomerPayload } from '../types';
-import { generateMembershipId } from '../utils/helpers';
+import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
 
 // Create customer (Admin only)
@@ -14,6 +14,19 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
 
     if (!firstName || !lastName || !phone) {
       res.status(400).json({ error: 'First name, last name, and phone are required' });
+      return;
+    }
+
+    const normalizedPhone = sanitizePhoneNumber(phone);
+    if (!validatePhoneNumber(normalizedPhone)) {
+      res.status(400).json({ error: 'Invalid phone number format' });
+      return;
+    }
+
+    // Check if phone already exists
+    const existingPhone = await prisma.customer.findFirst({ where: { phone: normalizedPhone } });
+    if (existingPhone) {
+      res.status(400).json({ error: 'Phone number already registered' });
       return;
     }
 
@@ -60,7 +73,7 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
         membershipId,
         firstName: firstName.toUpperCase(),
         lastName: lastName.toUpperCase(),
-        phone,
+        phone: normalizedPhone,
         email: email || null,
         address,
         nationalId,
@@ -87,13 +100,14 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
       email: customer.email || undefined,
       phone: customer.phone,
       membershipId: customer.membershipId,
-      customerId: customer.id,
+      customerId: customer.id_uuid || customer.id,
     }).catch(error => {
       console.error('Failed to send welcome notification:', error);
     });
 
     res.status(201).json({
-      id: customer.id,
+      id: customer.id_uuid || customer.id,
+      legacyId: customer.id,
       membershipId: customer.membershipId,
       firstName: customer.firstName,
       lastName: customer.lastName,
@@ -198,7 +212,7 @@ export async function getCustomerById(req: AuthenticatedRequest, res: Response):
     const { id } = req.params;
 
     const customer = await prisma.customer.findUnique({
-      where: { id },
+      where: { id_uuid: id },
       include: {
         createdBy: {
           select: {
@@ -229,7 +243,11 @@ export async function getCustomerById(req: AuthenticatedRequest, res: Response):
       return;
     }
 
-    res.json(customer);
+    res.json({
+      ...customer,
+      id: customer.id_uuid || customer.id,
+      legacyId: customer.id,
+    });
   } catch (error) {
     console.error('Get customer error:', error);
     res.status(500).json({ error: 'Failed to fetch customer' });
@@ -263,7 +281,8 @@ export async function getCustomerByMembershipId(req: AuthenticatedRequest, res: 
     }
 
     res.json({
-      id: customer.id,
+      id: customer.id_uuid || customer.id,
+      legacyId: customer.id,
       membershipId: customer.membershipId,
       firstName: customer.firstName,
       lastName: customer.lastName,
@@ -295,7 +314,21 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
     const updateData: Record<string, unknown> = {};
     if (firstName) updateData.firstName = firstName.toUpperCase();
     if (lastName) updateData.lastName = lastName.toUpperCase();
-    if (phone) updateData.phone = phone;
+    if (phone) {
+      const normalizedPhone = sanitizePhoneNumber(phone);
+      if (!validatePhoneNumber(normalizedPhone)) {
+        res.status(400).json({ error: 'Invalid phone number format' });
+        return;
+      }
+      const existingPhone = await prisma.customer.findFirst({
+        where: { phone: normalizedPhone, NOT: { id } },
+      });
+      if (existingPhone) {
+        res.status(400).json({ error: 'Phone number already registered' });
+        return;
+      }
+      updateData.phone = normalizedPhone;
+    }
     if (address !== undefined) updateData.address = address;
     if (nationalId !== undefined) updateData.nationalId = nationalId;
     if (dateOfBirth !== undefined) updateData.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : null;
@@ -353,7 +386,7 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
 // Customer updates own profile
 export async function updateOwnProfile(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const customerId = req.user!.id;
+    const customerId = (req.user as CustomerPayload).legacyId || req.user!.id;
     const { email, phone, address } = req.body;
 
     const existingCustomer = await prisma.customer.findUnique({ where: { id: customerId } });
@@ -374,7 +407,21 @@ export async function updateOwnProfile(req: AuthenticatedRequest, res: Response)
 
     const updateData: Record<string, unknown> = {};
     if (email !== undefined) updateData.email = email ? email.toLowerCase() : null;
-    if (phone) updateData.phone = phone;
+    if (phone) {
+      const normalizedPhone = sanitizePhoneNumber(phone);
+      if (!validatePhoneNumber(normalizedPhone)) {
+        res.status(400).json({ error: 'Invalid phone number format' });
+        return;
+      }
+      const existingPhone = await prisma.customer.findFirst({
+        where: { phone: normalizedPhone, NOT: { id: customerId } },
+      });
+      if (existingPhone) {
+        res.status(400).json({ error: 'Phone number already registered' });
+        return;
+      }
+      updateData.phone = normalizedPhone;
+    }
     if (address !== undefined) updateData.address = address;
 
     const updatedCustomer = await prisma.customer.update({
@@ -415,7 +462,7 @@ export async function updateOwnProfile(req: AuthenticatedRequest, res: Response)
 // Customer changes own password
 export async function changeCustomerPassword(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const customerId = req.user!.id;
+    const customerId = (req.user as CustomerPayload).legacyId || req.user!.id;
     const { currentPassword, newPassword } = req.body;
 
     if (!currentPassword || !newPassword) {
@@ -525,12 +572,13 @@ export async function deleteCustomer(req: AuthenticatedRequest, res: Response): 
 // Customer gets own profile
 export async function getOwnProfile(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const customerId = req.user!.id;
+    const customerId = (req.user as CustomerPayload).legacyId || req.user!.id;
 
     const customer = await prisma.customer.findUnique({
       where: { id: customerId },
       select: {
         id: true,
+        id_uuid: true,
         membershipId: true,
         firstName: true,
         lastName: true,
@@ -562,7 +610,7 @@ export async function getCustomerPayments(req: AuthenticatedRequest, res: Respon
 
     const payments = await prisma.paymentTransaction.findMany({
       where: {
-        customerId,
+        customerId_uuid: customerId,
       },
       include: {
         contract: {
@@ -600,7 +648,7 @@ export async function getCustomerUpcomingInstallments(req: AuthenticatedRequest,
     const upcomingInstallments = await prisma.installmentSchedule.findMany({
       where: {
         contract: {
-          customerId,
+          customerId_uuid: customerId,
           status: 'ACTIVE',
         },
         status: {
@@ -662,7 +710,7 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
 
     // Get all contracts
     const contracts = await prisma.hirePurchaseContract.findMany({
-      where: { customerId: id },
+      where: { customerId_uuid: id },
       include: {
         inventoryItem: {
           include: {
@@ -712,7 +760,7 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
 
     // Get payment history
     const paymentHistory = await prisma.paymentTransaction.findMany({
-      where: { customerId: id },
+      where: { customerId_uuid: id },
       include: {
         contract: {
           select: {
@@ -736,7 +784,8 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
 
     res.json({
       customer: {
-        id: customer.id,
+        id: customer.id_uuid || customer.id,
+        legacyId: customer.id,
         membershipId: customer.membershipId,
         firstName: customer.firstName,
         lastName: customer.lastName,

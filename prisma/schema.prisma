@@ -8,6 +8,7 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 // ============= USER & ROLE MANAGEMENT =============
@@ -53,12 +54,13 @@ model AdminUser {
 
 model Customer {
   id                  String                @id @default(uuid())
+  id_uuid             String                @unique @db.Uuid
   membershipId        String                @unique // System-generated unique ID
   email               String?               @unique
   password            String?               // Set during account activation
   firstName           String
   lastName            String
-  phone               String
+  phone               String   @unique
   address             String?
   nationalId          String?
   dateOfBirth         DateTime?
@@ -71,6 +73,7 @@ model Customer {
   payments            PaymentTransaction[]
   notifications       NotificationLog[]
   hubtelPreapprovals  HubtelPreapproval[]
+  passwordResetOtps   PasswordResetOtp[]
   createdAt           DateTime              @default(now())
   updatedAt           DateTime              @updatedAt
 }
@@ -118,8 +121,8 @@ model InventoryItem {
 model HirePurchaseContract {
   id                  String               @id @default(uuid())
   contractNumber      String               @unique
-  customerId          String
-  customer            Customer             @relation(fields: [customerId], references: [id])
+  customerId_uuid     String               @db.Uuid
+  customer            Customer             @relation(fields: [customerId_uuid], references: [id_uuid])
   inventoryItem       InventoryItem?
   totalPrice          Float
   depositAmount       Float
@@ -148,6 +151,9 @@ model HirePurchaseContract {
   penalties           Penalty[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
+
+  @@index([status, createdAt])
+  @@index([customerId_uuid, status])
 }
 
 model InstallmentSchedule {
@@ -164,6 +170,8 @@ model InstallmentSchedule {
   updatedAt       DateTime             @updatedAt
 
   @@unique([contractId, installmentNo])
+  @@index([status, dueDate])
+  @@index([contractId, status, dueDate])
 }
 
 // ============= PAYMENTS =============
@@ -173,8 +181,8 @@ model PaymentTransaction {
   transactionRef      String               @unique
   contractId          String
   contract            HirePurchaseContract @relation(fields: [contractId], references: [id])
-  customerId          String
-  customer            Customer             @relation(fields: [customerId], references: [id])
+  customerId_uuid     String               @db.Uuid
+  customer            Customer             @relation(fields: [customerId_uuid], references: [id_uuid])
   amount              Float
   paymentMethod       String               @default("MOBILE_MONEY")
   mobileMoneyProvider String?              // MTN, VODAFONE, AIRTELTIGO
@@ -192,6 +200,11 @@ model PaymentTransaction {
   retries             PaymentRetry[]
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
+
+  @@index([status, createdAt])
+  @@index([status, nextRetryAt])
+  @@index([contractId, createdAt])
+  @@index([customerId_uuid, createdAt])
 }
 
 model PaymentRetry {
@@ -224,12 +237,14 @@ model Penalty {
   paidAt      DateTime?
   createdAt   DateTime             @default(now())
   updatedAt   DateTime             @updatedAt
+
+  @@index([contractId, isPaid])
 }
 
 model HubtelPreapproval {
   id                    String                  @id @default(uuid())
-  customerId            String
-  customer              Customer                @relation(fields: [customerId], references: [id])
+  customerId_uuid       String                  @db.Uuid
+  customer              Customer                @relation(fields: [customerId_uuid], references: [id_uuid])
   customerMsisdn        String
   channel               String                  // mtn-gh-direct-debit, vodafone-gh-direct-debit
   clientReferenceId     String                  @unique
@@ -244,7 +259,8 @@ model HubtelPreapproval {
   createdAt             DateTime                @default(now())
   updatedAt             DateTime                @updatedAt
 
-  @@index([customerId, customerMsisdn, channel])
+  @@index([customerId_uuid, customerMsisdn, channel])
+  @@index([status, createdAt])
 }
 
 // ============= AUDIT LOGGING =============
@@ -295,8 +311,8 @@ model RetrySettings {
 
 model NotificationLog {
   id              String   @id @default(uuid())
-  customerId      String
-  customer        Customer @relation(fields: [customerId], references: [id])
+  customerId_uuid String   @db.Uuid
+  customer        Customer @relation(fields: [customerId_uuid], references: [id_uuid])
   contractId      String?
   installmentId   String?
   type            String   // SMS, EMAIL
@@ -306,4 +322,25 @@ model NotificationLog {
   errorMessage    String?
   sentAt          DateTime?
   createdAt       DateTime @default(now())
+
+  @@index([customerId_uuid, installmentId, type, createdAt])
+  @@index([status, createdAt])
+}
+
+// ============= PASSWORD RESET (SMS OTP) =============
+
+model PasswordResetOtp {
+  id         String   @id @default(uuid())
+  customerId_uuid String  @db.Uuid
+  customer   Customer @relation(fields: [customerId_uuid], references: [id_uuid])
+  phone      String
+  codeHash   String
+  attempts   Int      @default(0)
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([phone, expiresAt])
+  @@index([customerId_uuid])
 }

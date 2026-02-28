@@ -1,0 +1,1 @@
+-- applied manually in Supabase (uuid relations and not-null)

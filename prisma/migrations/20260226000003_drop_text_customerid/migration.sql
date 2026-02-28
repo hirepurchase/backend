@@ -1,0 +1,1 @@
+-- applied manually in Supabase (drop text customerId columns)

@@ -9,6 +9,7 @@ export interface AdminUserPayload {
 
 export interface CustomerPayload {
   id: string;
+  legacyId?: string;
   membershipId: string;
   email: string | null;
 }

@@ -35,7 +35,7 @@ export async function downloadContractStatement(req: AuthenticatedRequest, res: 
     }
 
     // Check ownership for customers
-    if (req.userType === 'customer' && contract.customerId !== req.user!.id) {
+    if (req.userType === 'customer' && contract.customerId_uuid !== req.user!.id) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }

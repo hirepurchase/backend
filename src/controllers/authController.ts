@@ -1,9 +1,12 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import prisma from '../config/database';
 import { generateToken } from '../middleware/auth';
 import { createAuditLog } from '../services/auditService';
-import { AuthenticatedRequest } from '../types';
+import { AuthenticatedRequest, CustomerPayload } from '../types';
+import { sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
+import { sendSMS } from '../services/notificationService';
 
 // Admin Login
 export async function adminLogin(req: Request, res: Response): Promise<void> {
@@ -176,9 +179,15 @@ export async function activateCustomerAccount(req: Request, res: Response): Prom
       },
     });
 
+    if (!updatedCustomer.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
     const token = generateToken(
       {
-        id: updatedCustomer.id,
+        id: updatedCustomer.id_uuid,
+        legacyId: updatedCustomer.id,
         membershipId: updatedCustomer.membershipId,
         email: updatedCustomer.email,
       },
@@ -198,7 +207,8 @@ export async function activateCustomerAccount(req: Request, res: Response): Prom
       message: 'Account activated successfully',
       token,
       user: {
-        id: updatedCustomer.id,
+        id: updatedCustomer.id_uuid,
+        legacyId: updatedCustomer.id,
         membershipId: updatedCustomer.membershipId,
         email: updatedCustomer.email,
         firstName: updatedCustomer.firstName,
@@ -214,15 +224,21 @@ export async function activateCustomerAccount(req: Request, res: Response): Prom
 // Customer Login
 export async function customerLogin(req: Request, res: Response): Promise<void> {
   try {
-    const { email, password } = req.body;
+    const { phone, password } = req.body;
 
-    if (!email || !password) {
-      res.status(400).json({ error: 'Email and password are required' });
+    if (!phone || !password) {
+      res.status(400).json({ error: 'Phone number and password are required' });
       return;
     }
 
-    const customer = await prisma.customer.findUnique({
-      where: { email: email.toLowerCase() },
+    const normalizedPhone = sanitizePhoneNumber(phone);
+    if (!validatePhoneNumber(normalizedPhone)) {
+      res.status(400).json({ error: 'Invalid phone number format' });
+      return;
+    }
+
+    const customer = await prisma.customer.findFirst({
+      where: { phone: normalizedPhone },
     });
 
     if (!customer) {
@@ -242,9 +258,15 @@ export async function customerLogin(req: Request, res: Response): Promise<void> 
       return;
     }
 
+    if (!customer.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
     const token = generateToken(
       {
-        id: customer.id,
+        id: customer.id_uuid,
+        legacyId: customer.id,
         membershipId: customer.membershipId,
         email: customer.email,
       },
@@ -262,7 +284,8 @@ export async function customerLogin(req: Request, res: Response): Promise<void> 
     res.json({
       token,
       user: {
-        id: customer.id,
+        id: customer.id_uuid,
+        legacyId: customer.id,
         membershipId: customer.membershipId,
         email: customer.email,
         firstName: customer.firstName,
@@ -273,6 +296,173 @@ export async function customerLogin(req: Request, res: Response): Promise<void> 
   } catch (error) {
     console.error('Customer login error:', error);
     res.status(500).json({ error: 'Login failed' });
+  }
+}
+
+// Request password reset OTP via SMS
+export async function requestCustomerPasswordReset(req: Request, res: Response): Promise<void> {
+  try {
+    const { phone } = req.body;
+
+    if (!phone) {
+      res.status(400).json({ error: 'Phone number is required' });
+      return;
+    }
+
+    const normalizedPhone = sanitizePhoneNumber(phone);
+    if (!validatePhoneNumber(normalizedPhone)) {
+      res.status(400).json({ error: 'Invalid phone number format' });
+      return;
+    }
+
+    const customer = await prisma.customer.findFirst({
+      where: { phone: normalizedPhone },
+      select: { id: true, id_uuid: true, isActivated: true },
+    });
+
+    // Always return success to avoid user enumeration
+    if (!customer || !customer.isActivated) {
+      res.json({ message: 'If the account exists, an OTP has been sent' });
+      return;
+    }
+
+    // Simple rate limiting: max 5 requests per phone per hour
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const recentCount = await prisma.passwordResetOtp.count({
+      where: {
+        phone: normalizedPhone,
+        createdAt: { gt: oneHourAgo },
+      },
+    });
+    if (recentCount >= 5) {
+      res.json({ message: 'If the account exists, an OTP has been sent' });
+      return;
+    }
+
+    // Cooldown: do not send another OTP within 60 seconds
+    const latestOtp = await prisma.passwordResetOtp.findFirst({
+      where: {
+        phone: normalizedPhone,
+        createdAt: { gt: new Date(Date.now() - 60 * 1000) },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (latestOtp) {
+      res.json({ message: 'If the account exists, an OTP has been sent' });
+      return;
+    }
+
+    // Invalidate previous active OTPs
+    await prisma.passwordResetOtp.updateMany({
+      where: {
+        phone: normalizedPhone,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      data: { usedAt: new Date() },
+    });
+
+    const code = crypto.randomInt(100000, 999999).toString();
+    const codeHash = await bcrypt.hash(code, 10);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+    if (!customer.id_uuid) {
+      res.status(500).json({ error: 'Customer UUID missing. Please contact support.' });
+      return;
+    }
+
+    await prisma.passwordResetOtp.create({
+      data: {
+        customerId_uuid: customer.id_uuid,
+        phone: normalizedPhone,
+        codeHash,
+        expiresAt,
+      },
+    });
+
+    await sendSMS({
+      to: normalizedPhone,
+      message: `Your AIDOO TECH password reset code is ${code}. It expires in 10 minutes.`,
+    });
+
+    res.json({ message: 'If the account exists, an OTP has been sent' });
+  } catch (error) {
+    console.error('Password reset request error:', error);
+    res.status(500).json({ error: 'Failed to request password reset' });
+  }
+}
+
+// Reset password using OTP
+export async function resetCustomerPasswordWithOtp(req: Request, res: Response): Promise<void> {
+  try {
+    const { phone, code, newPassword } = req.body;
+
+    if (!phone || !code || !newPassword) {
+      res.status(400).json({ error: 'Phone number, code, and new password are required' });
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      res.status(400).json({ error: 'New password must be at least 8 characters' });
+      return;
+    }
+
+    const normalizedPhone = sanitizePhoneNumber(phone);
+    if (!validatePhoneNumber(normalizedPhone)) {
+      res.status(400).json({ error: 'Invalid phone number format' });
+      return;
+    }
+
+    const otp = await prisma.passwordResetOtp.findFirst({
+      where: {
+        phone: normalizedPhone,
+        usedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!otp) {
+      res.status(400).json({ error: 'Invalid or expired code' });
+      return;
+    }
+
+    if (otp.attempts >= 5) {
+      await prisma.passwordResetOtp.update({
+        where: { id: otp.id },
+        data: { usedAt: new Date() },
+      });
+      res.status(400).json({ error: 'Invalid or expired code' });
+      return;
+    }
+
+    const isValid = await bcrypt.compare(String(code), otp.codeHash);
+    if (!isValid) {
+      await prisma.passwordResetOtp.update({
+        where: { id: otp.id },
+        data: { attempts: otp.attempts + 1 },
+      });
+      res.status(400).json({ error: 'Invalid or expired code' });
+      return;
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+    await prisma.$transaction([
+      prisma.customer.update({
+        where: { id_uuid: otp.customerId_uuid },
+        data: { password: hashedPassword },
+      }),
+      prisma.passwordResetOtp.update({
+        where: { id: otp.id },
+        data: { usedAt: new Date() },
+      }),
+    ]);
+
+    res.json({ message: 'Password reset successfully' });
+  } catch (error) {
+    console.error('Password reset error:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
   }
 }
 
@@ -313,8 +503,12 @@ export async function getCurrentAdmin(req: AuthenticatedRequest, res: Response):
 // Get current customer
 export async function getCurrentCustomer(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const customer = await prisma.customer.findUnique({
-      where: { id: req.user!.id },
+    const customerLookup = (req.user as CustomerPayload).legacyId
+      ? { id_uuid: req.user!.id }
+      : { id: req.user!.id };
+
+    const customer = await prisma.customer.findFirst({
+      where: customerLookup,
       include: {
         contracts: {
           include: {
@@ -370,7 +564,8 @@ export async function getCurrentCustomer(req: AuthenticatedRequest, res: Respons
     const totalPaid = customer.payments.reduce((sum, payment) => sum + payment.amount, 0);
 
     res.json({
-      id: customer.id,
+      id: customer.id_uuid || customer.id,
+      legacyId: customer.id,
       membershipId: customer.membershipId,
       email: customer.email,
       firstName: customer.firstName,
