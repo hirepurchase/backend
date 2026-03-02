@@ -289,9 +289,10 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     }
 
     res.status(201).json(completeContract);
-  } catch (error) {
+  } catch (error: any) {
     console.error('Create contract error:', error);
-    res.status(500).json({ error: 'Failed to create contract' });
+    const detail = error?.message || String(error);
+    res.status(500).json({ error: 'Failed to create contract', detail });
   }
 }
 
