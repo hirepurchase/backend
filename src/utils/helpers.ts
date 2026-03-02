@@ -109,8 +109,8 @@ export function formatCurrency(amount: number, currency: string = 'GHS'): string
 }
 
 export function sanitizePhoneNumber(phone: string): string {
-  // Remove all non-numeric characters
-  let cleaned = phone.replace(/\D/g, '');
+  // Remove all non-numeric characters (trim whitespace first)
+  let cleaned = phone.trim().replace(/\D/g, '');
 
   // Handle Ghana phone numbers
   if (cleaned.startsWith('233')) {
