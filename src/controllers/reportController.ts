@@ -438,9 +438,6 @@ export async function getDashboardStats(req: AuthenticatedRequest, res: Response
       prisma.hirePurchaseContract.findMany({
         take: 5,
         orderBy: { createdAt: 'desc' },
-        where: {
-          customerId_uuid: { not: '' },
-        },
         include: {
           customer: {
             select: {
