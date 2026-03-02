@@ -818,7 +818,7 @@ export async function initiateDirectDebitPreapproval(req: AuthenticatedRequest, 
 
     // Initiate preapproval
     const preapprovalResponse = await initiatePreapproval({
-      customerId,
+      customerId: customer.id_uuid,
       customerPhone: phoneNumber,
       network: network.toUpperCase(),
       clientReferenceId,
@@ -1200,7 +1200,7 @@ export async function initiateDirectDebitPayment(req: AuthenticatedRequest, res:
       data: {
         transactionRef,
         contractId,
-        customerId_uuid: contract.customer?.id_uuid,
+        customerId_uuid: contract.customerId_uuid,
         amount: paymentAmount,
         paymentMethod: 'HUBTEL_DIRECT_DEBIT',
         mobileMoneyProvider: contract.mobileMoneyNetwork,

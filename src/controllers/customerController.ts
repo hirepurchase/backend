@@ -758,7 +758,7 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
 
     // Get payment history
     const paymentHistory = await prisma.paymentTransaction.findMany({
-      where: { customerId_uuid: id },
+      where: { customerId_uuid: customer.id_uuid },
       include: {
         contract: {
           select: {

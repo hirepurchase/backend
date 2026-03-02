@@ -224,19 +224,10 @@ export async function initiatePreapproval(params: {
 
     console.log('Hubtel Preapproval Response:', response.data);
 
-    const customer = await prisma.customer.findUnique({
-      where: { id_uuid: params.customerId },
-      select: { id_uuid: true },
-    });
-
-    if (!customer?.id_uuid) {
-      throw new Error('Customer UUID missing. Please contact support.');
-    }
-
     // Store preapproval in database
     await prisma.hubtelPreapproval.create({
       data: {
-        customerId_uuid: customer.id_uuid,
+        customerId_uuid: params.customerId,
         customerMsisdn: formattedPhone,
         channel: channel,
         clientReferenceId: params.clientReferenceId,
