@@ -632,14 +632,6 @@ export async function getAllInventoryItems(req: AuthenticatedRequest, res: Respo
             select: {
               id: true,
               contractNumber: true,
-              customer: {
-                select: {
-                  id: true,
-                  membershipId: true,
-                  firstName: true,
-                  lastName: true,
-                },
-              },
             },
           },
         },

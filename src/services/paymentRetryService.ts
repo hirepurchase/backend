@@ -333,7 +333,11 @@ export async function getFailedPayments(filters?: {
   }
 
   if (filters?.customerId) {
-    where.customerId_uuid = filters.customerId;
+    const filterCustomer = await prisma.customer.findUnique({
+      where: { id: filters.customerId },
+      select: { id_uuid: true },
+    });
+    if (filterCustomer) where.customerId_uuid = filterCustomer.id_uuid;
   }
 
   const [payments, total] = await Promise.all([

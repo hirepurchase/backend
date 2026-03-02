@@ -111,7 +111,13 @@ export async function getNotificationLogs(req: AuthenticatedRequest, res: Respon
     const where: any = {};
     if (type) where.type = type;
     if (status) where.status = status;
-    if (customerId) where.customerId_uuid = customerId;
+    if (customerId) {
+      const filterCustomer = await prisma.customer.findUnique({
+        where: { id: customerId as string },
+        select: { id_uuid: true },
+      });
+      if (filterCustomer) where.customerId_uuid = filterCustomer.id_uuid;
+    }
 
     const [logs, total] = await Promise.all([
       prisma.notificationLog.findMany({

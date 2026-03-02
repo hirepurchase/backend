@@ -214,7 +214,7 @@ export async function getCustomerById(req: AuthenticatedRequest, res: Response):
     const { id } = req.params;
 
     const customer = await prisma.customer.findUnique({
-      where: { id_uuid: id },
+      where: { id },
       include: {
         createdBy: {
           select: {
@@ -245,11 +245,7 @@ export async function getCustomerById(req: AuthenticatedRequest, res: Response):
       return;
     }
 
-    res.json({
-      ...customer,
-      id: customer.id_uuid || customer.id,
-      legacyId: customer.id,
-    });
+    res.json(customer);
   } catch (error) {
     console.error('Get customer error:', error);
     res.status(500).json({ error: 'Failed to fetch customer' });
@@ -712,7 +708,7 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
 
     // Get all contracts
     const contracts = await prisma.hirePurchaseContract.findMany({
-      where: { customerId_uuid: id },
+      where: { customerId_uuid: customer.id_uuid },
       include: {
         inventoryItem: {
           include: {

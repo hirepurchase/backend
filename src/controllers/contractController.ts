@@ -78,7 +78,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
 
     // Validate customer exists
     const customer = await prisma.customer.findUnique({
-      where: { id_uuid: customerId },
+      where: { id: customerId },
     });
     if (!customer) {
       res.status(400).json({ error: 'Customer not found' });
@@ -205,7 +205,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
 
       // Activate customer account on first contract creation
       await tx.customer.update({
-        where: { id_uuid: customerId },
+        where: { id: customer.id },
         data: {
           isActivated: true,
           activatedAt: customer.activatedAt || new Date(),
@@ -311,7 +311,13 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
     };
 
     if (status) where.status = status;
-    if (customerId) where.customerId_uuid = customerId;
+    if (customerId) {
+      const filterCustomer = await prisma.customer.findUnique({
+        where: { id: customerId as string },
+        select: { id_uuid: true },
+      });
+      if (filterCustomer) where.customerId_uuid = filterCustomer.id_uuid;
+    }
 
     if (search) {
       where.OR = [

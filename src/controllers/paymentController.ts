@@ -784,7 +784,7 @@ export async function initiateDirectDebitPreapproval(req: AuthenticatedRequest, 
 
     // Check if customer exists
     const customer = await prisma.customer.findUnique({
-      where: { id_uuid: customerId },
+      where: { id: customerId },
       select: { id_uuid: true },
     });
     if (!customer) {
@@ -974,8 +974,17 @@ export async function getCustomerPreapprovals(req: AuthenticatedRequest, res: Re
   try {
     const { customerId } = req.params;
 
+    const customer = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { id_uuid: true },
+    });
+    if (!customer) {
+      res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+
     const preapprovals = await prisma.hubtelPreapproval.findMany({
-      where: { customerId_uuid: customerId },
+      where: { customerId_uuid: customer.id_uuid },
       orderBy: { createdAt: 'desc' },
     });
 
