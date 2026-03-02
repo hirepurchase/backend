@@ -319,11 +319,11 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
 
     if (search) {
       where.OR = [
-        { contractNumber: { contains: search as string } },
-        { customer: { membershipId: { contains: search as string } } },
-        { customer: { firstName: { contains: search as string } } },
-        { customer: { lastName: { contains: search as string } } },
-        { inventoryItem: { serialNumber: { contains: search as string } } },
+        { contractNumber: { contains: search as string, mode: 'insensitive' } },
+        { customer: { membershipId: { contains: search as string, mode: 'insensitive' } } },
+        { customer: { firstName: { contains: search as string, mode: 'insensitive' } } },
+        { customer: { lastName: { contains: search as string, mode: 'insensitive' } } },
+        { inventoryItem: { serialNumber: { contains: search as string, mode: 'insensitive' } } },
       ];
     }
 
@@ -374,9 +374,10 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
         totalPages: Math.ceil(total / Number(limit)),
       },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error('Get contracts error:', error);
-    res.status(500).json({ error: 'Failed to fetch contracts' });
+    const detail = error?.message || String(error);
+    res.status(500).json({ error: 'Failed to fetch contracts', detail });
   }
 }
 

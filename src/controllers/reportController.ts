@@ -559,7 +559,10 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
       return;
     }
 
-    const { startDate, endDate, paymentMethod, status } = req.query;
+    const { startDate, endDate, paymentMethod, status, page = '1', limit = '20' } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page as string) || 1);
+    const limitNum = Math.max(1, Math.min(100, parseInt(limit as string) || 20));
 
     // Build where clause for filtering
     const where: any = {
@@ -584,36 +587,49 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
       where.paymentMethod = paymentMethod;
     }
 
-    // Fetch payments
-    const payments = await prisma.paymentTransaction.findMany({
-      where,
-      include: {
-        customer: {
-          select: {
-            id: true,
-            firstName: true,
-            lastName: true,
-            membershipId: true,
-            phone: true,
+    // Fetch paginated payments + total count + all successful for stats in parallel
+    const [payments, total, allSuccessful] = await Promise.all([
+      prisma.paymentTransaction.findMany({
+        where,
+        include: {
+          customer: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              membershipId: true,
+              phone: true,
+            },
+          },
+          contract: {
+            select: {
+              id: true,
+              contractNumber: true,
+              totalPrice: true,
+              outstandingBalance: true,
+            },
           },
         },
-        contract: {
-          select: {
-            id: true,
-            contractNumber: true,
-            totalPrice: true,
-            outstandingBalance: true,
-          },
-        },
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-    });
+        orderBy: { createdAt: 'desc' },
+        skip: (pageNum - 1) * limitNum,
+        take: limitNum,
+      }),
+      prisma.paymentTransaction.count({ where }),
+      // Fetch all successful payments (no pagination) for accurate stats
+      prisma.paymentTransaction.findMany({
+        where: { ...where, status: 'SUCCESS' },
+        select: { paymentMethod: true, amount: true, paymentDate: true, createdAt: true },
+      }),
+    ]);
 
-    // Calculate statistics
-    const successfulPayments = payments.filter(p => p.status === 'SUCCESS');
-    const totalIncome = successfulPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+    // Calculate statistics from all matching records (not just current page)
+    const allMatchingCount = total;
+    const totalIncome = allSuccessful.reduce((sum, p) => sum + Number(p.amount), 0);
+
+    const [pendingCount, failedCount] = await Promise.all([
+      prisma.paymentTransaction.count({ where: { ...where, status: 'PENDING' } }),
+      prisma.paymentTransaction.count({ where: { ...where, status: 'FAILED' } }),
+    ]);
 
     // Group by payment method
     const byPaymentMethod: any = {
@@ -626,7 +642,7 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
       OTHER: { count: 0, amount: 0 },
     };
 
-    successfulPayments.forEach(payment => {
+    allSuccessful.forEach(payment => {
       const method = payment.paymentMethod || 'OTHER';
       if (byPaymentMethod[method]) {
         byPaymentMethod[method].count++;
@@ -639,28 +655,26 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
 
     // Group by status
     const byStatus = {
-      SUCCESS: payments.filter(p => p.status === 'SUCCESS').length,
-      PENDING: payments.filter(p => p.status === 'PENDING').length,
-      FAILED: payments.filter(p => p.status === 'FAILED').length,
+      SUCCESS: allSuccessful.length,
+      PENDING: pendingCount,
+      FAILED: failedCount,
     };
 
-    // Group by date (daily totals for last 30 days or date range)
+    // Group by date (daily totals)
     const dailyTotals: any = {};
-    successfulPayments.forEach(payment => {
+    allSuccessful.forEach(payment => {
       const date = new Date(payment.paymentDate || payment.createdAt).toISOString().split('T')[0];
-      if (!dailyTotals[date]) {
-        dailyTotals[date] = 0;
-      }
+      if (!dailyTotals[date]) dailyTotals[date] = 0;
       dailyTotals[date] += Number(payment.amount);
     });
 
     const stats = {
-      totalPayments: payments.length,
-      successfulPayments: successfulPayments.length,
-      pendingPayments: byStatus.PENDING,
-      failedPayments: byStatus.FAILED,
+      totalPayments: allMatchingCount,
+      successfulPayments: allSuccessful.length,
+      pendingPayments: pendingCount,
+      failedPayments: failedCount,
       totalIncome,
-      averagePayment: successfulPayments.length > 0 ? totalIncome / successfulPayments.length : 0,
+      averagePayment: allSuccessful.length > 0 ? totalIncome / allSuccessful.length : 0,
       byPaymentMethod,
       byStatus,
       dailyTotals: Object.entries(dailyTotals)
@@ -671,6 +685,12 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
     const payload = {
       payments,
       stats,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        totalPages: Math.ceil(total / limitNum),
+      },
     };
 
     setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
@@ -678,5 +698,52 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
   } catch (error) {
     console.error('Get income report error:', error);
     res.status(500).json({ error: 'Failed to fetch income report' });
+  }
+}
+
+// Daily payments summary — resets each calendar day
+export async function getDailyPayments(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const [count, totalAmount, recentPayments] = await Promise.all([
+      prisma.paymentTransaction.count({
+        where: {
+          status: 'SUCCESS',
+          createdAt: { gte: startOfDay, lte: endOfDay },
+        },
+      }),
+      prisma.paymentTransaction.aggregate({
+        _sum: { amount: true },
+        where: {
+          status: 'SUCCESS',
+          createdAt: { gte: startOfDay, lte: endOfDay },
+        },
+      }),
+      prisma.paymentTransaction.findMany({
+        where: {
+          status: 'SUCCESS',
+          createdAt: { gte: startOfDay, lte: endOfDay },
+        },
+        include: {
+          customer: { select: { firstName: true, lastName: true, membershipId: true } },
+          contract: { select: { contractNumber: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+      }),
+    ]);
+
+    res.json({
+      date: startOfDay.toISOString().split('T')[0],
+      count,
+      totalAmount: totalAmount._sum.amount ?? 0,
+      recentPayments,
+    });
+  } catch (error) {
+    console.error('Get daily payments error:', error);
+    res.status(500).json({ error: 'Failed to fetch daily payments' });
   }
 }
