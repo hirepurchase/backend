@@ -307,7 +307,7 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
     } = req.query;
 
     const where: Record<string, unknown> = {
-      customer: { isNot: null },
+      customerId_uuid: { not: '' },
     };
 
     if (status) where.status = status;

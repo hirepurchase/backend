@@ -439,8 +439,7 @@ export async function getDashboardStats(req: AuthenticatedRequest, res: Response
         take: 5,
         orderBy: { createdAt: 'desc' },
         where: {
-          customerId_uuid: { not: undefined },
-          customer: { isNot: null },
+          customerId_uuid: { not: '' },
         },
         include: {
           customer: {
