@@ -2,6 +2,68 @@ import { sendPaymentReminder, sendOverdueNotification } from './notificationServ
 import prisma from '../config/database';
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
+import { isOverdue, calculatePenalty } from '../utils/helpers';
+
+// Mark past-due installments as OVERDUE and apply penalties
+export async function markOverdueInstallments(): Promise<{ updated: number; penalties: number }> {
+  try {
+    console.log('Marking overdue installments...');
+
+    const activeContracts = await prisma.hirePurchaseContract.findMany({
+      where: { status: 'ACTIVE' },
+      include: {
+        installments: {
+          where: { status: { in: ['PENDING', 'PARTIAL'] } },
+        },
+      },
+    });
+
+    let updated = 0;
+    let penalties = 0;
+
+    for (const contract of activeContracts) {
+      for (const installment of contract.installments) {
+        if (isOverdue(installment.dueDate, contract.gracePeriodDays)) {
+          await prisma.installmentSchedule.update({
+            where: { id: installment.id },
+            data: { status: 'OVERDUE' },
+          });
+          updated++;
+
+          if (contract.penaltyPercentage > 0) {
+            const remaining = installment.amount - installment.paidAmount;
+            const penaltyAmount = calculatePenalty(remaining, contract.penaltyPercentage);
+
+            // Only create penalty if one doesn't already exist for this installment
+            const existing = await prisma.penalty.findFirst({
+              where: { contractId: contract.id, isPaid: false },
+            });
+            if (!existing) {
+              await prisma.penalty.create({
+                data: {
+                  contractId: contract.id,
+                  amount: penaltyAmount,
+                  reason: `Late payment penalty for installment #${installment.installmentNo}`,
+                },
+              });
+              await prisma.hirePurchaseContract.update({
+                where: { id: contract.id },
+                data: { outstandingBalance: { increment: penaltyAmount } },
+              });
+              penalties++;
+            }
+          }
+        }
+      }
+    }
+
+    console.log(`Marked ${updated} installments as OVERDUE, applied ${penalties} penalties`);
+    return { updated, penalties };
+  } catch (error) {
+    console.error('Error marking overdue installments:', error);
+    return { updated: 0, penalties: 0 };
+  }
+}
 
 // Check for upcoming payments and send reminders
 export async function checkUpcomingPayments(): Promise<void> {
@@ -231,6 +293,17 @@ export async function checkOverduePayments(): Promise<void> {
 export function initializeNotificationScheduler(): void {
   console.log('Initializing notification scheduler...');
 
+  // Mark overdue installments every day at 8:00 AM (before notification jobs)
+  cron.schedule('0 8 * * *', () => {
+    const enqueued = enqueueSingletonJob('mark-overdue-installments', async () => {
+      console.log('Running scheduled overdue installment marking');
+      await markOverdueInstallments();
+    });
+    if (!enqueued) {
+      console.log('Skipping overdue marking - previous job still running');
+    }
+  });
+
   // Run upcoming payment check every day at 9:00 AM
   cron.schedule('0 9 * * *', () => {
     const enqueued = enqueueSingletonJob('notifications-upcoming', async () => {
@@ -254,13 +327,16 @@ export function initializeNotificationScheduler(): void {
   });
 
   console.log('Notification scheduler initialized');
+  console.log('- Overdue installment marking: Daily at 8:00 AM');
   console.log('- Upcoming payments check: Daily at 9:00 AM');
   console.log('- Overdue payments check: Daily at 10:00 AM');
 }
 
 // Manually trigger checks (for testing or admin action)
-export async function triggerManualCheck(): Promise<{ upcomingCount: number; overdueCount: number }> {
+export async function triggerManualCheck(): Promise<{ upcomingCount: number; overdueCount: number; markedOverdue: number }> {
   console.log('Manual notification check triggered');
+
+  const { updated: markedOverdue } = await markOverdueInstallments();
 
   const upcomingBefore = await prisma.notificationLog.count();
   await checkUpcomingPayments();
@@ -273,5 +349,6 @@ export async function triggerManualCheck(): Promise<{ upcomingCount: number; ove
   return {
     upcomingCount: upcomingAfter - upcomingBefore,
     overdueCount: overdueAfter - overdueBefore,
+    markedOverdue,
   };
 }
