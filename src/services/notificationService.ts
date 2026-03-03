@@ -34,8 +34,10 @@ if (process.env.ENABLE_EMAIL_NOTIFICATIONS === 'true' && process.env.EMAIL_USER 
 const naloConfig = {
   apiUrl: process.env.NALO_API_URL || 'https://api.nalosolutions.com/sms/v1/text/single',
   apiKey: process.env.NALO_API_KEY,
-  senderId: process.env.NALO_SENDER_ID || 'HIREPURCHASE',
+  senderId: process.env.NALO_SENDER_ID || 'AidooTech',
 };
+
+const mobileAppDownloadUrl = process.env.MOBILE_APP_DOWNLOAD_URL || '';
 
 interface EmailOptions {
   to: string;
@@ -211,7 +213,8 @@ Hire Purchase Team
   `;
 
   // SMS message
-  const smsMessage = `Welcome to Hire Purchase! Your Membership ID: ${membershipId}. Customer ID: ${customerId}. Keep this safe for future transactions.`;
+  const appLinkPart = mobileAppDownloadUrl ? ` Download our app: ${mobileAppDownloadUrl}` : '';
+  const smsMessage = `Welcome to AidooTech Hire Purchase! Dear ${firstName}, your account is set up. Membership ID: ${membershipId}. Keep this safe for all transactions.${appLinkPart}`;
 
   // Send notifications
   const promises: Promise<boolean>[] = [];
@@ -386,7 +389,8 @@ Hire Purchase Team
   `;
 
   // SMS message
-  const smsMessage = `Contract ${contractNumber} confirmed! Product: ${productName}. Total: ${formatCurrency(totalPrice)}. Installment: ${formatCurrency(installmentAmount)} x ${totalInstallments} (${paymentFrequency}). Start: ${formatDate(startDate)}.`;
+  const appLinkPart = mobileAppDownloadUrl ? ` Download our app to track payments: ${mobileAppDownloadUrl}` : '';
+  const smsMessage = `AidooTech: Contract ${contractNumber} created! Product: ${productName}. Total: ${formatCurrency(totalPrice)}, Deposit: ${formatCurrency(depositAmount)}. Pay ${formatCurrency(installmentAmount)} x ${totalInstallments} ${paymentFrequency.toLowerCase()}. Starts: ${formatDate(startDate)}.${appLinkPart}`;
 
   // Send notifications
   const promises: Promise<boolean>[] = [];

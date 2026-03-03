@@ -12,6 +12,7 @@ import notificationRoutes from './notifications';
 import importRoutes from './import';
 import paymentRetryRoutes from './paymentRetry';
 import hubtelTestRoutes from './hubtelTest';
+import smsRoutes from './sms';
 
 const router = Router();
 
@@ -29,6 +30,7 @@ router.use('/roles', roleRoutes);
 router.use('/audit', auditRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/import', importRoutes);
+router.use('/sms', smsRoutes);
 
 // Health check
 router.get('/health', (req, res) => {
