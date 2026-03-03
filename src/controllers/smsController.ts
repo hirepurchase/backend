@@ -73,25 +73,27 @@ export async function getSMSCustomers(req: AuthenticatedRequest, res: Response):
   try {
     const { search } = req.query;
 
-    const customers = await prisma.customer.findMany({
-      where: {
-        ...(search
-          ? {
-              OR: [
-                { firstName: { contains: search as string, mode: 'insensitive' } },
-                { lastName: { contains: search as string, mode: 'insensitive' } },
-                { membershipId: { contains: search as string, mode: 'insensitive' } },
-                { phone: { contains: search as string, mode: 'insensitive' } },
-              ],
-            }
-          : {}),
-      },
-      select: { id: true, firstName: true, lastName: true, phone: true, membershipId: true },
-      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
-      take: 200,
-    });
+    const searchWhere = search
+      ? {
+          OR: [
+            { firstName: { contains: search as string, mode: 'insensitive' as const } },
+            { lastName: { contains: search as string, mode: 'insensitive' as const } },
+            { membershipId: { contains: search as string, mode: 'insensitive' as const } },
+            { phone: { contains: search as string, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
 
-    res.json({ customers, total: customers.length });
+    const [customers, totalAll] = await Promise.all([
+      prisma.customer.findMany({
+        where: searchWhere,
+        select: { id: true, firstName: true, lastName: true, phone: true, membershipId: true },
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+      }),
+      prisma.customer.count(),
+    ]);
+
+    res.json({ customers, total: customers.length, totalAll });
   } catch (error) {
     console.error('Get SMS customers error:', error);
     res.status(500).json({ error: 'Failed to fetch customers' });
