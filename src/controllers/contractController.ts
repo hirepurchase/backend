@@ -8,6 +8,7 @@ import {
   generateContractNumber,
   calculateInstallmentSchedule,
   calculateEndDate,
+  getNextDueDate,
   isOverdue,
   calculatePenalty,
   sanitizePhoneNumber,
@@ -1157,6 +1158,220 @@ export async function editInstallment(req: AuthenticatedRequest, res: Response):
   } catch (error) {
     console.error('Edit installment error:', error);
     res.status(500).json({ error: 'Failed to edit installment' });
+  }
+}
+
+// Amend contract (Admin only) — corrects mistakes after payments have begun
+// Preserves all paid installments, recalculates remaining unpaid ones
+export async function amendContract(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const {
+      totalPrice,
+      depositAmount,
+      totalInstallments,
+      paymentFrequency,
+      penaltyPercentage,
+      gracePeriodDays,
+      reason,
+    } = req.body;
+
+    if (!reason || !reason.trim()) {
+      res.status(400).json({ error: 'A reason is required for contract amendments' });
+      return;
+    }
+
+    const contract = await prisma.hirePurchaseContract.findUnique({
+      where: { id },
+      include: {
+        installments: { orderBy: { installmentNo: 'asc' } },
+        payments: true,
+      },
+    });
+
+    if (!contract) {
+      res.status(404).json({ error: 'Contract not found' });
+      return;
+    }
+
+    if (contract.status !== 'ACTIVE') {
+      res.status(400).json({ error: 'Only active contracts can be amended' });
+      return;
+    }
+
+    // Separate paid vs unpaid installments
+    const paidInstallments = contract.installments.filter(
+      i => i.status === 'PAID' || i.paidAmount >= i.amount
+    );
+    const unpaidInstallments = contract.installments.filter(
+      i => i.status !== 'PAID' && i.paidAmount < i.amount
+    );
+
+    // Snapshot old values for audit
+    const oldValues = {
+      totalPrice: contract.totalPrice,
+      depositAmount: contract.depositAmount,
+      financeAmount: contract.financeAmount,
+      totalInstallments: contract.totalInstallments,
+      installmentAmount: contract.installmentAmount,
+      paymentFrequency: contract.paymentFrequency,
+      penaltyPercentage: contract.penaltyPercentage,
+      gracePeriodDays: contract.gracePeriodDays,
+      outstandingBalance: contract.outstandingBalance,
+    };
+
+    // Resolve new values, falling back to existing
+    const newTotalPrice = totalPrice !== undefined ? Number(totalPrice) : contract.totalPrice;
+    const newDepositAmount = depositAmount !== undefined ? Number(depositAmount) : contract.depositAmount;
+    const newPaymentFrequency = (paymentFrequency as PaymentFrequency) || (contract.paymentFrequency as PaymentFrequency);
+    const newPenaltyPercentage = penaltyPercentage !== undefined ? Number(penaltyPercentage) : contract.penaltyPercentage;
+    const newGracePeriodDays = gracePeriodDays !== undefined ? Number(gracePeriodDays) : contract.gracePeriodDays;
+
+    // How much has actually been paid across all installments (partial credits count)
+    const totalPaidOnInstallments = contract.installments.reduce((sum, i) => sum + i.paidAmount, 0);
+
+    // The corrected finance amount is everything above the deposit
+    const newFinanceAmount = newTotalPrice - newDepositAmount;
+
+    if (newFinanceAmount <= 0) {
+      res.status(400).json({ error: 'Total price must be greater than deposit amount' });
+      return;
+    }
+
+    // Remaining balance = new finance amount minus what has already been paid on installments
+    const remainingBalance = Math.max(0, newFinanceAmount - totalPaidOnInstallments);
+
+    // How many installments remain unpaid
+    const newTotalInstallments = totalInstallments !== undefined ? Number(totalInstallments) : contract.totalInstallments;
+    const remainingInstallmentCount = totalInstallments !== undefined
+      ? Math.max(1, newTotalInstallments - paidInstallments.length)
+      : unpaidInstallments.length;
+
+    if (remainingInstallmentCount === 0) {
+      res.status(400).json({ error: 'No unpaid installments remain to amend' });
+      return;
+    }
+
+    const newInstallmentAmount = Math.ceil((remainingBalance / remainingInstallmentCount) * 100) / 100;
+
+    // Rebuild unpaid installment amounts, preserving their due dates
+    // (dates stay the same unless the admin separately reschedules)
+    const updatedUnpaidData = unpaidInstallments.map((inst, idx) => {
+      const isLast = idx === remainingInstallmentCount - 1;
+      // Last installment absorbs rounding difference
+      const amount = isLast
+        ? Math.round((remainingBalance - newInstallmentAmount * (remainingInstallmentCount - 1)) * 100) / 100
+        : newInstallmentAmount;
+      return { id: inst.id, amount: Math.max(0, amount) };
+    });
+
+    // If the number of total installments changed, we may need to add or remove unpaid installments
+    const installmentCountDelta = remainingInstallmentCount - unpaidInstallments.length;
+
+    await prisma.$transaction(async (tx) => {
+      // Update each unpaid installment amount
+      for (const upd of updatedUnpaidData) {
+        await tx.installmentSchedule.update({
+          where: { id: upd.id },
+          data: { amount: upd.amount },
+        });
+      }
+
+      // If we need MORE installments (count increased), append new ones after the last existing
+      if (installmentCountDelta > 0) {
+        const lastInstallment = contract.installments[contract.installments.length - 1];
+        let nextDueDate = getNextDueDate(new Date(lastInstallment.dueDate), newPaymentFrequency);
+        const startNo = contract.totalInstallments + 1;
+        for (let i = 0; i < installmentCountDelta; i++) {
+          await tx.installmentSchedule.create({
+            data: {
+              contractId: id,
+              installmentNo: startNo + i,
+              dueDate: new Date(nextDueDate),
+              amount: newInstallmentAmount,
+            },
+          });
+          nextDueDate = getNextDueDate(nextDueDate, newPaymentFrequency);
+        }
+      }
+
+      // If we need FEWER installments (count decreased), delete excess unpaid ones from the end
+      if (installmentCountDelta < 0) {
+        const toRemove = unpaidInstallments.slice(remainingInstallmentCount);
+        for (const inst of toRemove) {
+          await tx.installmentSchedule.delete({ where: { id: inst.id } });
+        }
+      }
+
+      // Recalculate contract-level totals
+      const newOutstandingBalance = Math.max(0, newFinanceAmount - totalPaidOnInstallments);
+      const totalPaidWithDeposit = totalPaidOnInstallments + newDepositAmount;
+
+      await tx.hirePurchaseContract.update({
+        where: { id },
+        data: {
+          totalPrice: newTotalPrice,
+          depositAmount: newDepositAmount,
+          financeAmount: newFinanceAmount,
+          installmentAmount: newInstallmentAmount,
+          totalInstallments: paidInstallments.length + remainingInstallmentCount,
+          paymentFrequency: newPaymentFrequency,
+          penaltyPercentage: newPenaltyPercentage,
+          gracePeriodDays: newGracePeriodDays,
+          outstandingBalance: newOutstandingBalance,
+          totalPaid: totalPaidWithDeposit,
+        },
+      });
+    });
+
+    const newValues = {
+      totalPrice: newTotalPrice,
+      depositAmount: newDepositAmount,
+      financeAmount: newFinanceAmount,
+      totalInstallments: paidInstallments.length + remainingInstallmentCount,
+      installmentAmount: newInstallmentAmount,
+      paymentFrequency: newPaymentFrequency,
+      penaltyPercentage: newPenaltyPercentage,
+      gracePeriodDays: newGracePeriodDays,
+      outstandingBalance: Math.max(0, newFinanceAmount - totalPaidOnInstallments),
+      amendmentReason: reason,
+      paidInstallmentsPreserved: paidInstallments.length,
+      unpaidInstallmentsRecalculated: remainingInstallmentCount,
+    };
+
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'AMEND_CONTRACT',
+      entity: 'HirePurchaseContract',
+      entityId: id,
+      oldValues,
+      newValues,
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    const updatedContract = await prisma.hirePurchaseContract.findUnique({
+      where: { id },
+      include: {
+        customer: { select: { id: true, membershipId: true, firstName: true, lastName: true, phone: true } },
+        inventoryItem: { include: { product: true } },
+        installments: { orderBy: { installmentNo: 'asc' } },
+      },
+    });
+
+    res.json({
+      message: 'Contract amended successfully',
+      summary: {
+        paidInstallmentsPreserved: paidInstallments.length,
+        unpaidInstallmentsRecalculated: remainingInstallmentCount,
+        newInstallmentAmount,
+        newOutstandingBalance: Math.max(0, newFinanceAmount - totalPaidOnInstallments),
+      },
+      contract: updatedContract,
+    });
+  } catch (error) {
+    console.error('Amend contract error:', error);
+    res.status(500).json({ error: 'Failed to amend contract' });
   }
 }
 
