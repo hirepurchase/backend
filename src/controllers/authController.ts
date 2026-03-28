@@ -586,3 +586,139 @@ export async function getCurrentCustomer(req: AuthenticatedRequest, res: Respons
     res.status(500).json({ error: 'Failed to get customer info' });
   }
 }
+
+// Change own password (authenticated admin user)
+export async function changeAdminPassword(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { currentPassword, newPassword, confirmPassword } = req.body;
+
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      res.status(400).json({ error: 'Current password, new password, and confirmation are required' });
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      res.status(400).json({ error: 'New password must be at least 8 characters' });
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      res.status(400).json({ error: 'New password and confirmation do not match' });
+      return;
+    }
+
+    const admin = await prisma.adminUser.findUnique({
+      where: { id: req.user!.id },
+      select: { id: true, password: true },
+    });
+
+    if (!admin) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    const isValid = await bcrypt.compare(currentPassword, admin.password);
+    if (!isValid) {
+      res.status(400).json({ error: 'Current password is incorrect' });
+      return;
+    }
+
+    if (await bcrypt.compare(newPassword, admin.password)) {
+      res.status(400).json({ error: 'New password must be different from the current password' });
+      return;
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+    await prisma.adminUser.update({
+      where: { id: admin.id },
+      data: { password: hashedPassword },
+    });
+
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'CHANGE_OWN_PASSWORD',
+      entity: 'AdminUser',
+      entityId: admin.id,
+      newValues: { changedAt: new Date() },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({ message: 'Password changed successfully' });
+  } catch (error) {
+    console.error('Change admin password error:', error);
+    res.status(500).json({ error: 'Failed to change password' });
+  }
+}
+
+// Reset another admin user's password (Super Admin / Admin only)
+export async function resetAdminUserPassword(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { userId } = req.params;
+    const { newPassword, confirmPassword } = req.body;
+
+    if (!newPassword || !confirmPassword) {
+      res.status(400).json({ error: 'New password and confirmation are required' });
+      return;
+    }
+
+    if (newPassword.length < 8) {
+      res.status(400).json({ error: 'Password must be at least 8 characters' });
+      return;
+    }
+
+    if (newPassword !== confirmPassword) {
+      res.status(400).json({ error: 'Passwords do not match' });
+      return;
+    }
+
+    const targetUser = await prisma.adminUser.findUnique({
+      where: { id: userId },
+      include: { role: { select: { name: true } } },
+    });
+
+    if (!targetUser) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    // Prevent resetting a SUPER_ADMIN's password unless you are also SUPER_ADMIN
+    const requestingAdmin = await prisma.adminUser.findUnique({
+      where: { id: req.user!.id },
+      include: { role: { select: { name: true } } },
+    });
+
+    if (
+      targetUser.role.name === 'SUPER_ADMIN' &&
+      requestingAdmin?.role.name !== 'SUPER_ADMIN'
+    ) {
+      res.status(403).json({ error: 'Only a Super Admin can reset another Super Admin\'s password' });
+      return;
+    }
+
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+    await prisma.adminUser.update({
+      where: { id: userId },
+      data: { password: hashedPassword },
+    });
+
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'RESET_USER_PASSWORD',
+      entity: 'AdminUser',
+      entityId: userId,
+      newValues: {
+        targetUser: `${targetUser.firstName} ${targetUser.lastName}`,
+        targetEmail: targetUser.email,
+        resetAt: new Date(),
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({ message: `Password reset successfully for ${targetUser.firstName} ${targetUser.lastName}` });
+  } catch (error) {
+    console.error('Reset admin user password error:', error);
+    res.status(500).json({ error: 'Failed to reset password' });
+  }
+}

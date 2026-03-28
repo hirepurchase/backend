@@ -6,15 +6,19 @@ import {
   resetCustomerPasswordWithOtp,
   getCurrentAdmin,
   getCurrentCustomer,
+  changeAdminPassword,
+  resetAdminUserPassword,
 } from '../controllers/authController';
 import { updateOwnProfile, changeCustomerPassword } from '../controllers/customerController';
-import { authenticateAdmin, authenticateCustomer } from '../middleware/auth';
+import { authenticateAdmin, authenticateCustomer, requirePermission } from '../middleware/auth';
 
 const router = Router();
 
 // Admin authentication
 router.post('/admin/login', adminLogin);
 router.get('/admin/me', authenticateAdmin, getCurrentAdmin);
+router.put('/admin/me/password', authenticateAdmin, changeAdminPassword);
+router.put('/admin/users/:userId/reset-password', authenticateAdmin, requirePermission('MANAGE_USERS'), resetAdminUserPassword);
 
 // Customer authentication
 router.post('/customer/login', customerLogin);
