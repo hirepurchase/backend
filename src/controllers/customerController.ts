@@ -852,11 +852,11 @@ export async function resetCustomerAccount(req: AuthenticatedRequest, res: Respo
     });
 
     await createAuditLog({
-      userId: req.adminUser?.id,
+      userId: req.user!.id,
       action: 'RESET_CUSTOMER_ACCOUNT',
       entity: 'Customer',
       entityId: id,
-      newValues: JSON.stringify({ membershipId: phone, note: 'Username and password reset to phone number' }),
+      newValues: { membershipId: phone, note: 'Username and password reset to phone number' },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
