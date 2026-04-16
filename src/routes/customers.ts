@@ -12,6 +12,7 @@ import {
   getCustomerPayments,
   getCustomerUpcomingInstallments,
   getCustomerStatement,
+  resetCustomerAccount,
 } from '../controllers/customerController';
 import { getCustomerContracts, getContractById } from '../controllers/contractController';
 import { downloadContractStatement } from '../controllers/statementController';
@@ -40,5 +41,6 @@ router.get('/:id/statement', authenticateAdmin, requirePermission('VIEW_CUSTOMER
 router.get('/:id', authenticateAdmin, getCustomerById);
 router.put('/:id', authenticateAdmin, requirePermission('UPDATE_CUSTOMER'), customerUpload, updateCustomer);
 router.delete('/:id', authenticateAdmin, requirePermission('CREATE_CUSTOMER'), deleteCustomer);
+router.post('/:id/reset-account', authenticateAdmin, requirePermission('UPDATE_CUSTOMER'), resetCustomerAccount);
 
 export default router;

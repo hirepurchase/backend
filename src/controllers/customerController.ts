@@ -817,3 +817,56 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
     res.status(500).json({ error: 'Failed to generate customer statement' });
   }
 }
+
+// Reset customer account credentials (Admin only)
+// Sets both membershipId (username) and password to the customer's phone number
+export async function resetCustomerAccount(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+
+    const customer = await prisma.customer.findUnique({ where: { id } });
+    if (!customer) {
+      res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+
+    const phone = customer.phone;
+    const hashedPassword = await bcrypt.hash(phone, 12);
+
+    // Check if another customer already owns this phone as their membershipId
+    const conflict = await prisma.customer.findFirst({
+      where: { membershipId: phone, NOT: { id } },
+    });
+    if (conflict) {
+      res.status(409).json({ error: 'Another customer already has this phone number as their member ID' });
+      return;
+    }
+
+    await prisma.customer.update({
+      where: { id },
+      data: {
+        membershipId: phone,
+        password: hashedPassword,
+        isActivated: true,
+      },
+    });
+
+    await createAuditLog({
+      userId: req.adminUser?.id,
+      action: 'RESET_CUSTOMER_ACCOUNT',
+      entity: 'Customer',
+      entityId: id,
+      newValues: JSON.stringify({ membershipId: phone, note: 'Username and password reset to phone number' }),
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({
+      message: 'Customer account reset successfully',
+      credentials: { username: phone, password: phone },
+    });
+  } catch (error) {
+    console.error('Reset customer account error:', error);
+    res.status(500).json({ error: 'Failed to reset customer account' });
+  }
+}
