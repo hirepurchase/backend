@@ -830,22 +830,23 @@ export async function resetCustomerAccount(req: AuthenticatedRequest, res: Respo
       return;
     }
 
-    const phone = customer.phone;
+    // Use the phone submitted by admin, or fall back to customer's existing phone
+    const phone = (req.body.phone as string)?.trim() || customer.phone;
     const hashedPassword = await bcrypt.hash(phone, 12);
 
-    // Check if another customer already owns this phone as their membershipId
-    const conflict = await prisma.customer.findFirst({
-      where: { membershipId: phone, NOT: { id } },
-    });
-    if (conflict) {
-      res.status(409).json({ error: 'Another customer already has this phone number as their member ID' });
-      return;
+    // If the phone differs from what's on record, check for conflicts then update it too
+    if (phone !== customer.phone) {
+      const conflict = await prisma.customer.findFirst({ where: { phone, NOT: { id } } });
+      if (conflict) {
+        res.status(409).json({ error: 'That phone number is already registered to another customer' });
+        return;
+      }
     }
 
     await prisma.customer.update({
       where: { id },
       data: {
-        membershipId: phone,
+        phone,
         password: hashedPassword,
         isActivated: true,
       },
@@ -856,7 +857,7 @@ export async function resetCustomerAccount(req: AuthenticatedRequest, res: Respo
       action: 'RESET_CUSTOMER_ACCOUNT',
       entity: 'Customer',
       entityId: id,
-      newValues: { membershipId: phone, note: 'Username and password reset to phone number' },
+      newValues: { phone, note: `Phone and password reset to: ${phone}` },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
