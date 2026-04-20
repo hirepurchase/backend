@@ -13,7 +13,7 @@ import {
   processPreapprovalCallback,
   formatPhoneForHubtel,
 } from '../services/hubtelService';
-import { AuthenticatedRequest, CustomerPayload, WebhookPayload } from '../types';
+import { AuthenticatedRequest, WebhookPayload } from '../types';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 
 // Initiate payment (Customer)
@@ -1265,5 +1265,233 @@ export async function initiateDirectDebitPayment(req: AuthenticatedRequest, res:
     res.status(500).json({
       error: error.message || 'Failed to initiate Direct Debit payment',
     });
+  }
+}
+
+// ─── USSD Payment Endpoints ───────────────────────────────────────────────────
+
+// GET /payments/ussd/balance?phoneNumber=0244123456
+export async function getUssdBalance(req: Request, res: Response): Promise<void> {
+  try {
+    const { phoneNumber } = req.query as { phoneNumber?: string };
+
+    if (!phoneNumber) {
+      res.status(400).json({ success: false, message: 'Phone number is required.' });
+      return;
+    }
+
+    const sanitizedPhone = sanitizePhoneNumber(phoneNumber);
+
+    const customer = await prisma.customer.findFirst({
+      where: { phone: sanitizedPhone },
+    });
+
+    if (!customer) {
+      res.status(404).json({ success: false, message: 'You are not a registered customer.' });
+      return;
+    }
+
+    if (!customer.isActivated) {
+      res.status(403).json({ success: false, message: 'Your account is not active. Please contact us.' });
+      return;
+    }
+
+    const contract = await prisma.hirePurchaseContract.findFirst({
+      where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
+      include: {
+        installments: {
+          where: { status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
+          orderBy: { dueDate: 'asc' },
+        },
+      },
+    });
+
+    if (!contract) {
+      res.status(404).json({ success: false, message: 'You have no active hire purchase contract.' });
+      return;
+    }
+
+    if (contract.installments.length === 0) {
+      res.status(200).json({ success: false, message: 'You have no outstanding payments.' });
+      return;
+    }
+
+    const now = new Date();
+    const overdueInstallments = contract.installments.filter(inst => inst.status === 'OVERDUE' || (inst.dueDate < now && inst.status !== 'PAID'));
+    const overdueCount = overdueInstallments.length;
+    const overdueAmount = overdueInstallments.reduce((sum, inst) => sum + (inst.amount - inst.paidAmount), 0);
+    const totalDueAmount = contract.installments.reduce((sum, inst) => sum + (inst.amount - inst.paidAmount), 0);
+    const next = contract.installments[0];
+
+    res.status(200).json({
+      success: true,
+      customerName: `${customer.firstName} ${customer.lastName}`,
+      contractNumber: contract.contractNumber,
+      totalOutstanding: contract.outstandingBalance,
+      installmentsDue: contract.installments.length,
+      totalDueAmount: parseFloat(totalDueAmount.toFixed(2)),
+      overdueCount,
+      overdueAmount: parseFloat(overdueAmount.toFixed(2)),
+      nextDueDate: next.dueDate,
+      nextInstallmentAmount: parseFloat((next.amount - next.paidAmount).toFixed(2)),
+    });
+  } catch (error: any) {
+    console.error('USSD balance error:', error);
+    res.status(500).json({ success: false, message: 'Failed to retrieve balance.' });
+  }
+}
+
+// POST /payments/ussd/initiate
+export async function initiateUssdPayment(req: Request, res: Response): Promise<void> {
+  try {
+    const { phoneNumber, network, amount } = req.body;
+
+    if (!phoneNumber || !network || !amount) {
+      res.status(400).json({ success: false, message: 'Phone number, network, and amount are required.' });
+      return;
+    }
+
+    const validNetworks = ['MTN', 'VODAFONE', 'TELECEL', 'AIRTELTIGO'];
+    if (!validNetworks.includes(network.toUpperCase())) {
+      res.status(400).json({ success: false, message: 'Invalid network. Use MTN, VODAFONE, TELECEL, or AIRTELTIGO.' });
+      return;
+    }
+
+    const paymentAmount = Number(amount);
+    if (isNaN(paymentAmount) || paymentAmount <= 0) {
+      res.status(400).json({ success: false, message: 'Amount must be a positive number.' });
+      return;
+    }
+
+    const sanitizedPhone = sanitizePhoneNumber(phoneNumber);
+
+    const customer = await prisma.customer.findFirst({
+      where: { phone: sanitizedPhone },
+    });
+
+    if (!customer) {
+      res.status(404).json({ success: false, message: 'You are not a registered customer.' });
+      return;
+    }
+
+    if (!customer.isActivated) {
+      res.status(403).json({ success: false, message: 'Your account is not active. Please contact us.' });
+      return;
+    }
+
+    const contract = await prisma.hirePurchaseContract.findFirst({
+      where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
+      include: {
+        installments: {
+          where: { status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
+          orderBy: { dueDate: 'asc' },
+        },
+      },
+    });
+
+    if (!contract) {
+      res.status(404).json({ success: false, message: 'You have no active hire purchase contract.' });
+      return;
+    }
+
+    if (contract.installments.length === 0) {
+      res.status(200).json({ success: false, message: 'You have no outstanding payments.' });
+      return;
+    }
+
+    // Generate unique transaction reference
+    let transactionRef = generateTransactionRef();
+    let exists = await prisma.paymentTransaction.findUnique({ where: { transactionRef } });
+    while (exists) {
+      transactionRef = generateTransactionRef();
+      exists = await prisma.paymentTransaction.findUnique({ where: { transactionRef } });
+    }
+
+    // Create payment record
+    await prisma.paymentTransaction.create({
+      data: {
+        transactionRef,
+        contractId: contract.id,
+        customerId_uuid: customer.id_uuid,
+        amount: paymentAmount,
+        paymentMethod: 'HUBTEL_REGULAR',
+        mobileMoneyProvider: network.toUpperCase(),
+        mobileMoneyNumber: formatPhoneForHubtel(sanitizedPhone),
+        status: 'PENDING',
+        metadata: JSON.stringify({
+          initiatedAt: new Date().toISOString(),
+          gateway: 'HUBTEL_REGULAR',
+          channel: 'USSD',
+        }),
+      },
+    });
+
+    // Send USSD prompt via Hubtel
+    const hubtelResponse = await initiateHubtelReceiveMoney({
+      amount: paymentAmount,
+      customerName: `${customer.firstName} ${customer.lastName}`,
+      customerPhone: sanitizedPhone,
+      customerEmail: customer.email || undefined,
+      network: network.toUpperCase(),
+      description: `Payment for contract ${contract.contractNumber}`,
+      transactionRef,
+    });
+
+    await prisma.paymentTransaction.update({
+      where: { transactionRef },
+      data: {
+        externalRef: hubtelResponse.transactionId,
+        metadata: JSON.stringify({
+          initiatedAt: new Date().toISOString(),
+          gateway: 'HUBTEL_REGULAR',
+          channel: 'USSD',
+          hubtelTransactionId: hubtelResponse.transactionId,
+        }),
+      },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'A payment prompt has been sent to your phone. Please approve to complete payment.',
+      transactionRef,
+      amount: paymentAmount,
+      contractNumber: contract.contractNumber,
+    });
+  } catch (error: any) {
+    console.error('USSD initiate payment error:', error);
+    res.status(500).json({ success: false, message: error.message || 'Failed to initiate payment.' });
+  }
+}
+
+// GET /payments/ussd/status/:transactionRef
+export async function getUssdPaymentStatus(req: Request, res: Response): Promise<void> {
+  try {
+    const { transactionRef } = req.params;
+
+    const payment = await prisma.paymentTransaction.findUnique({
+      where: { transactionRef },
+    });
+
+    if (!payment) {
+      res.status(404).json({ success: false, message: 'Transaction not found.' });
+      return;
+    }
+
+    const messages: Record<string, string> = {
+      PENDING: 'Your payment is being processed.',
+      SUCCESS: `Payment of GHS ${payment.amount.toFixed(2)} was successful.`,
+      FAILED: 'Payment failed. Please try again.',
+    };
+
+    res.status(200).json({
+      success: true,
+      transactionRef,
+      status: payment.status,
+      amount: payment.amount,
+      message: messages[payment.status] ?? 'Unknown payment status.',
+    });
+  } catch (error: any) {
+    console.error('USSD payment status error:', error);
+    res.status(500).json({ success: false, message: 'Failed to retrieve payment status.' });
   }
 }

@@ -15,6 +15,9 @@ import {
   handlePreapprovalCallback,
   initiateHubtelRegularPayment,
   initiateDirectDebitPayment,
+  getUssdBalance,
+  initiateUssdPayment,
+  getUssdPaymentStatus,
 } from '../controllers/paymentController';
 import { authenticateAdmin, authenticateCustomer, requirePermission, authenticateAny } from '../middleware/auth';
 
@@ -46,5 +49,10 @@ router.get('/hubtel/preapproval/customer/:customerId', authenticateAdmin, getCus
 
 // Direct Debit - Payment route (Admin only - for recurring payments)
 router.post('/hubtel/direct-debit', authenticateAdmin, requirePermission('MANAGE_CONTRACTS'), initiateDirectDebitPayment);
+
+// USSD payment routes (no auth - phone number identifies the customer)
+router.get('/ussd/balance', getUssdBalance);
+router.post('/ussd/initiate', initiateUssdPayment);
+router.get('/ussd/status/:transactionRef', getUssdPaymentStatus);
 
 export default router;
