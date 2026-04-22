@@ -1613,18 +1613,13 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
       });
 
       const message =
-        `Aidoo Tech Hire Purchase\n` +
-        `Hi, ${customer.firstName}!\n` +
-        `Contract: ${contract.contractNumber}\n` +
-        `─────────────────\n` +
+        `Aidoo Tech HP\n` +
+        `Hi ${customer.firstName}! (${contract.contractNumber})\n` +
         overdueWarning +
-        `Outstanding: GHS ${contract.outstandingBalance.toFixed(2)}\n` +
-        `Due (${contract.installments.length} inst): GHS ${totalDueAmount.toFixed(2)}\n` +
-        `Next Due: ${formattedDueDate}\n` +
-        `Next Amt: GHS ${(next.amount - next.paidAmount).toFixed(2)}\n` +
-        `─────────────────\n` +
-        `1. Pay\n` +
-        `0. Cancel`;
+        `Bal: GHS ${contract.outstandingBalance.toFixed(2)}\n` +
+        `Due: GHS ${totalDueAmount.toFixed(2)} (${contract.installments.length})\n` +
+        `Next: GHS ${(next.amount - next.paidAmount).toFixed(2)} by ${formattedDueDate}\n` +
+        `1. Pay  0. Cancel`;
 
       res.json(ussdResponse(SessionId, message, 'Aidoo Tech Hire Purchase', state));
       return;
