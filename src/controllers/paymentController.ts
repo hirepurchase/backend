@@ -1604,21 +1604,21 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         nextInstallmentAmount: parseFloat((next.amount - next.paidAmount).toFixed(2)),
       });
 
-      const overdueWarning = overdueInstallments.length > 0
-        ? `⚠ Overdue: ${overdueInstallments.length} payment(s)\n`
-        : '';
-
       const formattedDueDate = new Date(next.dueDate).toLocaleDateString('en-GB', {
         day: '2-digit', month: 'short', year: 'numeric',
       });
 
+      const overdueWarning = overdueInstallments.length > 0
+        ? `Overdue: ${overdueInstallments.length} PMT(s)\n`
+        : '';
+
       const message =
-        `Aidoo Tech HP\n` +
-        `Hi ${customer.firstName}! (${contract.contractNumber})\n` +
+        `AIDOO TECH\n` +
+        `Hi ${customer.firstName}, (${contract.contractNumber})\n` +
         overdueWarning +
         `Bal: GHS ${contract.outstandingBalance.toFixed(2)}\n` +
         `Due: GHS ${totalDueAmount.toFixed(2)} (${contract.installments.length})\n` +
-        `Next: GHS ${(next.amount - next.paidAmount).toFixed(2)} by ${formattedDueDate}\n` +
+        `Next: GHS ${(next.amount - next.paidAmount).toFixed(2)}, ${formattedDueDate}\n` +
         `1. Pay  0. Cancel`;
 
       res.json(ussdResponse(SessionId, message, 'Aidoo Tech Hire Purchase', state));
