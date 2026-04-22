@@ -541,6 +541,36 @@ export async function sendOverdueNotification(overdueData: {
   await Promise.allSettled(promises);
 }
 
+// Combined overdue SMS — all overdue installments for a customer in one message
+export async function sendCombinedOverdueNotification(data: {
+  customerFirstName: string;
+  customerPhone: string;
+  itemName: string;
+  overdueCount: number;
+  totalOwed: number;
+  mostDaysOverdue: number;
+  penaltyAmount?: number;
+}): Promise<boolean> {
+  const penalty = data.penaltyAmount ? `+GHS ${data.penaltyAmount.toFixed(2)} penalty` : '';
+  const message =
+    `AIDOO TECH: Hi ${data.customerFirstName}, ${data.overdueCount} PMT(s) overdue on ${data.itemName}. ` +
+    `Owed: GHS ${data.totalOwed.toFixed(2)}${penalty ? ' ' + penalty : ''}. ` +
+    `${data.mostDaysOverdue}d overdue. Pay now to avoid penalties.`;
+  return sendSMS({ to: data.customerPhone, message });
+}
+
+// Due-today SMS — short single page
+export async function sendDueTodayNotification(data: {
+  customerFirstName: string;
+  customerPhone: string;
+  itemName: string;
+  amount: number;
+}): Promise<boolean> {
+  const message =
+    `AIDOO TECH: Hi ${data.customerFirstName}, GHS ${data.amount.toFixed(2)} due TODAY on ${data.itemName}. Pay now to stay on track.`;
+  return sendSMS({ to: data.customerPhone, message });
+}
+
 // Payment Failure Notification
 export async function sendPaymentFailureNotification(failureData: {
   customerFirstName: string;

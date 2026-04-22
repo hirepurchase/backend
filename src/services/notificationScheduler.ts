@@ -1,4 +1,4 @@
-import { sendPaymentReminder, sendOverdueNotification } from './notificationService';
+import { sendCombinedOverdueNotification, sendDueTodayNotification } from './notificationService';
 import prisma from '../config/database';
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
@@ -68,219 +68,134 @@ export async function markOverdueInstallments(): Promise<{ updated: number; pena
 // Check for upcoming payments and send reminders
 export async function checkUpcomingPayments(): Promise<void> {
   try {
-    console.log('Checking for upcoming payments...');
+    console.log('Checking for due-today payments...');
 
-    // Get notification settings
     const settings = await prisma.notificationSettings.findFirst();
+    if (!settings || !settings.sendSMS) return;
 
-    if (!settings) {
-      console.log('No notification settings found');
-      return;
-    }
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const endOfToday = new Date(today);
+    endOfToday.setHours(23, 59, 59, 999);
 
-    if (!settings.sendSMS && !settings.sendEmail) {
-      console.log('Notifications are disabled');
-      return;
-    }
-
-    const daysBeforeDue = settings.daysBeforeDue;
-    const targetDate = new Date();
-    targetDate.setDate(targetDate.getDate() + daysBeforeDue);
-    targetDate.setHours(0, 0, 0, 0);
-
-    const endOfTargetDate = new Date(targetDate);
-    endOfTargetDate.setHours(23, 59, 59, 999);
-
-    // Find pending installments due on the target date
+    // Only notify customers whose installment is due TODAY
     const installments = await prisma.installmentSchedule.findMany({
       where: {
         status: 'PENDING',
-        dueDate: {
-          gte: targetDate,
-          lte: endOfTargetDate,
-        },
+        dueDate: { gte: today, lte: endOfToday },
       },
-      include: {
-        contract: {
-          include: {
-            customer: true,
-          },
-        },
-      },
+      include: { contract: { include: { customer: true, inventoryItem: { include: { product: true } } } } },
     });
 
-    console.log(`Found ${installments.length} installments due in ${daysBeforeDue} days`);
+    console.log(`Found ${installments.length} installments due today`);
 
     for (const installment of installments) {
       const customer = installment.contract.customer;
 
-      // Check if we already sent a reminder today
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-
-      const existingReminder = await prisma.notificationLog.findFirst({
+      // Skip if already notified today
+      const alreadySent = await prisma.notificationLog.findFirst({
         where: {
           customerId_uuid: customer.id_uuid!,
           installmentId: installment.id,
           type: 'SMS',
-          createdAt: {
-            gte: today,
-          },
+          createdAt: { gte: today },
         },
       });
+      if (alreadySent) continue;
 
-      // Skip if we already sent a reminder today (for ONCE frequency)
-      if (existingReminder && settings.reminderFrequency === 'ONCE') {
-        console.log(`Skipping reminder for ${customer.firstName} ${customer.lastName} - already sent today`);
-        continue;
-      }
+      const itemName = installment.contract.inventoryItem?.product?.name || installment.contract.contractNumber;
 
-      // Send reminder
-      console.log(`Sending payment reminder to ${customer.firstName} ${customer.lastName}`);
-
-      await sendPaymentReminder({
+      await sendDueTodayNotification({
         customerFirstName: customer.firstName,
-        customerLastName: customer.lastName,
-        customerEmail: customer.email || undefined,
         customerPhone: customer.phone,
-        customerId: customer.id_uuid!,
-        contractNumber: installment.contract.contractNumber,
-        contractId: installment.contract.id,
-        installmentId: installment.id,
-        installmentNumber: installment.installmentNo,
-        amount: installment.amount,
-        dueDate: installment.dueDate,
-        daysUntilDue: daysBeforeDue,
+        itemName,
+        amount: installment.amount - installment.paidAmount,
       });
 
-      // Small delay to avoid overwhelming the SMS API
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
 
-    console.log('Finished checking upcoming payments');
+    console.log('Finished due-today notifications');
   } catch (error) {
     console.error('Error checking upcoming payments:', error);
   }
 }
 
-// Check for overdue payments and send reminders
+// Check for overdue payments — one combined SMS per customer
 export async function checkOverduePayments(): Promise<void> {
   try {
     console.log('Checking for overdue payments...');
 
-    // Get notification settings
     const settings = await prisma.notificationSettings.findFirst();
+    if (!settings || !settings.enableOverdueReminders || !settings.sendSMS) return;
 
-    if (!settings) {
-      console.log('No notification settings found');
-      return;
-    }
-
-    if (!settings.enableOverdueReminders) {
-      console.log('Overdue reminders are disabled');
-      return;
-    }
-
-    if (!settings.sendSMS && !settings.sendEmail) {
-      console.log('Notifications are disabled');
-      return;
-    }
-
-    // Find overdue installments
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
 
     const overdueInstallments = await prisma.installmentSchedule.findMany({
       where: {
-        status: {
-          in: ['OVERDUE', 'PARTIAL'],
-        },
-        dueDate: {
-          lt: now,
-        },
+        status: { in: ['OVERDUE', 'PARTIAL'] },
+        dueDate: { lt: today },
       },
-      include: {
-        contract: {
-          include: {
-            customer: true,
-          },
-        },
-      },
+      include: { contract: { include: { customer: true, inventoryItem: { include: { product: true } } } } },
     });
 
     console.log(`Found ${overdueInstallments.length} overdue installments`);
 
-    for (const installment of overdueInstallments) {
-      const customer = installment.contract.customer;
-      const daysOverdue = Math.floor((now.getTime() - installment.dueDate.getTime()) / (1000 * 60 * 60 * 24));
+    // Group by customer UUID so we send one SMS per customer
+    const byCustomer = new Map<string, typeof overdueInstallments>();
+    for (const inst of overdueInstallments) {
+      const uid = inst.contract.customer.id_uuid!;
+      if (!byCustomer.has(uid)) byCustomer.set(uid, []);
+      byCustomer.get(uid)!.push(inst);
+    }
 
-      // Check if we should send a reminder based on frequency
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+    for (const [customerId, installments] of byCustomer) {
+      const customer = installments[0].contract.customer;
 
+      // Check frequency — one SMS per customer per day/week
       const lastReminder = await prisma.notificationLog.findFirst({
         where: {
-          customerId_uuid: customer.id_uuid!,
-          installmentId: installment.id,
+          customerId_uuid: customerId,
           type: 'SMS',
-          message: {
-            contains: 'OVERDUE',
-          },
+          message: { contains: 'overdue' },
         },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        orderBy: { createdAt: 'desc' },
       });
 
-      // Skip if we sent a reminder today and frequency is daily
-      if (lastReminder && settings.overdueReminderFrequency === 'DAILY') {
-        const lastReminderDate = new Date(lastReminder.createdAt);
-        lastReminderDate.setHours(0, 0, 0, 0);
-        if (lastReminderDate.getTime() === today.getTime()) {
-          console.log(`Skipping overdue reminder for ${customer.firstName} ${customer.lastName} - already sent today`);
-          continue;
-        }
+      if (lastReminder) {
+        const daysSince = Math.floor((today.getTime() - new Date(lastReminder.createdAt).getTime()) / 86400000);
+        if (settings.overdueReminderFrequency === 'DAILY' && daysSince < 1) continue;
+        if (settings.overdueReminderFrequency === 'WEEKLY' && daysSince < 7) continue;
       }
 
-      // Skip if we sent a reminder this week and frequency is weekly
-      if (lastReminder && settings.overdueReminderFrequency === 'WEEKLY') {
-        const daysSinceLastReminder = Math.floor((today.getTime() - new Date(lastReminder.createdAt).getTime()) / (1000 * 60 * 60 * 24));
-        if (daysSinceLastReminder < 7) {
-          console.log(`Skipping overdue reminder for ${customer.firstName} ${customer.lastName} - sent within last week`);
-          continue;
-        }
-      }
+      // Aggregate totals across all overdue installments
+      const totalOwed = installments.reduce((sum, i) => sum + (i.amount - i.paidAmount), 0);
+      const mostDaysOverdue = Math.max(
+        ...installments.map(i => Math.floor((today.getTime() - i.dueDate.getTime()) / 86400000))
+      );
 
-      // Get penalty amount if any (penalties are per contract, not per installment)
+      // Get unpaid penalty for the contract (one per contract)
+      const contractId = installments[0].contract.id;
       const penalty = await prisma.penalty.findFirst({
-        where: {
-          contractId: installment.contract.id,
-          isPaid: false,
-        },
+        where: { contractId, isPaid: false },
       });
 
-      // Send overdue notification
-      console.log(`Sending overdue notification to ${customer.firstName} ${customer.lastName} - ${daysOverdue} days overdue`);
+      console.log(`Sending combined overdue SMS to ${customer.firstName} ${customer.lastName} (${installments.length} installments)`);
 
-      await sendOverdueNotification({
+      const itemName = installments[0].contract.inventoryItem?.product?.name || installments[0].contract.contractNumber;
+
+      await sendCombinedOverdueNotification({
         customerFirstName: customer.firstName,
-        customerLastName: customer.lastName,
-        customerEmail: customer.email || undefined,
         customerPhone: customer.phone,
-        customerId: customer.id_uuid!,
-        contractNumber: installment.contract.contractNumber,
-        contractId: installment.contract.id,
-        installmentId: installment.id,
-        installmentNumber: installment.installmentNo,
-        amount: installment.amount,
-        paidAmount: installment.paidAmount,
-        dueDate: installment.dueDate,
-        daysOverdue,
+        itemName,
+        overdueCount: installments.length,
+        totalOwed,
+        mostDaysOverdue,
         penaltyAmount: penalty?.amount,
       });
 
-      // Small delay to avoid overwhelming the SMS API
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
 
     console.log('Finished checking overdue payments');
