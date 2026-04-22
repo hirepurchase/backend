@@ -1495,3 +1495,340 @@ export async function getUssdPaymentStatus(req: Request, res: Response): Promise
     res.status(500).json({ success: false, message: 'Failed to retrieve payment status.' });
   }
 }
+
+// ─── Hubtel Programmable Services Session Handler ────────────────────────────
+
+function ussdRelease(sessionId: string, message: string) {
+  return {
+    SessionId: sessionId,
+    Type: 'release',
+    Message: message,
+    Label: message,
+    ClientState: '',
+    DataType: 'display',
+    FieldType: 'text',
+  };
+}
+
+function ussdResponse(sessionId: string, message: string, label: string, clientState: string, fieldType = 'text') {
+  return {
+    SessionId: sessionId,
+    Type: 'response',
+    Message: message,
+    Label: label,
+    ClientState: clientState,
+    DataType: 'input',
+    FieldType: fieldType,
+  };
+}
+
+// POST /payments/ussd/session  — Hubtel Service Interaction URL
+export async function handleUssdSession(req: Request, res: Response): Promise<void> {
+  try {
+    const { Type, Mobile, SessionId, Message, Operator, ClientState } = req.body;
+
+    // Handle session timeout
+    if (Type === 'Timeout') {
+      res.json(ussdRelease(SessionId, 'Session timed out. Please try again.'));
+      return;
+    }
+
+    // ── Step 1: Initiation ────────────────────────────────────────────────────
+    if (Type === 'Initiation') {
+      const sanitizedPhone = sanitizePhoneNumber(Mobile);
+
+      const customer = await prisma.customer.findFirst({
+        where: { phone: sanitizedPhone },
+      });
+
+      if (!customer) {
+        res.json(ussdRelease(SessionId, 'You are not a registered customer.'));
+        return;
+      }
+
+      if (!customer.isActivated) {
+        res.json(ussdRelease(SessionId, 'Your account is not active. Please contact us.'));
+        return;
+      }
+
+      const contract = await prisma.hirePurchaseContract.findFirst({
+        where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
+        include: {
+          installments: {
+            where: { status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
+            orderBy: { dueDate: 'asc' },
+          },
+        },
+      });
+
+      if (!contract) {
+        res.json(ussdRelease(SessionId, 'You have no active hire purchase contract.'));
+        return;
+      }
+
+      if (contract.installments.length === 0) {
+        res.json(ussdRelease(SessionId, 'You have no outstanding payments.'));
+        return;
+      }
+
+      const now = new Date();
+      const overdueInstallments = contract.installments.filter(
+        inst => inst.status === 'OVERDUE' || (inst.dueDate < now && inst.status !== 'PAID')
+      );
+      const totalDueAmount = contract.installments.reduce((sum, inst) => sum + (inst.amount - inst.paidAmount), 0);
+      const next = contract.installments[0];
+
+      // Map operator to network
+      const networkMap: Record<string, string> = {
+        mtn: 'MTN',
+        vodafone: 'VODAFONE',
+        telecel: 'VODAFONE',
+        tigo: 'AIRTELTIGO',
+        airtel: 'AIRTELTIGO',
+      };
+      const network = networkMap[Operator?.toLowerCase()] || 'MTN';
+
+      // Pack state needed for next steps into ClientState
+      const state = JSON.stringify({
+        contractId: contract.id,
+        contractNumber: contract.contractNumber,
+        customerId: customer.id_uuid,
+        customerName: `${customer.firstName} ${customer.lastName}`,
+        customerEmail: customer.email || '',
+        phone: sanitizedPhone,
+        network,
+        outstandingBalance: contract.outstandingBalance,
+        totalDueAmount: parseFloat(totalDueAmount.toFixed(2)),
+        overdueCount: overdueInstallments.length,
+        nextDueDate: next.dueDate,
+        nextInstallmentAmount: parseFloat((next.amount - next.paidAmount).toFixed(2)),
+      });
+
+      const overdueWarning = overdueInstallments.length > 0
+        ? `⚠ Overdue: ${overdueInstallments.length} payment(s)\n`
+        : '';
+
+      const formattedDueDate = new Date(next.dueDate).toLocaleDateString('en-GB', {
+        day: '2-digit', month: 'short', year: 'numeric',
+      });
+
+      const message =
+        `Aidoo Tech Hire Purchase\n` +
+        `Hi, ${customer.firstName}!\n` +
+        `Contract: ${contract.contractNumber}\n` +
+        `─────────────────\n` +
+        overdueWarning +
+        `Outstanding: GHS ${contract.outstandingBalance.toFixed(2)}\n` +
+        `Due (${contract.installments.length} inst): GHS ${totalDueAmount.toFixed(2)}\n` +
+        `Next Due: ${formattedDueDate}\n` +
+        `Next Amt: GHS ${(next.amount - next.paidAmount).toFixed(2)}\n` +
+        `─────────────────\n` +
+        `1. Pay\n` +
+        `0. Cancel`;
+
+      res.json(ussdResponse(SessionId, message, 'Aidoo Tech Hire Purchase', state));
+      return;
+    }
+
+    // ── Step 2: Customer chose 1 (Pay) or 0 (Cancel) ─────────────────────────
+    if (Type === 'Response' && !ClientState.startsWith('AMOUNT|')) {
+      if (Message === '0') {
+        res.json(ussdRelease(SessionId, 'Thank you. Goodbye.'));
+        return;
+      }
+
+      if (Message !== '1') {
+        res.json(ussdRelease(SessionId, 'Invalid option. Please try again.'));
+        return;
+      }
+
+      // Parse state passed from step 1
+      let state: any;
+      try {
+        state = JSON.parse(ClientState);
+      } catch {
+        res.json(ussdRelease(SessionId, 'Session error. Please dial again.'));
+        return;
+      }
+
+      const nextState = `AMOUNT|${state.contractId}|${state.network}|${state.customerId}|${state.customerName}|${state.customerEmail}|${state.phone}|${state.contractNumber}`;
+
+      res.json(ussdResponse(
+        SessionId,
+        'Enter amount to pay (GHS):',
+        'Payment Amount',
+        nextState,
+        'decimal'
+      ));
+      return;
+    }
+
+    // ── Step 3: Customer entered an amount ────────────────────────────────────
+    if (Type === 'Response' && ClientState.startsWith('AMOUNT|')) {
+      const parts = ClientState.split('|');
+      const [, contractId, network, customerId, customerName, customerEmail, phone, contractNumber] = parts;
+
+      const paymentAmount = parseFloat(Message);
+      if (isNaN(paymentAmount) || paymentAmount <= 0) {
+        res.json(ussdRelease(SessionId, 'Invalid amount. Please dial again and enter a valid amount.'));
+        return;
+      }
+
+      // Generate unique transaction ref
+      let transactionRef = generateTransactionRef();
+      let exists = await prisma.paymentTransaction.findUnique({ where: { transactionRef } });
+      while (exists) {
+        transactionRef = generateTransactionRef();
+        exists = await prisma.paymentTransaction.findUnique({ where: { transactionRef } });
+      }
+
+      // Create payment record
+      await prisma.paymentTransaction.create({
+        data: {
+          transactionRef,
+          contractId,
+          customerId_uuid: customerId,
+          amount: paymentAmount,
+          paymentMethod: 'HUBTEL_REGULAR',
+          mobileMoneyProvider: network,
+          mobileMoneyNumber: formatPhoneForHubtel(phone),
+          status: 'PENDING',
+          metadata: JSON.stringify({
+            initiatedAt: new Date().toISOString(),
+            gateway: 'HUBTEL_REGULAR',
+            channel: 'USSD',
+            sessionId: SessionId,
+          }),
+        },
+      });
+
+      // Trigger Hubtel Receive Money (mobile money USSD prompt)
+      await initiateHubtelReceiveMoney({
+        amount: paymentAmount,
+        customerName,
+        customerPhone: phone,
+        customerEmail: customerEmail || undefined,
+        network,
+        description: `Hire purchase payment for contract ${contractNumber}`,
+        transactionRef,
+      });
+
+      res.json({
+        SessionId,
+        Type: 'AddToCart',
+        Message: 'Prompt sent. Approve on your phone to complete payment.',
+        Label: 'Payment Initiated',
+        ClientState: '',
+        DataType: 'display',
+        FieldType: 'text',
+        Item: {
+          ItemName: 'Hire Purchase Payment',
+          Qty: 1,
+          Price: paymentAmount,
+        },
+      });
+      return;
+    }
+
+    // Fallback
+    res.json(ussdRelease(SessionId, 'Session error. Please dial again.'));
+  } catch (error: any) {
+    console.error('USSD session error:', error);
+    // Always return a valid Hubtel response shape even on error
+    const sessionId = req.body?.SessionId || '';
+    res.json(ussdRelease(sessionId, 'Service unavailable. Please try again later.'));
+  }
+}
+
+// POST /payments/ussd/fulfillment  — Hubtel Service Fulfillment URL
+export async function handleUssdFulfillment(req: Request, res: Response): Promise<void> {
+  try {
+    const { SessionId, OrderId, OrderInfo } = req.body;
+
+    if (!OrderInfo?.Payment?.IsSuccessful) {
+      res.status(200).json({ received: true });
+      return;
+    }
+
+    const customerPhone = sanitizePhoneNumber(OrderInfo.CustomerMobileNumber || '');
+    const amountPaid = OrderInfo.Payment.AmountAfterCharges || OrderInfo.Payment.AmountPaid;
+
+    // Find the pending transaction linked to this session
+    const payment = await prisma.paymentTransaction.findFirst({
+      where: {
+        status: 'PENDING',
+        mobileMoneyNumber: formatPhoneForHubtel(customerPhone),
+        metadata: { contains: SessionId },
+      },
+    });
+
+    if (payment) {
+      // Update transaction to SUCCESS
+      await prisma.paymentTransaction.update({
+        where: { id: payment.id },
+        data: {
+          status: 'SUCCESS',
+          paymentDate: new Date(),
+          externalRef: OrderId,
+          metadata: JSON.stringify({
+            ...JSON.parse(payment.metadata || '{}'),
+            fulfilledAt: new Date().toISOString(),
+            orderId: OrderId,
+            amountPaid,
+          }),
+        },
+      });
+
+      // Apply payment to installments (earliest due first)
+      const installments = await prisma.installmentSchedule.findMany({
+        where: { contractId: payment.contractId, status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
+        orderBy: { dueDate: 'asc' },
+      });
+
+      let remaining = amountPaid;
+      for (const inst of installments) {
+        if (remaining <= 0) break;
+        const owed = inst.amount - inst.paidAmount;
+        if (remaining >= owed) {
+          await prisma.installmentSchedule.update({
+            where: { id: inst.id },
+            data: { status: 'PAID', paidAmount: inst.amount, paidAt: new Date() },
+          });
+          remaining -= owed;
+        } else {
+          await prisma.installmentSchedule.update({
+            where: { id: inst.id },
+            data: { status: 'PARTIAL', paidAmount: inst.paidAmount + remaining },
+          });
+          remaining = 0;
+        }
+      }
+
+      // Update contract totals
+      await prisma.hirePurchaseContract.update({
+        where: { id: payment.contractId },
+        data: {
+          totalPaid: { increment: amountPaid },
+          outstandingBalance: { decrement: amountPaid },
+        },
+      });
+    }
+
+    // Acknowledge fulfillment to Hubtel (required within 1 hour)
+    await fetch('https://gs-callback.hubtel.com:9055/callback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        SessionId,
+        OrderId,
+        ServiceStatus: payment ? 'success' : 'failed',
+        MetaData: null,
+      }),
+    }).catch(err => console.error('Hubtel fulfillment callback failed:', err));
+
+    res.status(200).json({ received: true });
+  } catch (error: any) {
+    console.error('USSD fulfillment error:', error);
+    res.status(200).json({ received: true });
+  }
+}

@@ -18,6 +18,8 @@ import {
   getUssdBalance,
   initiateUssdPayment,
   getUssdPaymentStatus,
+  handleUssdSession,
+  handleUssdFulfillment,
 } from '../controllers/paymentController';
 import { authenticateAdmin, authenticateCustomer, requirePermission, authenticateAny } from '../middleware/auth';
 
@@ -54,5 +56,9 @@ router.post('/hubtel/direct-debit', authenticateAdmin, requirePermission('MANAGE
 router.get('/ussd/balance', getUssdBalance);
 router.post('/ussd/initiate', initiateUssdPayment);
 router.get('/ussd/status/:transactionRef', getUssdPaymentStatus);
+
+// Hubtel Programmable Services (no auth - called by Hubtel)
+router.post('/ussd/session', handleUssdSession);
+router.post('/ussd/fulfillment', handleUssdFulfillment);
 
 export default router;
