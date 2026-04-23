@@ -5,6 +5,8 @@ import {
   handlePaymentWebhook,
   getContractPayments,
   recordManualPayment,
+  updateManualPayment,
+  deleteManualPayment,
   initiateHubtelPayment,
   checkHubtelStatus,
   handleHubtelCallback,
@@ -40,6 +42,8 @@ router.get('/hubtel/status/:transactionRef', authenticateCustomer, checkHubtelSt
 // Admin payment routes
 router.get('/contract/:contractId', authenticateAdmin, getContractPayments);
 router.post('/manual', authenticateAdmin, requirePermission('RECORD_PAYMENT'), recordManualPayment);
+router.put('/manual/:id', authenticateAdmin, requirePermission('RECORD_PAYMENT'), updateManualPayment);
+router.delete('/manual/:id', authenticateAdmin, requirePermission('RECORD_PAYMENT'), deleteManualPayment);
 router.get('/admin/status/:transactionRef', authenticateAdmin, getPaymentStatus);
 router.get('/admin/hubtel/status/:transactionRef', authenticateAdmin, checkHubtelStatus);
 

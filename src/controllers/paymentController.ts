@@ -529,6 +529,218 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
   }
 }
 
+// Update a manual payment entry (Admin only)
+export async function updateManualPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const { amount, paymentMethod, reference, notes } = req.body;
+
+    const payment = await prisma.paymentTransaction.findUnique({
+      where: { id },
+      include: { contract: true },
+    });
+
+    if (!payment) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+
+    // Only allow editing manually recorded payments
+    const metadata = JSON.parse(payment.metadata || '{}');
+    if (!metadata.isManual) {
+      res.status(403).json({ error: 'Only manually recorded payments can be edited' });
+      return;
+    }
+
+    const oldAmount = payment.amount;
+    const newAmount = amount !== undefined ? Number(amount) : oldAmount;
+    const amountDiff = newAmount - oldAmount;
+
+    await prisma.$transaction(async (tx) => {
+      // Update the payment record
+      await tx.paymentTransaction.update({
+        where: { id },
+        data: {
+          amount: newAmount,
+          paymentMethod: paymentMethod || payment.paymentMethod,
+          externalRef: reference !== undefined ? reference : payment.externalRef,
+          metadata: JSON.stringify({
+            ...metadata,
+            notes: notes !== undefined ? notes : metadata.notes,
+            lastEditedBy: req.user!.id,
+            lastEditedAt: new Date().toISOString(),
+          }),
+        },
+      });
+
+      if (amountDiff !== 0) {
+        // Recalculate contract totals from all successful payments
+        const allPayments = await tx.paymentTransaction.findMany({
+          where: { contractId: payment.contractId, status: 'SUCCESS' },
+        });
+        const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount, 0);
+        const contract = payment.contract;
+        const newTotalPaid = contract.depositAmount + paymentsSum;
+        const newOutstandingBalance = Math.max(0, contract.totalPrice - newTotalPaid);
+
+        await tx.hirePurchaseContract.update({
+          where: { id: payment.contractId },
+          data: {
+            totalPaid: newTotalPaid,
+            outstandingBalance: newOutstandingBalance,
+            status: newOutstandingBalance <= 0 ? 'COMPLETED' : 'ACTIVE',
+          },
+        });
+
+        // Reprocess installments from scratch using remaining amount
+        // Reset affected installments then re-apply all payments in order
+        const installments = await tx.installmentSchedule.findMany({
+          where: { contractId: payment.contractId },
+          orderBy: { installmentNo: 'asc' },
+        });
+
+        // Reset all non-paid installments to recalculate
+        for (const inst of installments) {
+          if (inst.status !== 'PAID' || inst.paidAmount < inst.amount) {
+            await tx.installmentSchedule.update({
+              where: { id: inst.id },
+              data: { paidAmount: 0, status: 'PENDING', paidAt: null },
+            });
+          }
+        }
+
+        // Re-apply total payments sum across installments
+        let remaining = paymentsSum;
+        for (const inst of installments) {
+          if (remaining <= 0) break;
+          const owed = inst.amount;
+          if (remaining >= owed) {
+            await tx.installmentSchedule.update({
+              where: { id: inst.id },
+              data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
+            });
+            remaining -= owed;
+          } else {
+            await tx.installmentSchedule.update({
+              where: { id: inst.id },
+              data: { paidAmount: remaining, status: 'PARTIAL', paidAt: null },
+            });
+            remaining = 0;
+          }
+        }
+      }
+    });
+
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'UPDATE_MANUAL_PAYMENT',
+      entity: 'PaymentTransaction',
+      entityId: id,
+      oldValues: { amount: oldAmount },
+      newValues: { amount: newAmount, paymentMethod, reference, notes },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.status(200).json({ message: 'Payment updated successfully' });
+  } catch (error) {
+    console.error('Update manual payment error:', error);
+    res.status(500).json({ error: 'Failed to update payment' });
+  }
+}
+
+// Delete a manual payment entry (Admin only)
+export async function deleteManualPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+
+    const payment = await prisma.paymentTransaction.findUnique({
+      where: { id },
+      include: { contract: true },
+    });
+
+    if (!payment) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+
+    const metadata = JSON.parse(payment.metadata || '{}');
+    if (!metadata.isManual) {
+      res.status(403).json({ error: 'Only manually recorded payments can be deleted' });
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.paymentTransaction.delete({ where: { id } });
+
+      // Recalculate contract totals
+      const allPayments = await tx.paymentTransaction.findMany({
+        where: { contractId: payment.contractId, status: 'SUCCESS' },
+      });
+      const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount, 0);
+      const contract = payment.contract;
+      const newTotalPaid = contract.depositAmount + paymentsSum;
+      const newOutstandingBalance = Math.max(0, contract.totalPrice - newTotalPaid);
+
+      await tx.hirePurchaseContract.update({
+        where: { id: payment.contractId },
+        data: {
+          totalPaid: newTotalPaid,
+          outstandingBalance: newOutstandingBalance,
+          status: newOutstandingBalance <= 0 ? 'COMPLETED' : 'ACTIVE',
+        },
+      });
+
+      // Reset and re-apply installments
+      const installments = await tx.installmentSchedule.findMany({
+        where: { contractId: payment.contractId },
+        orderBy: { installmentNo: 'asc' },
+      });
+
+      for (const inst of installments) {
+        await tx.installmentSchedule.update({
+          where: { id: inst.id },
+          data: { paidAmount: 0, status: 'PENDING', paidAt: null },
+        });
+      }
+
+      let remaining = paymentsSum;
+      for (const inst of installments) {
+        if (remaining <= 0) break;
+        const owed = inst.amount;
+        if (remaining >= owed) {
+          await tx.installmentSchedule.update({
+            where: { id: inst.id },
+            data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
+          });
+          remaining -= owed;
+        } else {
+          await tx.installmentSchedule.update({
+            where: { id: inst.id },
+            data: { paidAmount: remaining, status: 'PARTIAL', paidAt: null },
+          });
+          remaining = 0;
+        }
+      }
+    });
+
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'DELETE_MANUAL_PAYMENT',
+      entity: 'PaymentTransaction',
+      entityId: id,
+      oldValues: { amount: payment.amount, transactionRef: payment.transactionRef },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.status(200).json({ message: 'Payment deleted successfully' });
+  } catch (error) {
+    console.error('Delete manual payment error:', error);
+    res.status(500).json({ error: 'Failed to delete payment' });
+  }
+}
+
 // Initiate Hubtel payment (Customer)
 export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
