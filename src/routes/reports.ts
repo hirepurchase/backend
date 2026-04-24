@@ -23,6 +23,6 @@ router.get('/defaults', authenticateAdmin, requirePermission('VIEW_REPORTS'), ge
 router.get('/inventory', authenticateAdmin, requirePermission('VIEW_REPORTS'), getInventoryReport);
 router.get('/preapprovals', authenticateAdmin, requirePermission('VIEW_REPORTS'), getPreapprovalsReport);
 router.get('/income', authenticateAdmin, requirePermission('VIEW_REPORTS'), getIncomeReport);
-router.get('/daily-payments', authenticateAdmin, getDailyPayments);
+router.get('/daily-payments', authenticateAdmin, requirePermission('VIEW_DAILY_PAYMENTS'), getDailyPayments);
 
 export default router;

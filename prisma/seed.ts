@@ -28,6 +28,7 @@ async function main() {
     { name: 'MANAGE_HUBTEL_PAYMENTS', description: 'Manage Hubtel payment settings and retry configurations' },
     { name: 'VIEW_FAILED_PAYMENTS', description: 'View failed payment transactions' },
     { name: 'RETRY_PAYMENTS', description: 'Retry failed payment transactions' },
+    { name: 'VIEW_DAILY_PAYMENTS', description: 'View daily payments notifications and summary' },
     { name: 'VIEW_REPORTS', description: 'View reports' },
     { name: 'EXPORT_REPORTS', description: 'Export reports to files' },
     { name: 'MANAGE_SETTINGS', description: 'Manage system settings and notifications' },
