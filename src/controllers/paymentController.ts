@@ -1734,6 +1734,60 @@ function ussdResponse(sessionId: string, message: string, label: string, clientS
   };
 }
 
+async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: string, network: string) {
+  const contract = await prisma.hirePurchaseContract.findFirst({
+    where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
+    include: {
+      installments: {
+        where: { status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
+        orderBy: { dueDate: 'asc' },
+      },
+    },
+  });
+
+  if (!contract) {
+    return ussdRelease(sessionId, 'You have no active hire purchase contract.');
+  }
+  if (contract.installments.length === 0) {
+    return ussdRelease(sessionId, 'You have no outstanding payments.');
+  }
+
+  const now = new Date();
+  const overdueInstallments = contract.installments.filter(
+    inst => inst.status === 'OVERDUE' || (inst.dueDate < now && inst.status !== 'PAID')
+  );
+  const totalDueAmount = contract.installments.reduce((sum, inst) => sum + (inst.amount - inst.paidAmount), 0);
+  const next = contract.installments[0];
+
+  const state = JSON.stringify({
+    contractId: contract.id,
+    contractNumber: contract.contractNumber,
+    customerId: customer.id_uuid,
+    customerName: `${customer.firstName} ${customer.lastName}`,
+    customerEmail: customer.email || '',
+    phone: paymentPhone, // dialing number — used for Hubtel payment prompt
+    network,
+  });
+
+  const formattedDueDate = new Date(next.dueDate).toLocaleDateString('en-GB', {
+    day: '2-digit', month: 'short', year: 'numeric',
+  });
+  const overdueWarning = overdueInstallments.length > 0
+    ? `Overdue: ${overdueInstallments.length} PMT(s)\n`
+    : '';
+
+  const message =
+    `AIDOO TECH\n` +
+    `Hi ${customer.firstName}, (${contract.contractNumber})\n` +
+    overdueWarning +
+    `Bal: GHS ${contract.outstandingBalance.toFixed(2)}\n` +
+    `Due: GHS ${totalDueAmount.toFixed(2)} (${contract.installments.length})\n` +
+    `Next: GHS ${(next.amount - next.paidAmount).toFixed(2)}, ${formattedDueDate}\n` +
+    `1. Pay  0. Cancel`;
+
+  return ussdResponse(sessionId, message, 'Aidoo Tech Hire Purchase', state);
+}
+
 // POST /payments/ussd/session  — Hubtel Service Interaction URL
 export async function handleUssdSession(req: Request, res: Response): Promise<void> {
   try {
@@ -1747,14 +1801,25 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
 
     // ── Step 1: Initiation ────────────────────────────────────────────────────
     if (Type === 'Initiation') {
-      const sanitizedPhone = sanitizePhoneNumber(Mobile);
+      const dialingPhone = sanitizePhoneNumber(Mobile);
+      const networkMap: Record<string, string> = {
+        mtn: 'MTN', vodafone: 'VODAFONE', telecel: 'VODAFONE', tigo: 'AIRTELTIGO', airtel: 'AIRTELTIGO',
+      };
+      const network = networkMap[Operator?.toLowerCase()] || 'MTN';
 
       const customer = await prisma.customer.findFirst({
-        where: { phone: sanitizedPhone },
+        where: { phone: dialingPhone },
       });
 
+      // Unregistered dialing number — offer alternative lookup
       if (!customer) {
-        res.json(ussdRelease(SessionId, 'You are not a registered customer.'));
+        const unregState = `UNREGISTERED|${dialingPhone}|${network}`;
+        res.json(ussdResponse(
+          SessionId,
+          `AIDOO TECH\nNumber not found.\n1. Enter registered number\n0. Cancel`,
+          'Number Not Found',
+          unregState,
+        ));
         return;
       }
 
@@ -1763,82 +1828,53 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         return;
       }
 
-      const contract = await prisma.hirePurchaseContract.findFirst({
-        where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
-        include: {
-          installments: {
-            where: { status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
-            orderBy: { dueDate: 'asc' },
-          },
-        },
-      });
-
-      if (!contract) {
-        res.json(ussdRelease(SessionId, 'You have no active hire purchase contract.'));
-        return;
-      }
-
-      if (contract.installments.length === 0) {
-        res.json(ussdRelease(SessionId, 'You have no outstanding payments.'));
-        return;
-      }
-
-      const now = new Date();
-      const overdueInstallments = contract.installments.filter(
-        inst => inst.status === 'OVERDUE' || (inst.dueDate < now && inst.status !== 'PAID')
-      );
-      const totalDueAmount = contract.installments.reduce((sum, inst) => sum + (inst.amount - inst.paidAmount), 0);
-      const next = contract.installments[0];
-
-      // Map operator to network
-      const networkMap: Record<string, string> = {
-        mtn: 'MTN',
-        vodafone: 'VODAFONE',
-        telecel: 'VODAFONE',
-        tigo: 'AIRTELTIGO',
-        airtel: 'AIRTELTIGO',
-      };
-      const network = networkMap[Operator?.toLowerCase()] || 'MTN';
-
-      // Pack state needed for next steps into ClientState
-      const state = JSON.stringify({
-        contractId: contract.id,
-        contractNumber: contract.contractNumber,
-        customerId: customer.id_uuid,
-        customerName: `${customer.firstName} ${customer.lastName}`,
-        customerEmail: customer.email || '',
-        phone: sanitizedPhone,
-        network,
-        outstandingBalance: contract.outstandingBalance,
-        totalDueAmount: parseFloat(totalDueAmount.toFixed(2)),
-        overdueCount: overdueInstallments.length,
-        nextDueDate: next.dueDate,
-        nextInstallmentAmount: parseFloat((next.amount - next.paidAmount).toFixed(2)),
-      });
-
-      const formattedDueDate = new Date(next.dueDate).toLocaleDateString('en-GB', {
-        day: '2-digit', month: 'short', year: 'numeric',
-      });
-
-      const overdueWarning = overdueInstallments.length > 0
-        ? `Overdue: ${overdueInstallments.length} PMT(s)\n`
-        : '';
-
-      const message =
-        `AIDOO TECH\n` +
-        `Hi ${customer.firstName}, (${contract.contractNumber})\n` +
-        overdueWarning +
-        `Bal: GHS ${contract.outstandingBalance.toFixed(2)}\n` +
-        `Due: GHS ${totalDueAmount.toFixed(2)} (${contract.installments.length})\n` +
-        `Next: GHS ${(next.amount - next.paidAmount).toFixed(2)}, ${formattedDueDate}\n` +
-        `1. Pay  0. Cancel`;
-
-      res.json(ussdResponse(SessionId, message, 'Aidoo Tech Hire Purchase', state));
+      res.json(await buildBalanceMenu(SessionId, customer, dialingPhone, network));
       return;
     }
 
-    // ── Step 2: Customer chose 1 (Pay) or 0 (Cancel) ─────────────────────────
-    if (Type === 'Response' && !ClientState.startsWith('AMOUNT|')) {
+    // ── Step 2a: Unregistered number — chose 1 (enter registered phone) or 0 ──
+    if (Type === 'Response' && ClientState.startsWith('UNREGISTERED|')) {
+      if (Message === '0') {
+        res.json(ussdRelease(SessionId, 'Thank you. Goodbye.'));
+        return;
+      }
+      if (Message !== '1') {
+        res.json(ussdRelease(SessionId, 'Invalid option. Please dial again.'));
+        return;
+      }
+      const parts = ClientState.split('|');
+      const [, dialingPhone, network] = parts;
+      const verifyState = `VERIFY|${dialingPhone}|${network}`;
+      res.json(ussdResponse(SessionId, 'Enter your registered phone number:', 'Verify Identity', verifyState, 'phone'));
+      return;
+    }
+
+    // ── Step 2b: Verify registered phone number ───────────────────────────────
+    if (Type === 'Response' && ClientState.startsWith('VERIFY|')) {
+      const parts = ClientState.split('|');
+      const [, dialingPhone, network] = parts;
+
+      const enteredPhone = sanitizePhoneNumber(Message);
+      const customer = await prisma.customer.findFirst({
+        where: { phone: enteredPhone },
+      });
+
+      if (!customer) {
+        res.json(ussdRelease(SessionId, 'Number not recognised. Please dial again.'));
+        return;
+      }
+      if (!customer.isActivated) {
+        res.json(ussdRelease(SessionId, 'Your account is not active. Please contact us.'));
+        return;
+      }
+
+      // Verified — proceed using the DIALING number for payment prompt
+      res.json(await buildBalanceMenu(SessionId, customer, dialingPhone, network));
+      return;
+    }
+
+    // ── Step 3: Customer chose 1 (Pay) or 0 (Cancel) ─────────────────────────
+    if (Type === 'Response' && !ClientState.startsWith('AMOUNT|') && !ClientState.startsWith('UNREGISTERED|') && !ClientState.startsWith('VERIFY|')) {
       if (Message === '0') {
         res.json(ussdRelease(SessionId, 'Thank you. Goodbye.'));
         return;
@@ -1849,7 +1885,6 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         return;
       }
 
-      // Parse state passed from step 1
       let state: any;
       try {
         state = JSON.parse(ClientState);
@@ -1860,13 +1895,7 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
 
       const nextState = `AMOUNT|${state.contractId}|${state.network}|${state.customerId}|${state.customerName}|${state.customerEmail}|${state.phone}|${state.contractNumber}`;
 
-      res.json(ussdResponse(
-        SessionId,
-        'Enter amount to pay (GHS):',
-        'Payment Amount',
-        nextState,
-        'decimal'
-      ));
+      res.json(ussdResponse(SessionId, 'Enter amount to pay (GHS):', 'Payment Amount', nextState, 'decimal'));
       return;
     }
 
