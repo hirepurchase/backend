@@ -589,6 +589,7 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
     }
 
     const paymentStatus = resolveHubtelPaymentStatus(normalizedCallback);
+    console.log(`Hubtel callback resolved: ref=${clientReference} responseCode=${normalizedCallback.responseCode} dataStatus=${normalizedCallback.data.status} => paymentStatus=${paymentStatus}`);
     const failureReason = paymentStatus === 'FAILED'
       ? description || normalizedCallback.message || 'Payment failed - insufficient funds or customer rejection'
       : '';
