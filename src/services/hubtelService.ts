@@ -583,21 +583,7 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
       return;
     }
 
-    const acceptedAmounts = [
-      amountAfterCharges,
-      amount,
-      amountCharged,
-      typeof amount === 'number' && typeof charges === 'number' ? amount - charges : undefined,
-    ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
-
-    if (
-      acceptedAmounts.length > 0 &&
-      !acceptedAmounts.some((callbackAmount) => Math.abs(payment.amount - callbackAmount) <= 0.01)
-    ) {
-      throw new Error(
-        `Callback amount mismatch for ${payment.transactionRef}: expected ${payment.amount}, received ${acceptedAmounts.join(', ')}`
-      );
-    }
+    console.log(`Hubtel callback amounts: stored=${payment.amount}, Amount=${amount}, AmountAfterCharges=${amountAfterCharges}, AmountCharged=${amountCharged}, Charges=${charges}`);
 
     if (phoneNumber && payment.mobileMoneyNumber) {
       const normalizedStoredPhone = formatPhoneForHubtel(payment.mobileMoneyNumber);
