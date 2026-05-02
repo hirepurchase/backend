@@ -14,7 +14,27 @@ import {
   formatPhoneForHubtel,
 } from '../services/hubtelService';
 import { AuthenticatedRequest, WebhookPayload } from '../types';
+import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
+
+function ensureContractCanAcceptPayments(status: string, res: Response): boolean {
+  if (status === 'ACTIVE') {
+    return true;
+  }
+
+  if (status === 'PENDING_APPROVAL') {
+    res.status(400).json({ error: 'Contract is awaiting approval and cannot receive payments yet.' });
+    return false;
+  }
+
+  if (status === 'REVISION_REQUESTED') {
+    res.status(400).json({ error: 'Contract has been sent back for revision and cannot receive payments yet.' });
+    return false;
+  }
+
+  res.status(400).json({ error: `Contract is not active. Current status: ${status}.` });
+  return false;
+}
 
 // Initiate payment (Customer)
 export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -71,8 +91,7 @@ export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Re
       return;
     }
 
-    if (contract.status !== 'ACTIVE') {
-      res.status(400).json({ error: 'Contract is not active' });
+    if (!ensureContractCanAcceptPayments(contract.status, res)) {
       return;
     }
 
@@ -242,7 +261,17 @@ export async function getPaymentStatus(req: AuthenticatedRequest, res: Response)
 // Mobile Money webhook handler
 export async function handlePaymentWebhook(req: Request, res: Response): Promise<void> {
   try {
+    const webhookError = validateWebhookRequest(req);
+    if (webhookError) {
+      res.status(401).json({ error: webhookError });
+      return;
+    }
+
     const payload: WebhookPayload = req.body;
+    if (!payload?.transactionRef || !payload?.status || !['SUCCESS', 'FAILED'].includes(payload.status)) {
+      res.status(400).json({ error: 'Invalid webhook payload' });
+      return;
+    }
 
     // Validate webhook signature (implementation depends on provider)
     // const isValid = validateWebhookSignature(req);
@@ -261,20 +290,52 @@ export async function handlePaymentWebhook(req: Request, res: Response): Promise
       return;
     }
 
-    // Update payment status
-    await prisma.paymentTransaction.update({
-      where: { id: payment.id },
+    if (typeof payload.amount !== 'number' || payload.amount <= 0) {
+      res.status(400).json({ error: 'Invalid webhook amount' });
+      return;
+    }
+
+    if (Math.abs(payment.amount - payload.amount) > 0.01) {
+      res.status(400).json({ error: 'Webhook amount mismatch' });
+      return;
+    }
+
+    if (payment.status === 'SUCCESS' || payment.status === payload.status) {
+      res.json({ received: true, duplicate: true });
+      return;
+    }
+
+    const metadata = (() => {
+      try {
+        return JSON.parse(payment.metadata || '{}');
+      } catch {
+        return {};
+      }
+    })();
+
+    const updatedPayment = await prisma.paymentTransaction.updateMany({
+      where: {
+        id: payment.id,
+        status: {
+          not: 'SUCCESS',
+        },
+      },
       data: {
         status: payload.status,
-        externalRef: payload.externalRef,
+        externalRef: payload.externalRef || payment.externalRef,
         paymentDate: payload.status === 'SUCCESS' ? new Date() : null,
         metadata: JSON.stringify({
-          ...JSON.parse(payment.metadata || '{}'),
+          ...metadata,
           webhookReceived: new Date().toISOString(),
           webhookPayload: payload,
         }),
       },
     });
+
+    if (updatedPayment.count === 0) {
+      res.json({ received: true, duplicate: true });
+      return;
+    }
 
     // Process successful payment
     if (payload.status === 'SUCCESS') {
@@ -454,8 +515,7 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
       return;
     }
 
-    if (contract.status !== 'ACTIVE') {
-      res.status(400).json({ error: 'Contract is not active' });
+    if (!ensureContractCanAcceptPayments(contract.status, res)) {
       return;
     }
 
@@ -796,8 +856,7 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
       return;
     }
 
-    if (contract.status !== 'ACTIVE') {
-      res.status(400).json({ error: 'Contract is not active' });
+    if (!ensureContractCanAcceptPayments(contract.status, res)) {
       return;
     }
 
@@ -962,6 +1021,12 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
 // Hubtel webhook callback handler
 export async function handleHubtelCallback(req: Request, res: Response): Promise<void> {
   try {
+    const webhookError = validateWebhookRequest(req);
+    if (webhookError) {
+      res.status(401).json({ error: webhookError });
+      return;
+    }
+
     console.log('Hubtel callback received:', req.body);
 
     // Process the callback
@@ -1210,6 +1275,12 @@ export async function getCustomerPreapprovals(req: AuthenticatedRequest, res: Re
 // Hubtel preapproval callback handler
 export async function handlePreapprovalCallback(req: Request, res: Response): Promise<void> {
   try {
+    const webhookError = validateWebhookRequest(req);
+    if (webhookError) {
+      res.status(401).json({ error: webhookError });
+      return;
+    }
+
     console.log('Hubtel preapproval callback received:', req.body);
 
     // Process the preapproval callback
@@ -1263,8 +1334,7 @@ export async function initiateHubtelRegularPayment(req: AuthenticatedRequest, re
       return;
     }
 
-    if (contract.status !== 'ACTIVE') {
-      res.status(400).json({ error: 'Contract is not active' });
+    if (!ensureContractCanAcceptPayments(contract.status, res)) {
       return;
     }
 

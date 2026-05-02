@@ -23,6 +23,7 @@ async function main() {
     { name: 'UPDATE_CONTRACT', description: 'Update/amend contract terms' },
     { name: 'CANCEL_CONTRACT', description: 'Cancel contracts' },
     { name: 'DELETE_CONTRACT', description: 'Delete contracts' },
+    { name: 'MANAGE_CONTRACTS', description: 'Manage contract servicing operations such as direct debit and preapprovals' },
     { name: 'RECORD_PAYMENT', description: 'Record manual payments' },
     { name: 'VIEW_PAYMENTS', description: 'View payment transactions' },
     { name: 'MANAGE_HUBTEL_PAYMENTS', description: 'Manage Hubtel payment settings and retry configurations' },
@@ -36,6 +37,8 @@ async function main() {
     { name: 'MANAGE_ROLES', description: 'Create and manage roles' },
     { name: 'MANAGE_PERMISSIONS', description: 'Assign permissions to roles' },
     { name: 'VIEW_AUDIT_LOGS', description: 'View system audit trail' },
+    { name: 'APPROVE_CONTRACT', description: 'Approve or reject contracts pending approval' },
+    { name: 'VIEW_CONTRACT_APPROVALS', description: 'View contracts pending approval' },
   ];
 
   for (const perm of permissions) {
@@ -67,7 +70,13 @@ async function main() {
 
   const adminRole = await prisma.role.upsert({
     where: { name: 'ADMIN' },
-    update: {},
+    update: {
+      permissions: {
+        set: allPermissions
+          .filter(p => !['MANAGE_USERS', 'MANAGE_ROLES', 'MANAGE_PERMISSIONS', 'MANAGE_HUBTEL_PAYMENTS', 'DELETE_INVENTORY'].includes(p.name))
+          .map(p => ({ id: p.id })),
+      },
+    },
     create: {
       name: 'ADMIN',
       description: 'Administrator with operational access',
@@ -90,6 +99,27 @@ async function main() {
       permissions: {
         connect: allPermissions
           .filter(p => ['CREATE_CUSTOMER', 'VIEW_CUSTOMERS', 'UPDATE_CUSTOMER', 'CREATE_CONTRACT', 'VIEW_CONTRACTS', 'RECORD_PAYMENT', 'VIEW_PAYMENTS', 'VIEW_FAILED_PAYMENTS'].includes(p.name))
+          .map(p => ({ id: p.id })),
+      },
+    },
+  });
+
+  // AGENT role: can create customers, add inventory, create contracts (goes to approval)
+  await prisma.role.upsert({
+    where: { name: 'AGENT' },
+    update: {},
+    create: {
+      name: 'AGENT',
+      description: 'Field agent who registers customers, adds inventory and creates contracts (requires approval)',
+      isSystem: true,
+      permissions: {
+        connect: allPermissions
+          .filter(p => [
+            'CREATE_CUSTOMER', 'VIEW_CUSTOMERS', 'UPDATE_CUSTOMER',
+            'MANAGE_INVENTORY', 'EDIT_INVENTORY',
+            'CREATE_CONTRACT', 'VIEW_CONTRACTS',
+            'RECORD_PAYMENT', 'VIEW_PAYMENTS',
+          ].includes(p.name))
           .map(p => ({ id: p.id })),
       },
     },

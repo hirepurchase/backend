@@ -416,6 +416,161 @@ Hire Purchase Team
   await Promise.allSettled(promises);
 }
 
+interface WorkflowRecipient {
+  firstName: string;
+  lastName: string;
+  email?: string | null;
+  phone?: string | null;
+}
+
+async function sendWorkflowNotification(options: {
+  recipient: WorkflowRecipient;
+  subject: string;
+  headline: string;
+  bodyLines: string[];
+  smsMessage: string;
+}): Promise<void> {
+  const { recipient, subject, headline, bodyLines, smsMessage } = options;
+  const fullName = `${recipient.firstName} ${recipient.lastName}`.trim();
+  const intro = fullName ? `<p>Hello ${fullName},</p>` : '<p>Hello,</p>';
+  const emailHtml = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <style>
+        body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+        .header { background-color: #1e40af; color: white; padding: 20px; text-align: center; }
+        .content { padding: 30px 20px; background-color: #f9fafb; }
+        .card { background-color: white; border: 1px solid #e5e7eb; border-radius: 8px; padding: 18px; margin-top: 18px; }
+        .footer { text-align: center; padding: 20px; color: #6b7280; font-size: 12px; }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="header">
+          <h1>${headline}</h1>
+        </div>
+        <div class="content">
+          ${intro}
+          <div class="card">
+            ${bodyLines.map((line) => `<p>${line}</p>`).join('')}
+          </div>
+          <p>Best regards,<br>Hire Purchase Team</p>
+        </div>
+        <div class="footer">
+          <p>This is an automated message. Please do not reply to this email.</p>
+          <p>&copy; ${new Date().getFullYear()} Hire Purchase System. All rights reserved.</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const emailText = [
+    headline,
+    '',
+    fullName ? `Hello ${fullName},` : 'Hello,',
+    '',
+    ...bodyLines,
+    '',
+    'Best regards,',
+    'Hire Purchase Team',
+  ].join('\n');
+
+  const promises: Promise<boolean>[] = [];
+
+  if (recipient.email) {
+    promises.push(
+      sendEmail({
+        to: recipient.email,
+        subject,
+        html: emailHtml,
+        text: emailText,
+      })
+    );
+  }
+
+  if (recipient.phone) {
+    promises.push(
+      sendSMS({
+        to: recipient.phone,
+        message: smsMessage,
+      })
+    );
+  }
+
+  if (promises.length === 0) {
+    return;
+  }
+
+  await Promise.allSettled(promises);
+}
+
+export async function sendContractSubmittedForApprovalNotification(data: {
+  recipient: WorkflowRecipient;
+  contractNumber: string;
+  customerName: string;
+  priority: 'LOW' | 'MEDIUM' | 'HIGH';
+}): Promise<void> {
+  const { recipient, contractNumber, customerName, priority } = data;
+  const bodyLines = [
+    `Contract ${contractNumber} for ${customerName} has been submitted and is now waiting in the approval queue.`,
+    `Current review priority: ${priority}.`,
+    'You will be notified again once the contract is approved or sent back for revision.',
+  ];
+
+  await sendWorkflowNotification({
+    recipient,
+    subject: `Contract Submitted for Approval - ${contractNumber}`,
+    headline: 'Contract Submitted',
+    bodyLines,
+    smsMessage: `AidooTech: Contract ${contractNumber} for ${customerName} has been submitted for approval. Priority: ${priority}.`,
+  });
+}
+
+export async function sendContractRevisionRequestedNotification(data: {
+  recipient: WorkflowRecipient;
+  contractNumber: string;
+  customerName: string;
+  reason: string;
+}): Promise<void> {
+  const { recipient, contractNumber, customerName, reason } = data;
+  const bodyLines = [
+    `Contract ${contractNumber} for ${customerName} was returned for revision.`,
+    `Approver note: ${reason}`,
+    'Update the contract details and resubmit it when you are ready.',
+  ];
+
+  await sendWorkflowNotification({
+    recipient,
+    subject: `Revision Requested - ${contractNumber}`,
+    headline: 'Revision Requested',
+    bodyLines,
+    smsMessage: `AidooTech: Revision requested for contract ${contractNumber}. Note: ${reason}`,
+  });
+}
+
+export async function sendContractApprovedNotification(data: {
+  recipient: WorkflowRecipient;
+  contractNumber: string;
+  customerName: string;
+}): Promise<void> {
+  const { recipient, contractNumber, customerName } = data;
+  const bodyLines = [
+    `Contract ${contractNumber} for ${customerName} has been approved and is now active.`,
+    'Customer payments can now begin according to the agreed installment plan.',
+  ];
+
+  await sendWorkflowNotification({
+    recipient,
+    subject: `Contract Approved - ${contractNumber}`,
+    headline: 'Contract Approved',
+    bodyLines,
+    smsMessage: `AidooTech: Contract ${contractNumber} for ${customerName} has been approved and is now active.`,
+  });
+}
+
 // Payment Reminder Notification
 export async function sendPaymentReminder(reminderData: {
   customerFirstName: string;

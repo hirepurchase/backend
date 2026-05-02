@@ -11,7 +11,7 @@ import routes from './routes';
 import prisma from './config/database';
 import { initializeNotificationScheduler } from './services/notificationScheduler';
 import { startPaymentRetryScheduler } from './services/paymentRetryScheduler';
-import { initializeIdleShutdown, stopIdleShutdown, getTimeUntilShutdown, getLastActivityTime } from './services/idleShutdownService';
+import { initializeIdleShutdown, stopIdleShutdown, getTimeUntilShutdown, getLastActivityTime, isIdleShutdownEnabled } from './services/idleShutdownService';
 import { activityTracker } from './middleware/activityTracker';
 
 const app = express();
@@ -47,18 +47,23 @@ app.get('/', (req, res) => {
 
 // API health check
 app.get('/health', (req, res) => {
-  const timeUntilShutdown = getTimeUntilShutdown();
-  const minutesRemaining = Math.floor(timeUntilShutdown / 60000);
-  const secondsRemaining = Math.floor((timeUntilShutdown % 60000) / 1000);
+  const idleShutdownEnabled = isIdleShutdownEnabled();
+  const timeUntilShutdown = idleShutdownEnabled ? getTimeUntilShutdown() : null;
+  const minutesRemaining = idleShutdownEnabled && timeUntilShutdown !== null
+    ? Math.floor(timeUntilShutdown / 60000)
+    : null;
+  const secondsRemaining = idleShutdownEnabled && timeUntilShutdown !== null
+    ? Math.floor((timeUntilShutdown % 60000) / 1000)
+    : null;
 
   res.json({
     status: 'healthy',
     database: 'connected',
     uptime: process.uptime(),
     idleShutdown: {
-      enabled: true,
+      enabled: idleShutdownEnabled,
       timeoutMinutes: 15,
-      timeRemaining: `${minutesRemaining}m ${secondsRemaining}s`,
+      timeRemaining: idleShutdownEnabled ? `${minutesRemaining}m ${secondsRemaining}s` : null,
       lastActivity: getLastActivityTime().toISOString(),
     },
   });

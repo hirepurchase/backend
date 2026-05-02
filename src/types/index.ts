@@ -21,7 +21,7 @@ export interface AuthenticatedRequest extends Request {
 
 export type PaymentFrequency = 'DAILY' | 'WEEKLY' | 'MONTHLY';
 
-export type ContractStatus = 'ACTIVE' | 'COMPLETED' | 'DEFAULTED' | 'CANCELLED';
+export type ContractStatus = 'ACTIVE' | 'COMPLETED' | 'DEFAULTED' | 'CANCELLED' | 'PENDING_APPROVAL' | 'REVISION_REQUESTED';
 
 export type InstallmentStatus = 'PENDING' | 'PARTIAL' | 'PAID' | 'OVERDUE';
 

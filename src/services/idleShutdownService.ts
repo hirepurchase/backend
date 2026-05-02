@@ -4,6 +4,9 @@
  */
 
 const IDLE_TIMEOUT = 15 * 60 * 1000; // 15 minutes in milliseconds
+const ENABLE_IDLE_SHUTDOWN = process.env.ENABLE_IDLE_SHUTDOWN
+  ? process.env.ENABLE_IDLE_SHUTDOWN === 'true'
+  : process.env.NODE_ENV !== 'production';
 let idleTimer: NodeJS.Timeout | null = null;
 let lastActivityTime: Date = new Date();
 
@@ -12,6 +15,10 @@ let lastActivityTime: Date = new Date();
  */
 export function recordActivity(): void {
   lastActivityTime = new Date();
+
+  if (!ENABLE_IDLE_SHUTDOWN) {
+    return;
+  }
 
   // Clear existing timer
   if (idleTimer) {
@@ -30,6 +37,10 @@ export function recordActivity(): void {
  * Gets the time remaining until shutdown
  */
 export function getTimeUntilShutdown(): number {
+  if (!ENABLE_IDLE_SHUTDOWN) {
+    return Number.POSITIVE_INFINITY;
+  }
+
   const now = new Date();
   const timeSinceLastActivity = now.getTime() - lastActivityTime.getTime();
   const timeRemaining = IDLE_TIMEOUT - timeSinceLastActivity;
@@ -47,6 +58,12 @@ export function getLastActivityTime(): Date {
  * Initialize the idle shutdown service
  */
 export function initializeIdleShutdown(): void {
+  if (!ENABLE_IDLE_SHUTDOWN) {
+    console.log('🕒 Idle shutdown service disabled');
+    lastActivityTime = new Date();
+    return;
+  }
+
   console.log('🕒 Idle shutdown service initialized (15-minute timeout)');
   recordActivity(); // Start the timer
 }
@@ -60,4 +77,8 @@ export function stopIdleShutdown(): void {
     idleTimer = null;
     console.log('🛑 Idle shutdown service stopped');
   }
+}
+
+export function isIdleShutdownEnabled(): boolean {
+  return ENABLE_IDLE_SHUTDOWN;
 }

@@ -701,6 +701,213 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
   }
 }
 
+// Agent Performance Report
+export async function getAgentReport(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const cacheKey = buildReportCacheKey('report:agents', req);
+    const cached = getCache<unknown>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
+    const { startDate, endDate } = req.query;
+
+    const contractWhere: Record<string, unknown> = {};
+    if (startDate || endDate) {
+      contractWhere.createdAt = {};
+      if (startDate) (contractWhere.createdAt as Record<string, Date>).gte = new Date(startDate as string);
+      if (endDate) (contractWhere.createdAt as Record<string, Date>).lte = new Date(endDate as string);
+    }
+
+    const contracts = await prisma.hirePurchaseContract.findMany({
+      where: contractWhere,
+      include: {
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            role: { select: { name: true } },
+          },
+        },
+        payments: {
+          where: { status: 'SUCCESS' },
+          select: { amount: true, paymentDate: true, createdAt: true },
+        },
+        inventoryItem: {
+          include: { product: { select: { name: true, category: { select: { name: true } } } } },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    const contractIds = contracts.map((contract) => contract.id);
+    const approvalLogs = contractIds.length > 0
+      ? await prisma.auditLog.findMany({
+          where: {
+            entity: 'HirePurchaseContract',
+            entityId: { in: contractIds },
+            action: {
+              in: [
+                'CREATE_CONTRACT',
+                'SUBMIT_CONTRACT_FOR_APPROVAL',
+                'REQUEST_CONTRACT_REVISION',
+                'RESUBMIT_CONTRACT_FOR_APPROVAL',
+                'APPROVE_CONTRACT',
+              ],
+            },
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+      : [];
+
+    const logsByContractId = approvalLogs.reduce<Record<string, typeof approvalLogs>>((acc, log) => {
+      if (!log.entityId) {
+        return acc;
+      }
+
+      acc[log.entityId] = acc[log.entityId] || [];
+      acc[log.entityId].push(log);
+      return acc;
+    }, {});
+
+    const agentMap: Record<string, {
+      agentId: string;
+      agentName: string;
+      roleName: string;
+      totalContracts: number;
+      pendingContracts: number;
+      activeContracts: number;
+      completedContracts: number;
+      revisionRequestedContracts: number;
+      approvedContracts: number;
+      totalRevisionRequests: number;
+      resubmissionCount: number;
+      totalSalesValue: number;
+      totalDepositsCollected: number;
+      totalPaymentsCollected: number;
+      outstandingBalance: number;
+      averageApprovalHours: number;
+      averageFirstDecisionHours: number;
+      approvalRate: number;
+      _approvalHoursTotal: number;
+      _approvalHoursCount: number;
+      _firstDecisionHoursTotal: number;
+      _firstDecisionHoursCount: number;
+    }> = {};
+
+    for (const c of contracts) {
+      const aid = c.createdBy.id;
+      if (!agentMap[aid]) {
+        agentMap[aid] = {
+          agentId: aid,
+          agentName: `${c.createdBy.firstName} ${c.createdBy.lastName}`,
+          roleName: c.createdBy.role.name,
+          totalContracts: 0,
+          pendingContracts: 0,
+          activeContracts: 0,
+          completedContracts: 0,
+          revisionRequestedContracts: 0,
+          approvedContracts: 0,
+          totalRevisionRequests: 0,
+          resubmissionCount: 0,
+          totalSalesValue: 0,
+          totalDepositsCollected: 0,
+          totalPaymentsCollected: 0,
+          outstandingBalance: 0,
+          averageApprovalHours: 0,
+          averageFirstDecisionHours: 0,
+          approvalRate: 0,
+          _approvalHoursTotal: 0,
+          _approvalHoursCount: 0,
+          _firstDecisionHoursTotal: 0,
+          _firstDecisionHoursCount: 0,
+        };
+      }
+
+      const a = agentMap[aid];
+      const contractLogs = logsByContractId[c.id] || [];
+      const submittedAt =
+        contractLogs.find((log) => ['SUBMIT_CONTRACT_FOR_APPROVAL', 'CREATE_CONTRACT'].includes(log.action))?.createdAt ||
+        c.createdAt;
+      const firstDecisionAt =
+        contractLogs.find((log) => ['REQUEST_CONTRACT_REVISION', 'APPROVE_CONTRACT'].includes(log.action))?.createdAt ||
+        null;
+      const approvedAt =
+        contractLogs.find((log) => log.action === 'APPROVE_CONTRACT')?.createdAt ||
+        c.approvedAt ||
+        null;
+      const revisionRequests = contractLogs.filter((log) => log.action === 'REQUEST_CONTRACT_REVISION').length;
+      const resubmissions = contractLogs.filter((log) => log.action === 'RESUBMIT_CONTRACT_FOR_APPROVAL').length;
+
+      a.totalContracts++;
+      if (c.status === 'PENDING_APPROVAL') a.pendingContracts++;
+      if (c.status === 'ACTIVE') a.activeContracts++;
+      if (c.status === 'COMPLETED') a.completedContracts++;
+      if (c.status === 'REVISION_REQUESTED') a.revisionRequestedContracts++;
+      if (approvedAt) a.approvedContracts++;
+      a.totalRevisionRequests += revisionRequests;
+      a.resubmissionCount += resubmissions;
+      a.totalSalesValue += c.totalPrice;
+      a.totalDepositsCollected += c.depositAmount;
+      a.totalPaymentsCollected += c.payments.reduce((s, p) => s + Number(p.amount), 0);
+      a.outstandingBalance += c.outstandingBalance;
+
+      if (firstDecisionAt) {
+        a._firstDecisionHoursTotal += (firstDecisionAt.getTime() - submittedAt.getTime()) / (1000 * 60 * 60);
+        a._firstDecisionHoursCount++;
+      }
+
+      if (approvedAt) {
+        a._approvalHoursTotal += (approvedAt.getTime() - submittedAt.getTime()) / (1000 * 60 * 60);
+        a._approvalHoursCount++;
+      }
+    }
+
+    for (const agent of Object.values(agentMap)) {
+      agent.averageApprovalHours = agent._approvalHoursCount > 0
+        ? agent._approvalHoursTotal / agent._approvalHoursCount
+        : 0;
+      agent.averageFirstDecisionHours = agent._firstDecisionHoursCount > 0
+        ? agent._firstDecisionHoursTotal / agent._firstDecisionHoursCount
+        : 0;
+      agent.approvalRate = agent.totalContracts > 0
+        ? (agent.approvedContracts / agent.totalContracts) * 100
+        : 0;
+
+      delete (agent as any)._approvalHoursTotal;
+      delete (agent as any)._approvalHoursCount;
+      delete (agent as any)._firstDecisionHoursTotal;
+      delete (agent as any)._firstDecisionHoursCount;
+    }
+
+    // Sort by totalSalesValue descending (leaderboard)
+    const agents = Object.values(agentMap).sort((a, b) => b.totalSalesValue - a.totalSalesValue);
+
+    const payload = {
+      agents,
+      summary: {
+        totalAgents: agents.length,
+        totalContracts: agents.reduce((s, a) => s + a.totalContracts, 0),
+        totalSalesValue: agents.reduce((s, a) => s + a.totalSalesValue, 0),
+        totalPaymentsCollected: agents.reduce((s, a) => s + a.totalPaymentsCollected, 0),
+        totalRevisionRequests: agents.reduce((s, a) => s + a.totalRevisionRequests, 0),
+        approvedContracts: agents.reduce((s, a) => s + a.approvedContracts, 0),
+        averageApprovalRate: agents.length > 0
+          ? agents.reduce((s, a) => s + a.approvalRate, 0) / agents.length
+          : 0,
+      },
+    };
+
+    setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
+    res.json(payload);
+  } catch (error) {
+    console.error('Get agent report error:', error);
+    res.status(500).json({ error: 'Failed to generate agent report' });
+  }
+}
+
 // Daily payments summary — resets each calendar day
 export async function getDailyPayments(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {

@@ -13,6 +13,7 @@ import importRoutes from './import';
 import paymentRetryRoutes from './paymentRetry';
 import hubtelTestRoutes from './hubtelTest';
 import smsRoutes from './sms';
+import { authenticateAdmin } from '../middleware/auth';
 
 const router = Router();
 
@@ -38,7 +39,7 @@ router.get('/health', (req, res) => {
 });
 
 // Get server IP (for Hubtel whitelisting)
-router.get('/server-ip', async (req, res) => {
+router.get('/server-ip', authenticateAdmin, async (req, res) => {
   try {
     const axios = require('axios');
 
@@ -72,7 +73,7 @@ router.get('/server-ip', async (req, res) => {
 });
 
 // Test outbound IP by making request to webhook.site
-router.get('/test-outbound-ip', async (req, res) => {
+router.get('/test-outbound-ip', authenticateAdmin, async (req, res) => {
   try {
     const axios = require('axios');
     const webhookUrl = 'https://webhook.site/c92df202-4bb7-475a-8be3-bc208137339e';

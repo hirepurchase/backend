@@ -1,7 +1,8 @@
 import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
-import { sendContractConfirmation } from '../services/notificationService';
+import { sendContractConfirmation, sendContractSubmittedForApprovalNotification } from '../services/notificationService';
+import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
 import { AuthenticatedRequest, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
 import {
@@ -14,6 +15,43 @@ import {
   sanitizePhoneNumber,
 } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
+
+export async function createContractPreflight(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const {
+      customerId,
+      inventoryItemId,
+      totalPrice,
+      depositAmount,
+      totalInstallments,
+      startDate,
+      paymentMethod,
+      mobileMoneyNumber,
+    } = req.body;
+
+    if (!customerId || !inventoryItemId || totalPrice === undefined || depositAmount === undefined) {
+      res.status(400).json({ error: 'customerId, inventoryItemId, totalPrice, and depositAmount are required' });
+      return;
+    }
+
+    const assessment = await evaluateContractSubmissionGuardrails({
+      customerId: String(customerId),
+      inventoryItemId: String(inventoryItemId),
+      totalPrice: Number(totalPrice),
+      depositAmount: Number(depositAmount),
+      totalInstallments: totalInstallments !== undefined ? Number(totalInstallments) : undefined,
+      startDate: startDate ? new Date(startDate) : undefined,
+      paymentMethod: paymentMethod ? String(paymentMethod) : null,
+      mobileMoneyNumber: mobileMoneyNumber ? String(mobileMoneyNumber) : null,
+    });
+
+    res.json(assessment);
+  } catch (error: any) {
+    console.error('createContractPreflight error:', error);
+    const detail = error?.message || String(error);
+    res.status(500).json({ error: 'Failed to evaluate contract guardrails', detail });
+  }
+}
 
 // Create hire purchase contract (Admin only)
 export async function createContract(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -106,6 +144,25 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       return;
     }
 
+    const guardrails = await evaluateContractSubmissionGuardrails({
+      customerId,
+      inventoryItemId,
+      totalPrice: Number(totalPrice),
+      depositAmount: Number(depositAmount),
+      totalInstallments: Number(totalInstallments),
+      startDate: startDate ? new Date(startDate) : undefined,
+      paymentMethod: paymentMethod || null,
+      mobileMoneyNumber: mobileMoneyNumber || null,
+    });
+
+    if (guardrails.blockers.length > 0) {
+      res.status(400).json({
+        error: 'Contract submission is blocked until the highlighted issues are resolved.',
+        guardrails,
+      });
+      return;
+    }
+
     // Calculate finance amount and installment amount
     const financeAmount = Number(totalPrice) - Number(depositAmount);
     const installmentAmount = Math.ceil((financeAmount / totalInstallments) * 100) / 100;
@@ -156,6 +213,11 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     const shouldSetPassword = !customer.password;
     const hashedPhonePassword = shouldSetPassword ? await bcrypt.hash(normalizedPhone, 12) : null;
 
+    // Agents create contracts that require approval before going ACTIVE
+    const creatorRole = (req.user as any)?.role as string;
+    const requiresApproval = creatorRole === 'AGENT';
+    const initialStatus = requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE';
+
     // Create contract and update inventory in a transaction
     const contract = await prisma.$transaction(async (tx) => {
       // Create the contract
@@ -180,6 +242,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
           mobileMoneyNetwork: mobileMoneyNetwork ? mobileMoneyNetwork.toUpperCase() : null,
           mobileMoneyNumber: mobileMoneyNumber || null,
           createdById: req.user!.id,
+          status: initialStatus,
         },
       });
 
@@ -193,11 +256,11 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
         })),
       });
 
-      // Update inventory item status and additional info
+      // Agents reserve the inventory; it becomes SOLD only after approval
       await tx.inventoryItem.update({
         where: { id: inventoryItemId },
         data: {
-          status: 'SOLD',
+          status: requiresApproval ? 'RESERVED' : 'SOLD',
           contractId: newContract.id,
           lockStatus: lockStatus || undefined,
           registeredUnder: registeredUnder || undefined,
@@ -229,6 +292,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
             firstName: true,
             lastName: true,
             phone: true,
+            email: true,
           },
         },
         inventoryItem: {
@@ -244,6 +308,8 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
             id: true,
             firstName: true,
             lastName: true,
+            email: true,
+            phone: true,
           },
         },
       },
@@ -267,12 +333,43 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       userAgent: req.headers['user-agent'],
     });
 
-    // Send contract confirmation notification (non-blocking)
-    if (completeContract) {
+    if (requiresApproval) {
+      await createAuditLog({
+        userId: req.user!.id,
+        action: 'SUBMIT_CONTRACT_FOR_APPROVAL',
+        entity: 'HirePurchaseContract',
+        entityId: contract.id,
+        oldValues: { status: 'DRAFT' },
+        newValues: {
+          status: 'PENDING_APPROVAL',
+          priority: guardrails.priority,
+          riskFlags: guardrails.riskFlags,
+        },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+    }
+
+    // Send notifications (non-blocking)
+    if (completeContract && requiresApproval) {
+      sendContractSubmittedForApprovalNotification({
+        recipient: {
+          firstName: completeContract.createdBy.firstName,
+          lastName: completeContract.createdBy.lastName,
+          email: completeContract.createdBy.email,
+          phone: completeContract.createdBy.phone,
+        },
+        contractNumber: completeContract.contractNumber,
+        customerName: `${completeContract.customer.firstName} ${completeContract.customer.lastName}`,
+        priority: guardrails.priority,
+      }).catch((error) => {
+        console.error('Failed to send contract submission notification:', error);
+      });
+    } else if (completeContract) {
       sendContractConfirmation({
         customerFirstName: completeContract.customer.firstName,
         customerLastName: completeContract.customer.lastName,
-        customerEmail: (completeContract.customer as any).email || undefined,
+        customerEmail: completeContract.customer.email || undefined,
         customerPhone: completeContract.customer.phone,
         contractNumber: completeContract.contractNumber,
         contractId: completeContract.id,
@@ -289,7 +386,10 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       });
     }
 
-    res.status(201).json(completeContract);
+    res.status(201).json({
+      ...completeContract,
+      guardrails: requiresApproval ? guardrails : undefined,
+    });
   } catch (error: any) {
     console.error('Create contract error:', error);
     const detail = error?.message || String(error);
@@ -352,6 +452,9 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
                 },
               },
             },
+          },
+          createdBy: {
+            select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } },
           },
           _count: {
             select: {
@@ -523,12 +626,25 @@ export async function updateOverdueInstallments(req: AuthenticatedRequest, res: 
           if (contract.penaltyPercentage > 0) {
             const remainingAmount = installment.amount - installment.paidAmount;
             const penaltyAmount = calculatePenalty(remainingAmount, contract.penaltyPercentage);
+            const penaltyReason = `Late payment penalty for installment #${installment.installmentNo}`;
+
+            const existingPenalty = await prisma.penalty.findFirst({
+              where: {
+                contractId: contract.id,
+                isPaid: false,
+                reason: penaltyReason,
+              },
+            });
+
+            if (existingPenalty) {
+              continue;
+            }
 
             await prisma.penalty.create({
               data: {
                 contractId: contract.id,
                 amount: penaltyAmount,
-                reason: `Late payment penalty for installment #${installment.installmentNo}`,
+                reason: penaltyReason,
               },
             });
 

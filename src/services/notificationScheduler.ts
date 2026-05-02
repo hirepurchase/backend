@@ -33,17 +33,22 @@ export async function markOverdueInstallments(): Promise<{ updated: number; pena
           if (contract.penaltyPercentage > 0) {
             const remaining = installment.amount - installment.paidAmount;
             const penaltyAmount = calculatePenalty(remaining, contract.penaltyPercentage);
+            const penaltyReason = `Late payment penalty for installment #${installment.installmentNo}`;
 
-            // Only create penalty if one doesn't already exist for this installment
+            // Only create one unpaid penalty per overdue installment.
             const existing = await prisma.penalty.findFirst({
-              where: { contractId: contract.id, isPaid: false },
+              where: {
+                contractId: contract.id,
+                isPaid: false,
+                reason: penaltyReason,
+              },
             });
             if (!existing) {
               await prisma.penalty.create({
                 data: {
                   contractId: contract.id,
                   amount: penaltyAmount,
-                  reason: `Late payment penalty for installment #${installment.installmentNo}`,
+                  reason: penaltyReason,
                 },
               });
               await prisma.hirePurchaseContract.update({
@@ -175,11 +180,14 @@ export async function checkOverduePayments(): Promise<void> {
         ...installments.map(i => Math.floor((today.getTime() - i.dueDate.getTime()) / 86400000))
       );
 
-      // Get unpaid penalty for the contract (one per contract)
-      const contractId = installments[0].contract.id;
-      const penalty = await prisma.penalty.findFirst({
-        where: { contractId, isPaid: false },
+      const contractIds = [...new Set(installments.map((installment) => installment.contract.id))];
+      const penalties = await prisma.penalty.findMany({
+        where: {
+          contractId: { in: contractIds },
+          isPaid: false,
+        },
       });
+      const totalPenaltyAmount = penalties.reduce((sum, penalty) => sum + penalty.amount, 0);
 
       console.log(`Sending combined overdue SMS to ${customer.firstName} ${customer.lastName} (${installments.length} installments)`);
 
@@ -192,7 +200,7 @@ export async function checkOverduePayments(): Promise<void> {
         overdueCount: installments.length,
         totalOwed,
         mostDaysOverdue,
-        penaltyAmount: penalty?.amount,
+        penaltyAmount: totalPenaltyAmount > 0 ? totalPenaltyAmount : undefined,
       });
 
       await new Promise(resolve => setTimeout(resolve, 500));

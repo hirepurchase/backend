@@ -2,12 +2,33 @@ import axios from 'axios';
 import prisma from '../config/database';
 import { sendPaymentFailureNotification } from './notificationService';
 import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService';
+import { appendWebhookToken } from '../utils/callbackSecurity';
 
 // Hubtel API Configuration
 const HUBTEL_POS_SALES_ID = process.env.HUBTEL_POS_SALES_ID || '';
 const HUBTEL_API_KEY = process.env.HUBTEL_API_KEY || '';
 const HUBTEL_API_SECRET = process.env.HUBTEL_API_SECRET || '';
-const HUBTEL_CALLBACK_URL = process.env.HUBTEL_CALLBACK_URL || '';
+const RAW_HUBTEL_CALLBACK_URL = process.env.HUBTEL_CALLBACK_URL || '';
+const RAW_HUBTEL_PREAPPROVAL_CALLBACK_URL = process.env.HUBTEL_PREAPPROVAL_CALLBACK_URL || '';
+
+function derivePreapprovalCallbackUrl(callbackUrl: string): string {
+  if (!callbackUrl) {
+    return '';
+  }
+
+  try {
+    const parsedUrl = new URL(callbackUrl);
+    parsedUrl.pathname = parsedUrl.pathname.replace(/\/callback\/?$/, '/preapproval/callback');
+    return parsedUrl.toString();
+  } catch {
+    return callbackUrl.replace(/\/callback\/?$/, '/preapproval/callback');
+  }
+}
+
+const HUBTEL_PAYMENT_CALLBACK_URL = appendWebhookToken(RAW_HUBTEL_CALLBACK_URL);
+const HUBTEL_PREAPPROVAL_CALLBACK_URL = appendWebhookToken(
+  RAW_HUBTEL_PREAPPROVAL_CALLBACK_URL || derivePreapprovalCallbackUrl(RAW_HUBTEL_CALLBACK_URL)
+);
 
 // API Endpoints
 const RECEIVE_MONEY_URL = `https://rmp.hubtel.com/merchantaccount/merchants/${HUBTEL_POS_SALES_ID}/receive/mobilemoney`;
@@ -112,7 +133,7 @@ export async function initiateHubtelReceiveMoney(params: {
       CustomerEmail: params.customerEmail,
       Channel: channel,
       Amount: params.amount,
-      PrimaryCallbackUrl: HUBTEL_CALLBACK_URL,
+      PrimaryCallbackUrl: HUBTEL_PAYMENT_CALLBACK_URL,
       Description: params.description,
       ClientReference: params.transactionRef,
     };
@@ -123,7 +144,7 @@ export async function initiateHubtelReceiveMoney(params: {
     console.log('Hubtel POS Sales ID:', HUBTEL_POS_SALES_ID);
     console.log('Hubtel API Key:', HUBTEL_API_KEY);
     console.log('Hubtel API Secret:', HUBTEL_API_SECRET?.substring(0, 5) + '...');
-    console.log('Hubtel Callback URL:', HUBTEL_CALLBACK_URL);
+    console.log('Hubtel Callback URL:', HUBTEL_PAYMENT_CALLBACK_URL);
 
     console.log('Making POST request to Hubtel...');
 
@@ -206,7 +227,7 @@ export async function initiatePreapproval(params: {
       clientReferenceId: params.clientReferenceId,
       customerMsisdn: formattedPhone,
       channel: channel,
-      callbackUrl: `${HUBTEL_CALLBACK_URL}/preapproval`,
+      callbackUrl: HUBTEL_PREAPPROVAL_CALLBACK_URL,
     };
 
     console.log('Initiating Hubtel Preapproval:', { ...payload, customerMsisdn: '***' });
@@ -356,7 +377,7 @@ export async function reactivatePreapproval(params: {
     const response = await axios.post(
       PREAPPROVAL_REACTIVATE_URL,
       {
-        callbackUrl: `${HUBTEL_CALLBACK_URL}/preapproval`,
+        callbackUrl: HUBTEL_PREAPPROVAL_CALLBACK_URL,
         customerMsisdn: formattedPhone,
       },
       {
@@ -398,7 +419,7 @@ export async function initiateDirectDebitCharge(params: {
       CustomerEmail: params.customerEmail,
       Channel: channel, // Important: must use -direct-debit suffix
       Amount: params.amount,
-      PrimaryCallbackUrl: HUBTEL_CALLBACK_URL,
+      PrimaryCallbackUrl: HUBTEL_PAYMENT_CALLBACK_URL,
       Description: params.description,
       ClientReference: params.transactionRef,
     };
@@ -451,34 +472,88 @@ export async function checkHubtelPaymentStatus(clientReference: string): Promise
 
 // ==================== CALLBACK PROCESSING ====================
 
-interface HubtelCallback {
-  ResponseCode: string;
-  Message: string;
-  Data: {
-    Amount?: number;
-    ClientReference?: string;
-    TransactionId?: string;
-    ExternalTransactionId?: string;
-    PaymentDate?: string;
-    Description?: string;
+interface NormalizedHubtelCallback {
+  responseCode: string;
+  message: string;
+  data: {
+    amount?: number;
+    clientReference?: string;
+    transactionId?: string;
+    externalTransactionId?: string;
+    paymentDate?: string;
+    description?: string;
+    status?: string;
+    phoneNumber?: string;
   };
 }
 
-export async function processHubtelCallback(callbackData: HubtelCallback): Promise<void> {
+function normalizeHubtelCallback(callbackData: any): NormalizedHubtelCallback {
+  const rawData = callbackData?.Data || callbackData?.data || {};
+
+  return {
+    responseCode: String(callbackData?.ResponseCode || callbackData?.responseCode || '').trim(),
+    message: String(callbackData?.Message || callbackData?.message || ''),
+    data: {
+      amount: typeof rawData.Amount === 'number'
+        ? rawData.Amount
+        : typeof rawData.amount === 'number'
+          ? rawData.amount
+          : undefined,
+      clientReference: rawData.ClientReference || rawData.clientReference,
+      transactionId: rawData.TransactionId || rawData.transactionId,
+      externalTransactionId: rawData.ExternalTransactionId || rawData.externalTransactionId,
+      paymentDate: rawData.PaymentDate || rawData.paymentDate,
+      description: rawData.Description || rawData.description,
+      status: rawData.Status || rawData.status,
+      phoneNumber:
+        rawData.CustomerMsisdn ||
+        rawData.customerMsisdn ||
+        rawData.PhoneNumber ||
+        rawData.phoneNumber ||
+        rawData.MobileNumber ||
+        rawData.mobileNumber,
+    },
+  };
+}
+
+function resolveHubtelPaymentStatus(callbackData: NormalizedHubtelCallback): 'SUCCESS' | 'FAILED' | 'PENDING' {
+  const responseCode = callbackData.responseCode.toUpperCase();
+  const callbackStatus = String(callbackData.data.status || '').toUpperCase();
+
+  if (responseCode === '0000' || ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(callbackStatus)) {
+    return 'SUCCESS';
+  }
+
+  if (responseCode === '2001' || ['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(callbackStatus)) {
+    return 'FAILED';
+  }
+
+  return 'PENDING';
+}
+
+export async function processHubtelCallback(callbackData: unknown): Promise<void> {
   try {
     console.log('Processing Hubtel callback:', callbackData);
 
-    const { ResponseCode, Message, Data } = callbackData;
-    const { ClientReference, TransactionId, Amount, ExternalTransactionId, PaymentDate } = Data || {};
+    const normalizedCallback = normalizeHubtelCallback(callbackData);
+    const {
+      amount,
+      clientReference,
+      transactionId,
+      externalTransactionId,
+      paymentDate,
+      description,
+      phoneNumber,
+    } = normalizedCallback.data;
 
-    if (!ClientReference) {
+    if (!clientReference) {
       console.error('No client reference in callback');
       return;
     }
 
     // Find the payment transaction
     const payment = await prisma.paymentTransaction.findUnique({
-      where: { transactionRef: ClientReference },
+      where: { transactionRef: clientReference },
       include: {
         contract: {
           include: {
@@ -495,19 +570,40 @@ export async function processHubtelCallback(callbackData: HubtelCallback): Promi
     });
 
     if (!payment) {
-      console.error('Payment not found for reference:', ClientReference);
+      console.error('Payment not found for reference:', clientReference);
       return;
     }
 
-    // Determine payment status
-    let paymentStatus: 'SUCCESS' | 'FAILED' | 'PENDING' = 'PENDING';
-    let failureReason = '';
+    if (typeof amount === 'number' && Math.abs(payment.amount - amount) > 0.01) {
+      throw new Error(`Callback amount mismatch for ${clientReference}`);
+    }
 
-    if (ResponseCode === '0000') {
-      paymentStatus = 'SUCCESS';
-    } else if (ResponseCode === '2001') {
-      paymentStatus = 'FAILED';
-      failureReason = Data?.Description || 'Payment failed - insufficient funds or customer rejection';
+    if (phoneNumber && payment.mobileMoneyNumber) {
+      const normalizedStoredPhone = formatPhoneForHubtel(payment.mobileMoneyNumber);
+      const normalizedCallbackPhone = formatPhoneForHubtel(phoneNumber);
+      if (normalizedStoredPhone !== normalizedCallbackPhone) {
+        throw new Error(`Callback phone mismatch for ${clientReference}`);
+      }
+    }
+
+    const paymentStatus = resolveHubtelPaymentStatus(normalizedCallback);
+    const failureReason = paymentStatus === 'FAILED'
+      ? description || normalizedCallback.message || 'Payment failed - insufficient funds or customer rejection'
+      : '';
+
+    if (payment.status === 'SUCCESS') {
+      console.log('Ignoring Hubtel callback for already successful payment:', clientReference);
+      return;
+    }
+
+    if (payment.status === paymentStatus && paymentStatus !== 'PENDING') {
+      console.log('Ignoring duplicate Hubtel callback:', clientReference);
+      return;
+    }
+
+    if (paymentStatus === 'PENDING' && payment.status !== 'PENDING') {
+      console.log('Ignoring non-terminal Hubtel callback for settled payment:', clientReference);
+      return;
     }
 
     // Get retry settings for calculating next retry
@@ -521,18 +617,29 @@ export async function processHubtelCallback(callbackData: HubtelCallback): Promi
           )
         : null;
 
-    // Update payment status
-    await prisma.paymentTransaction.update({
-      where: { id: payment.id },
+    const updatedPayment = await prisma.paymentTransaction.updateMany({
+      where: {
+        id: payment.id,
+        status: {
+          not: 'SUCCESS',
+        },
+      },
       data: {
         status: paymentStatus,
-        externalRef: ExternalTransactionId || TransactionId,
-        paymentDate: paymentStatus === 'SUCCESS' && PaymentDate ? new Date(PaymentDate) : null,
+        externalRef: externalTransactionId || transactionId || payment.externalRef,
+        paymentDate: paymentStatus === 'SUCCESS'
+          ? (paymentDate ? new Date(paymentDate) : new Date())
+          : null,
         metadata: JSON.stringify(callbackData),
         failureReason: paymentStatus === 'FAILED' ? failureReason : null,
-        nextRetryAt: nextRetryAt,
+        nextRetryAt,
       },
     });
+
+    if (updatedPayment.count === 0) {
+      console.log('Ignoring duplicate Hubtel callback after status check:', clientReference);
+      return;
+    }
 
     // If payment successful, update contract and installments
     if (paymentStatus === 'SUCCESS' && payment.contract) {
@@ -572,50 +679,85 @@ export async function processHubtelCallback(callbackData: HubtelCallback): Promi
       }
     }
 
-    console.log('Payment callback processed successfully:', ClientReference);
+    console.log('Payment callback processed successfully:', clientReference);
   } catch (error) {
     console.error('Error processing Hubtel callback:', error);
     throw error;
   }
 }
 
-interface PreapprovalCallback {
-  CustomerMsisdn: string;
-  VerificationType: string;
-  PreapprovalStatus: string;
-  HubtelPreapprovalId: string;
-  ClientReferenceId: string;
-  CreatedAt: string;
+interface NormalizedPreapprovalCallback {
+  customerMsisdn?: string;
+  verificationType?: string;
+  preapprovalStatus: string;
+  hubtelPreapprovalId?: string;
+  clientReferenceId?: string;
+  createdAt?: string;
 }
 
-export async function processPreapprovalCallback(callbackData: PreapprovalCallback): Promise<void> {
+function normalizePreapprovalCallback(callbackData: any): NormalizedPreapprovalCallback {
+  return {
+    customerMsisdn: callbackData?.CustomerMsisdn || callbackData?.customerMsisdn,
+    verificationType: callbackData?.VerificationType || callbackData?.verificationType,
+    preapprovalStatus: String(callbackData?.PreapprovalStatus || callbackData?.preapprovalStatus || ''),
+    hubtelPreapprovalId: callbackData?.HubtelPreapprovalId || callbackData?.hubtelPreapprovalId,
+    clientReferenceId: callbackData?.ClientReferenceId || callbackData?.clientReferenceId,
+    createdAt: callbackData?.CreatedAt || callbackData?.createdAt,
+  };
+}
+
+export async function processPreapprovalCallback(callbackData: unknown): Promise<void> {
   try {
     console.log('Processing Hubtel preapproval callback:', callbackData);
 
-    const { ClientReferenceId, PreapprovalStatus, HubtelPreapprovalId } = callbackData;
+    const normalizedCallback = normalizePreapprovalCallback(callbackData);
+    const { clientReferenceId, preapprovalStatus, hubtelPreapprovalId, customerMsisdn } = normalizedCallback;
 
-    if (!ClientReferenceId) {
+    if (!clientReferenceId) {
       console.error('No client reference in preapproval callback');
       return;
     }
 
     // Find the preapproval
     const preapproval = await prisma.hubtelPreapproval.findUnique({
-      where: { clientReferenceId: ClientReferenceId },
+      where: { clientReferenceId: clientReferenceId },
     });
 
     if (!preapproval) {
-      console.error('Preapproval not found for reference:', ClientReferenceId);
+      console.error('Preapproval not found for reference:', clientReferenceId);
+      return;
+    }
+
+    if (hubtelPreapprovalId && preapproval.hubtelPreapprovalId && preapproval.hubtelPreapprovalId !== hubtelPreapprovalId) {
+      throw new Error(`Preapproval callback id mismatch for ${clientReferenceId}`);
+    }
+
+    if (customerMsisdn && formatPhoneForHubtel(customerMsisdn) !== preapproval.customerMsisdn) {
+      throw new Error(`Preapproval callback phone mismatch for ${clientReferenceId}`);
+    }
+
+    const nextStatus = preapprovalStatus.toUpperCase();
+    if (!nextStatus) {
+      throw new Error(`Missing preapproval status for ${clientReferenceId}`);
+    }
+
+    if (preapproval.status === 'APPROVED' && nextStatus !== 'APPROVED') {
+      console.log('Ignoring preapproval status downgrade:', clientReferenceId);
+      return;
+    }
+
+    if (preapproval.status === nextStatus) {
+      console.log('Ignoring duplicate preapproval callback:', clientReferenceId);
       return;
     }
 
     // Update preapproval status
     const updateData: any = {
-      status: PreapprovalStatus.toUpperCase(),
+      status: nextStatus,
       metadata: JSON.stringify(callbackData),
     };
 
-    if (PreapprovalStatus.toUpperCase() === 'APPROVED') {
+    if (nextStatus === 'APPROVED') {
       updateData.approvedAt = new Date();
     }
 
@@ -624,7 +766,7 @@ export async function processPreapprovalCallback(callbackData: PreapprovalCallba
       data: updateData,
     });
 
-    console.log('Preapproval callback processed successfully:', ClientReferenceId);
+    console.log('Preapproval callback processed successfully:', clientReferenceId);
   } catch (error) {
     console.error('Error processing preapproval callback:', error);
     throw error;
