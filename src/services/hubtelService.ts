@@ -575,7 +575,9 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
     }
 
     if (typeof amount === 'number' && Math.abs(payment.amount - amount) > 0.01) {
-      throw new Error(`Callback amount mismatch for ${payment.transactionRef}`);
+      console.warn(
+        `Callback amount mismatch for ${payment.transactionRef}: expected ${payment.amount}, got ${amount}. Proceeding with stored amount.`
+      );
     }
 
     if (phoneNumber && payment.mobileMoneyNumber) {
