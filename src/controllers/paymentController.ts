@@ -993,15 +993,11 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
     if (payment.externalRef) {
       const hubtelStatus = await checkHubtelPaymentStatus(payment.externalRef);
 
-      // Normalize Hubtel status to uppercase for comparison
-      const rawHubtelStatus = String(
-        hubtelStatus.data?.status || hubtelStatus.Data?.Status || ''
-      ).toUpperCase();
-
+      // Update payment status based on Hubtel response
       let newStatus = payment.status;
-      if (['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawHubtelStatus)) {
+      if (hubtelStatus.data?.status === 'Success' || hubtelStatus.data?.status === 'successful') {
         newStatus = 'SUCCESS';
-      } else if (['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawHubtelStatus)) {
+      } else if (hubtelStatus.data?.status === 'Failed' || hubtelStatus.data?.status === 'failed') {
         newStatus = 'FAILED';
       }
 
@@ -1013,17 +1009,13 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
             paymentDate: newStatus === 'SUCCESS' ? new Date() : null,
           },
         });
-
-        if (newStatus === 'SUCCESS') {
-          await processSuccessfulPayment(payment.id);
-        }
       }
 
       res.json({
         transactionRef: payment.transactionRef,
         status: newStatus,
         amount: payment.amount,
-        hubtelStatus: hubtelStatus.data?.status || hubtelStatus.Data?.Status,
+        hubtelStatus: hubtelStatus.data?.status,
       });
     } else {
       res.json({

@@ -575,9 +575,7 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
     }
 
     if (typeof amount === 'number' && Math.abs(payment.amount - amount) > 0.01) {
-      console.warn(
-        `Callback amount mismatch for ${payment.transactionRef}: expected ${payment.amount}, got ${amount}. Proceeding with stored amount.`
-      );
+      throw new Error(`Callback amount mismatch for ${payment.transactionRef}`);
     }
 
     if (phoneNumber && payment.mobileMoneyNumber) {
@@ -589,7 +587,6 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
     }
 
     const paymentStatus = resolveHubtelPaymentStatus(normalizedCallback);
-    console.log(`Hubtel callback resolved: ref=${clientReference} responseCode=${normalizedCallback.responseCode} dataStatus=${normalizedCallback.data.status} => paymentStatus=${paymentStatus}`);
     const failureReason = paymentStatus === 'FAILED'
       ? description || normalizedCallback.message || 'Payment failed - insufficient funds or customer rejection'
       : '';
