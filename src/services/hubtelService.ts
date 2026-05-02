@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { Prisma } from '@prisma/client';
 import prisma from '../config/database';
 import { sendPaymentFailureNotification } from './notificationService';
 import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService';
@@ -487,31 +488,71 @@ interface NormalizedHubtelCallback {
   };
 }
 
+function getFirstDefinedValue(sources: any[], keys: string[]): unknown {
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') {
+      continue;
+    }
+
+    for (const key of keys) {
+      const value = source[key];
+      if (value !== undefined && value !== null && String(value).trim() !== '') {
+        return value;
+      }
+    }
+  }
+
+  return undefined;
+}
+
 function normalizeHubtelCallback(callbackData: any): NormalizedHubtelCallback {
   const rawData = callbackData?.Data || callbackData?.data || {};
+  const dataSources = [rawData, callbackData];
+  const amountValue = getFirstDefinedValue(dataSources, ['Amount', 'amount']);
+  const parsedAmount = amountValue !== undefined ? Number(amountValue) : undefined;
 
   return {
-    responseCode: String(callbackData?.ResponseCode || callbackData?.responseCode || '').trim(),
-    message: String(callbackData?.Message || callbackData?.message || ''),
+    responseCode: String(getFirstDefinedValue([callbackData], ['ResponseCode', 'responseCode']) || '').trim(),
+    message: String(getFirstDefinedValue([callbackData], ['Message', 'message']) || ''),
     data: {
-      amount: typeof rawData.Amount === 'number'
-        ? rawData.Amount
-        : typeof rawData.amount === 'number'
-          ? rawData.amount
-          : undefined,
-      clientReference: rawData.ClientReference || rawData.clientReference,
-      transactionId: rawData.TransactionId || rawData.transactionId,
-      externalTransactionId: rawData.ExternalTransactionId || rawData.externalTransactionId,
-      paymentDate: rawData.PaymentDate || rawData.paymentDate,
-      description: rawData.Description || rawData.description,
-      status: rawData.Status || rawData.status,
+      amount: Number.isFinite(parsedAmount) ? parsedAmount : undefined,
+      clientReference: getFirstDefinedValue(dataSources, [
+        'ClientReference',
+        'clientReference',
+        'ClientReferenceId',
+        'clientReferenceId',
+      ]) as string | undefined,
+      transactionId: getFirstDefinedValue(dataSources, [
+        'TransactionId',
+        'transactionId',
+        'HubtelTransactionId',
+        'hubtelTransactionId',
+      ]) as string | undefined,
+      externalTransactionId: getFirstDefinedValue(dataSources, [
+        'ExternalTransactionId',
+        'externalTransactionId',
+        'CheckoutId',
+        'checkoutId',
+      ]) as string | undefined,
+      paymentDate: getFirstDefinedValue(dataSources, [
+        'PaymentDate',
+        'paymentDate',
+        'TransactionDate',
+        'transactionDate',
+      ]) as string | undefined,
+      description: getFirstDefinedValue(dataSources, ['Description', 'description']) as string | undefined,
+      status: getFirstDefinedValue(dataSources, ['Status', 'status']) as string | undefined,
       phoneNumber:
-        rawData.CustomerMsisdn ||
-        rawData.customerMsisdn ||
-        rawData.PhoneNumber ||
-        rawData.phoneNumber ||
-        rawData.MobileNumber ||
-        rawData.mobileNumber,
+        getFirstDefinedValue(dataSources, [
+          'CustomerMsisdn',
+          'customerMsisdn',
+          'PhoneNumber',
+          'phoneNumber',
+          'MobileNumber',
+          'mobileNumber',
+          'Msisdn',
+          'msisdn',
+        ]) as string | undefined,
     },
   };
 }
@@ -546,43 +587,79 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
       phoneNumber,
     } = normalizedCallback.data;
 
-    if (!clientReference) {
-      console.error('No client reference in callback');
+    const paymentLookupReferences = Array.from(
+      new Set(
+        [clientReference, transactionId, externalTransactionId]
+          .filter((value): value is string => Boolean(value))
+          .map((value) => value.trim())
+          .filter(Boolean)
+      )
+    );
+
+    if (paymentLookupReferences.length === 0) {
+      console.error('No payment identifiers found in Hubtel callback');
       return;
     }
 
-    // Find the payment transaction
-    const payment = await prisma.paymentTransaction.findUnique({
-      where: { transactionRef: clientReference },
-      include: {
-        contract: {
-          include: {
-            installments: {
-              where: { status: { in: ['PENDING', 'PARTIAL', 'OVERDUE'] } },
-              orderBy: { installmentNo: 'asc' },
-            },
-            penalties: {
-              where: { isPaid: false },
-            },
+    const paymentInclude = {
+      contract: {
+        include: {
+          installments: {
+            where: { status: { in: ['PENDING', 'PARTIAL', 'OVERDUE'] } },
+            orderBy: { installmentNo: 'asc' },
+          },
+          penalties: {
+            where: { isPaid: false },
           },
         },
       },
-    });
+    } satisfies Prisma.PaymentTransactionInclude;
+
+    type PaymentWithContract = Prisma.PaymentTransactionGetPayload<{
+      include: typeof paymentInclude;
+    }>;
+
+    // Find the payment transaction, preferring our client reference and falling back to Hubtel transaction IDs.
+    let payment: PaymentWithContract | null = clientReference
+      ? await prisma.paymentTransaction.findUnique({
+          where: { transactionRef: clientReference },
+          include: paymentInclude,
+        })
+      : null;
 
     if (!payment) {
-      console.error('Payment not found for reference:', clientReference);
+      payment = await prisma.paymentTransaction.findFirst({
+        where: {
+          OR: paymentLookupReferences.flatMap((reference) => ([
+            { transactionRef: reference },
+            { externalRef: reference },
+          ])),
+        },
+        include: paymentInclude,
+      });
+    }
+
+    if (!payment) {
+      console.error('Payment not found for Hubtel callback references:', paymentLookupReferences);
       return;
     }
 
+    console.log('Hubtel callback matched payment:', {
+      paymentId: payment.id,
+      transactionRef: payment.transactionRef,
+      externalRef: payment.externalRef,
+      references: paymentLookupReferences,
+    });
+
     if (typeof amount === 'number' && Math.abs(payment.amount - amount) > 0.01) {
-      throw new Error(`Callback amount mismatch for ${clientReference}`);
+      throw new Error(`Callback amount mismatch for ${payment.transactionRef}`);
     }
 
     if (phoneNumber && payment.mobileMoneyNumber) {
       const normalizedStoredPhone = formatPhoneForHubtel(payment.mobileMoneyNumber);
       const normalizedCallbackPhone = formatPhoneForHubtel(phoneNumber);
       if (normalizedStoredPhone !== normalizedCallbackPhone) {
-        throw new Error(`Callback phone mismatch for ${clientReference}`);
+        throw new Error(`Callback phone mismatch for ${payment.transactionRef}`);
       }
     }
 
@@ -592,17 +669,17 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
       : '';
 
     if (payment.status === 'SUCCESS') {
-      console.log('Ignoring Hubtel callback for already successful payment:', clientReference);
+      console.log('Ignoring Hubtel callback for already successful payment:', payment.transactionRef);
       return;
     }
 
     if (payment.status === paymentStatus && paymentStatus !== 'PENDING') {
-      console.log('Ignoring duplicate Hubtel callback:', clientReference);
+      console.log('Ignoring duplicate Hubtel callback:', payment.transactionRef);
       return;
     }
 
     if (paymentStatus === 'PENDING' && payment.status !== 'PENDING') {
-      console.log('Ignoring non-terminal Hubtel callback for settled payment:', clientReference);
+      console.log('Ignoring non-terminal Hubtel callback for settled payment:', payment.transactionRef);
       return;
     }
 
@@ -637,7 +714,7 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
     });
 
     if (updatedPayment.count === 0) {
-      console.log('Ignoring duplicate Hubtel callback after status check:', clientReference);
+      console.log('Ignoring duplicate Hubtel callback after status check:', payment.transactionRef);
       return;
     }
 
@@ -679,7 +756,7 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
       }
     }
 
-    console.log('Payment callback processed successfully:', clientReference);
+    console.log('Payment callback processed successfully:', payment.transactionRef);
   } catch (error) {
     console.error('Error processing Hubtel callback:', error);
     throw error;
@@ -823,8 +900,16 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
     }
 
     // Update contract totals
-    const newTotalPaid = contract.totalPaid + payment.amount;
-    const newOutstandingBalance = contract.outstandingBalance - payment.amount;
+    const allSuccessfulPayments = await tx.paymentTransaction.findMany({
+      where: {
+        contractId: contract.id,
+        status: 'SUCCESS',
+      },
+    });
+
+    const paymentsSum = allSuccessfulPayments.reduce((sum, successfulPayment) => sum + successfulPayment.amount, 0);
+    const newTotalPaid = contract.depositAmount + paymentsSum;
+    const newOutstandingBalance = contract.totalPrice - newTotalPaid;
 
     const contractUpdate: any = {
       totalPaid: newTotalPaid,

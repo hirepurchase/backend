@@ -1,7 +1,8 @@
 import { Response } from 'express';
 import prisma from '../config/database';
-import { AuthenticatedRequest } from '../types';
+import { AdminUserPayload, AuthenticatedRequest } from '../types';
 import { getCache, setCache } from '../services/cacheService';
+import { hasPermission, PERMISSIONS } from '../constants/permissions';
 
 const REPORT_CACHE_TTL_SECONDS = Number(process.env.REPORT_CACHE_TTL_SECONDS || 90);
 
@@ -911,34 +912,48 @@ export async function getAgentReport(req: AuthenticatedRequest, res: Response): 
 // Daily payments summary — resets each calendar day
 export async function getDailyPayments(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const adminUser = req.user as AdminUserPayload;
     const now = new Date();
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
     const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+    const canViewAllContracts = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_CONTRACTS);
+    const canViewOwnContracts = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
+
+    const where: Record<string, unknown> = {
+      status: 'SUCCESS',
+      OR: [
+        { paymentDate: { gte: startOfDay, lte: endOfDay } },
+        {
+          paymentDate: null,
+          createdAt: { gte: startOfDay, lte: endOfDay },
+        },
+      ],
+    };
+
+    if (!canViewAllContracts && canViewOwnContracts) {
+      where.contract = {
+        createdById: adminUser.id,
+      };
+    }
 
     const [count, totalAmount, recentPayments] = await Promise.all([
       prisma.paymentTransaction.count({
-        where: {
-          status: 'SUCCESS',
-          createdAt: { gte: startOfDay, lte: endOfDay },
-        },
+        where,
       }),
       prisma.paymentTransaction.aggregate({
         _sum: { amount: true },
-        where: {
-          status: 'SUCCESS',
-          createdAt: { gte: startOfDay, lte: endOfDay },
-        },
+        where,
       }),
       prisma.paymentTransaction.findMany({
-        where: {
-          status: 'SUCCESS',
-          createdAt: { gte: startOfDay, lte: endOfDay },
-        },
+        where,
         include: {
           customer: { select: { firstName: true, lastName: true, membershipId: true } },
           contract: { select: { contractNumber: true } },
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [
+          { paymentDate: 'desc' },
+          { createdAt: 'desc' },
+        ],
         take: 10,
       }),
     ]);

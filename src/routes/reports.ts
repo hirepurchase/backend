@@ -12,7 +12,7 @@ import {
   getAgentDashboard,
 } from '../controllers/reportController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
-import { DASHBOARD_ACCESS_PERMISSIONS, PERMISSIONS } from '../constants/permissions';
+import { DASHBOARD_ACCESS_PERMISSIONS, DAILY_PAYMENTS_ACCESS_PERMISSIONS, PERMISSIONS } from '../constants/permissions';
 
 const router = Router();
 
@@ -31,6 +31,6 @@ router.get('/inventory', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIE
 router.get('/preapprovals', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getPreapprovalsReport);
 router.get('/income', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getIncomeReport);
 router.get('/agents', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getAgentReport);
-router.get('/daily-payments', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_DAILY_PAYMENTS), getDailyPayments);
+router.get('/daily-payments', authenticateAdmin, requireAnyPermission(...DAILY_PAYMENTS_ACCESS_PERMISSIONS), getDailyPayments);
 
 export default router;
