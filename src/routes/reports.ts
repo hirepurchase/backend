@@ -9,13 +9,17 @@ import {
   getIncomeReport,
   getDailyPayments,
   getAgentReport,
+  getAgentDashboard,
 } from '../controllers/reportController';
 import { authenticateAdmin, requirePermission } from '../middleware/auth';
 
 const router = Router();
 
-// Dashboard statistics (no special permission required - all admins can see)
-router.get('/dashboard', authenticateAdmin, getDashboardStats);
+// Dashboard statistics
+router.get('/dashboard', authenticateAdmin, requirePermission('VIEW_DASHBOARD'), getDashboardStats);
+
+// Agent personal dashboard (scoped to the logged-in agent)
+router.get('/agent-dashboard', authenticateAdmin, requirePermission('VIEW_DASHBOARD'), getAgentDashboard);
 
 // Standard reports (require VIEW_REPORTS permission)
 router.get('/sales', authenticateAdmin, requirePermission('VIEW_REPORTS'), getSalesReport);

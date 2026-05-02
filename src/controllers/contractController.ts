@@ -3,7 +3,7 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendContractConfirmation, sendContractSubmittedForApprovalNotification } from '../services/notificationService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
-import { AuthenticatedRequest, PaymentFrequency } from '../types';
+import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
 import {
   generateContractNumber,
@@ -408,7 +408,16 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
       search,
     } = req.query;
 
+    const adminUser = req.user as AdminUserPayload;
+    const permissions = adminUser?.permissions ?? [];
+    const hasViewAll = permissions.includes('VIEW_CONTRACTS');
+    const hasViewOwn = permissions.includes('VIEW_OWN_CONTRACTS');
+
+    // Agents with VIEW_OWN_CONTRACTS but not VIEW_CONTRACTS see only their own
     const where: Record<string, unknown> = {};
+    if (!hasViewAll && hasViewOwn) {
+      where.createdById = adminUser.id;
+    }
 
     if (status) where.status = status;
     if (customerId) {

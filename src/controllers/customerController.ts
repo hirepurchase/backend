@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendWelcomeNotification } from '../services/notificationService';
-import { AuthenticatedRequest, CustomerPayload } from '../types';
+import { AuthenticatedRequest, AdminUserPayload, CustomerPayload } from '../types';
 import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
 
@@ -138,7 +138,16 @@ export async function getAllCustomers(req: AuthenticatedRequest, res: Response):
       isActivated,
     } = req.query;
 
+    const adminUser = req.user as AdminUserPayload;
+    const permissions = adminUser?.permissions ?? [];
+    const hasViewAll = permissions.includes('VIEW_CUSTOMERS');
+    const hasViewOwn = permissions.includes('VIEW_OWN_CUSTOMERS');
+
+    // Agents with VIEW_OWN_CUSTOMERS but not VIEW_CUSTOMERS see only customers they registered
     const where: Record<string, unknown> = {};
+    if (!hasViewAll && hasViewOwn) {
+      where.createdById = adminUser.id;
+    }
 
     if (search) {
       where.OR = [

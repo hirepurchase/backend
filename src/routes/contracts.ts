@@ -36,10 +36,10 @@ import { contractUpload } from '../config/upload';
 const router = Router();
 
 // Agent portal routes (must be before /:id routes)
-router.get('/agent/mine', authenticateAdmin, requirePermission('VIEW_CONTRACTS'), getAgentContracts);
-router.patch('/agent/mine/:id/revision-edit', authenticateAdmin, requirePermission('CREATE_CONTRACT', 'VIEW_CONTRACTS'), editRevisionRequestedContract);
-router.post('/agent/mine/:id/resubmit', authenticateAdmin, requirePermission('CREATE_CONTRACT', 'VIEW_CONTRACTS'), resubmitAgentContract);
-router.get('/agent/mine/:id', authenticateAdmin, requirePermission('VIEW_CONTRACTS'), getAgentContractById);
+router.get('/agent/mine', authenticateAdmin, requirePermission('VIEW_OWN_CONTRACTS'), getAgentContracts);
+router.patch('/agent/mine/:id/revision-edit', authenticateAdmin, requirePermission('CREATE_CONTRACT', 'VIEW_OWN_CONTRACTS'), editRevisionRequestedContract);
+router.post('/agent/mine/:id/resubmit', authenticateAdmin, requirePermission('CREATE_CONTRACT', 'VIEW_OWN_CONTRACTS'), resubmitAgentContract);
+router.get('/agent/mine/:id', authenticateAdmin, requirePermission('VIEW_OWN_CONTRACTS'), getAgentContractById);
 
 // Contract approval routes (must be before /:id routes)
 router.get('/approvals', authenticateAdmin, requirePermission('VIEW_CONTRACT_APPROVALS', 'APPROVE_CONTRACT'), getPendingApprovals);
@@ -54,7 +54,7 @@ router.patch('/:id/pending-edit', authenticateAdmin, requirePermission('APPROVE_
 // Admin routes
 router.post('/preflight', authenticateAdmin, requirePermission('CREATE_CONTRACT'), createContractPreflight);
 router.post('/', authenticateAdmin, requirePermission('CREATE_CONTRACT'), contractUpload, createContract);
-router.get('/', authenticateAdmin, getAllContracts);
+router.get('/', authenticateAdmin, requirePermission('VIEW_CONTRACTS', 'VIEW_OWN_CONTRACTS'), getAllContracts);
 router.get('/installments/pending', authenticateAdmin, getAllPendingInstallments);
 router.get('/admin/:id', authenticateAdmin, getContractById);
 router.put('/:id', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), updateContract);

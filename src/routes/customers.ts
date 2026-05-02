@@ -35,10 +35,10 @@ router.post('/profile/change-password', authenticateCustomer, changeCustomerPass
 
 // Admin routes for customer management
 router.post('/', authenticateAdmin, requirePermission('CREATE_CUSTOMER'), customerUpload, createCustomer);
-router.get('/', authenticateAdmin, getAllCustomers);
-router.get('/membership/:membershipId', authenticateAdmin, getCustomerByMembershipId);
+router.get('/', authenticateAdmin, requirePermission('VIEW_CUSTOMERS', 'VIEW_OWN_CUSTOMERS'), getAllCustomers);
+router.get('/membership/:membershipId', authenticateAdmin, requirePermission('VIEW_CUSTOMERS', 'VIEW_OWN_CUSTOMERS'), getCustomerByMembershipId);
 router.get('/:id/statement', authenticateAdmin, requirePermission('VIEW_CUSTOMERS'), getCustomerStatement);
-router.get('/:id', authenticateAdmin, getCustomerById);
+router.get('/:id', authenticateAdmin, requirePermission('VIEW_CUSTOMERS', 'VIEW_OWN_CUSTOMERS'), getCustomerById);
 router.put('/:id', authenticateAdmin, requirePermission('UPDATE_CUSTOMER'), customerUpload, updateCustomer);
 router.delete('/:id', authenticateAdmin, requirePermission('DELETE_CUSTOMER'), deleteCustomer);
 router.post('/:id/reset-account', authenticateAdmin, requirePermission('UPDATE_CUSTOMER'), resetCustomerAccount);

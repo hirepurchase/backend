@@ -954,3 +954,142 @@ export async function getDailyPayments(req: AuthenticatedRequest, res: Response)
     res.status(500).json({ error: 'Failed to fetch daily payments' });
   }
 }
+
+// Agent personal dashboard — scoped to the logged-in agent only
+export async function getAgentDashboard(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const agentId = req.user!.id;
+
+    const today = new Date();
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const startOfLastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const endOfLastMonth = new Date(today.getFullYear(), today.getMonth(), 0, 23, 59, 59);
+
+    const agentWhere = { createdById: agentId };
+
+    const [
+      contracts,
+      customersRegistered,
+      thisMonthContracts,
+      lastMonthContracts,
+      thisMonthCustomers,
+    ] = await Promise.all([
+      // All contracts by this agent with installment + payment data
+      prisma.hirePurchaseContract.findMany({
+        where: agentWhere,
+        include: {
+          customer: { select: { id: true, firstName: true, lastName: true, membershipId: true, phone: true } },
+          inventoryItem: { include: { product: { select: { name: true } } } },
+          installments: { select: { status: true, dueDate: true, amount: true, paidAmount: true } },
+          payments: { where: { status: 'SUCCESS' }, select: { amount: true, createdAt: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.customer.count({ where: { createdById: agentId } }),
+      prisma.hirePurchaseContract.count({
+        where: { ...agentWhere, createdAt: { gte: startOfMonth } },
+      }),
+      prisma.hirePurchaseContract.count({
+        where: { ...agentWhere, createdAt: { gte: startOfLastMonth, lte: endOfLastMonth } },
+      }),
+      prisma.customer.count({
+        where: { createdById: agentId, createdAt: { gte: startOfMonth } },
+      }),
+    ]);
+
+    // Portfolio breakdown
+    const totalContracts = contracts.length;
+    const activeContracts = contracts.filter(c => c.status === 'ACTIVE').length;
+    const pendingContracts = contracts.filter(c => c.status === 'PENDING_APPROVAL').length;
+    const revisionContracts = contracts.filter(c => c.status === 'REVISION_REQUESTED').length;
+    const completedContracts = contracts.filter(c => c.status === 'COMPLETED').length;
+    const defaultedContracts = contracts.filter(c => c.status === 'DEFAULTED').length;
+
+    // Financial totals
+    const totalSalesValue = contracts.reduce((s, c) => s + c.totalPrice, 0);
+    const totalDepositsCollected = contracts.reduce((s, c) => s + c.depositAmount, 0);
+    const totalPaymentsCollected = contracts
+      .flatMap(c => c.payments)
+      .reduce((s, p) => s + p.amount, 0);
+    const totalOutstanding = contracts
+      .filter(c => c.status === 'ACTIVE' || c.status === 'PENDING_APPROVAL')
+      .reduce((s, c) => s + c.outstandingBalance, 0);
+
+    // This month payments collected
+    const thisMonthPayments = contracts
+      .flatMap(c => c.payments)
+      .filter(p => new Date(p.createdAt) >= startOfMonth)
+      .reduce((s, p) => s + p.amount, 0);
+
+    // Overdue installments across agent's active contracts
+    const overdueInstallments = contracts
+      .filter(c => c.status === 'ACTIVE')
+      .flatMap(c => c.installments)
+      .filter(i => i.status === 'OVERDUE').length;
+
+    // Next upcoming installment due across all active contracts
+    const upcoming = contracts
+      .filter(c => c.status === 'ACTIVE')
+      .flatMap(c =>
+        c.installments
+          .filter(i => i.status === 'PENDING' || i.status === 'PARTIAL')
+          .map(i => ({ ...i, contractId: c.id }))
+      )
+      .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+    const nextDue = upcoming[0] ?? null;
+
+    // Recent contracts (last 5)
+    const recentContracts = contracts.slice(0, 5).map(c => ({
+      id: c.id,
+      contractNumber: c.contractNumber,
+      status: c.status,
+      totalPrice: c.totalPrice,
+      outstandingBalance: c.outstandingBalance,
+      createdAt: c.createdAt,
+      customer: c.customer,
+      product: c.inventoryItem?.product?.name ?? null,
+    }));
+
+    // Month-over-month contract growth
+    const contractGrowth = lastMonthContracts > 0
+      ? Math.round(((thisMonthContracts - lastMonthContracts) / lastMonthContracts) * 100)
+      : thisMonthContracts > 0 ? 100 : 0;
+
+    res.json({
+      portfolio: {
+        totalContracts,
+        activeContracts,
+        pendingContracts,
+        revisionContracts,
+        completedContracts,
+        defaultedContracts,
+      },
+      customers: {
+        total: customersRegistered,
+        thisMonth: thisMonthCustomers,
+      },
+      financials: {
+        totalSalesValue,
+        totalDepositsCollected,
+        totalPaymentsCollected,
+        totalOutstanding,
+        thisMonthPayments,
+      },
+      alerts: {
+        overdueInstallments,
+        revisionsPending: revisionContracts,
+        pendingApproval: pendingContracts,
+      },
+      thisMonth: {
+        contractsCreated: thisMonthContracts,
+        paymentsCollected: thisMonthPayments,
+        contractGrowth,
+      },
+      nextDue,
+      recentContracts,
+    });
+  } catch (error) {
+    console.error('Get agent dashboard error:', error);
+    res.status(500).json({ error: 'Failed to fetch agent dashboard' });
+  }
+}
