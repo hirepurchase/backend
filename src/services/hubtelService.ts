@@ -806,7 +806,6 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
       const installmentRemaining = installment.amount - installment.paidAmount;
 
       if (remainingAmount >= installmentRemaining) {
-        // Fully pay this installment
         await tx.installmentSchedule.update({
           where: { id: installment.id },
           data: {
@@ -817,7 +816,6 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
         });
         remainingAmount -= installmentRemaining;
       } else {
-        // Partial payment
         await tx.installmentSchedule.update({
           where: { id: installment.id },
           data: {
@@ -829,19 +827,21 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
       }
     }
 
-    // Update contract totals
-    const newTotalPaid = contract.totalPaid + payment.amount;
-    const newOutstandingBalance = contract.outstandingBalance - payment.amount;
+    // Recalculate totals from all successful payments to prevent drift
+    const allSuccessfulPayments = await tx.paymentTransaction.findMany({
+      where: { contractId: contract.id, status: 'SUCCESS' },
+    });
+    const paymentsSum = allSuccessfulPayments.reduce((sum: number, p: any) => sum + p.amount, 0);
+    const newTotalPaid = contract.depositAmount + paymentsSum;
+    const newOutstandingBalance = contract.totalPrice - newTotalPaid;
 
     const contractUpdate: any = {
       totalPaid: newTotalPaid,
       outstandingBalance: Math.max(0, newOutstandingBalance),
     };
 
-    // Check if fully paid
     if (newOutstandingBalance <= 0) {
       contractUpdate.status = 'COMPLETED';
-      contractUpdate.ownershipTransferred = true;
     }
 
     await tx.hirePurchaseContract.update({

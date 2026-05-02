@@ -993,11 +993,15 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
     if (payment.externalRef) {
       const hubtelStatus = await checkHubtelPaymentStatus(payment.externalRef);
 
-      // Update payment status based on Hubtel response
+      // Normalize Hubtel status to uppercase for case-insensitive comparison
+      const rawHubtelStatus = String(
+        hubtelStatus.data?.status || hubtelStatus.Data?.Status || ''
+      ).toUpperCase();
+
       let newStatus = payment.status;
-      if (hubtelStatus.data?.status === 'Success' || hubtelStatus.data?.status === 'successful') {
+      if (['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawHubtelStatus)) {
         newStatus = 'SUCCESS';
-      } else if (hubtelStatus.data?.status === 'Failed' || hubtelStatus.data?.status === 'failed') {
+      } else if (['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawHubtelStatus)) {
         newStatus = 'FAILED';
       }
 
@@ -1009,13 +1013,17 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
             paymentDate: newStatus === 'SUCCESS' ? new Date() : null,
           },
         });
+
+        if (newStatus === 'SUCCESS') {
+          await processSuccessfulPayment(payment.id);
+        }
       }
 
       res.json({
         transactionRef: payment.transactionRef,
         status: newStatus,
         amount: payment.amount,
-        hubtelStatus: hubtelStatus.data?.status,
+        hubtelStatus: hubtelStatus.data?.status || hubtelStatus.Data?.Status,
       });
     } else {
       res.json({
@@ -2031,20 +2039,7 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         transactionRef,
       });
 
-      res.json({
-        SessionId,
-        Type: 'AddToCart',
-        Message: 'Prompt sent. Approve on your phone to complete payment.',
-        Label: 'Payment Initiated',
-        ClientState: '',
-        DataType: 'display',
-        FieldType: 'text',
-        Item: {
-          ItemName: 'Hire Purchase Payment',
-          Qty: 1,
-          Price: paymentAmount,
-        },
-      });
+      res.json(ussdRelease(SessionId, `Payment of GHS ${paymentAmount.toFixed(2)} initiated. Please approve the prompt on your phone.`));
       return;
     }
 
@@ -2069,7 +2064,6 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
     }
 
     const customerPhone = sanitizePhoneNumber(OrderInfo.CustomerMobileNumber || '');
-    const amountPaid = OrderInfo.Payment.AmountAfterCharges || OrderInfo.Payment.AmountPaid;
 
     // Find the pending transaction linked to this session
     const payment = await prisma.paymentTransaction.findFirst({
@@ -2081,6 +2075,11 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
     });
 
     if (payment) {
+      // Use AmountAfterCharges (net merchant receives) if available, otherwise fall back to the stored payment amount
+      const amountPaid = typeof OrderInfo.Payment.AmountAfterCharges === 'number'
+        ? OrderInfo.Payment.AmountAfterCharges
+        : payment.amount;
+
       // Update transaction to SUCCESS
       await prisma.paymentTransaction.update({
         where: { id: payment.id },
@@ -2097,49 +2096,19 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
         },
       });
 
-      // Apply payment to installments (earliest due first)
-      const installments = await prisma.installmentSchedule.findMany({
-        where: { contractId: payment.contractId, status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
-        orderBy: { dueDate: 'asc' },
-      });
-
-      let remaining = amountPaid;
-      for (const inst of installments) {
-        if (remaining <= 0) break;
-        const owed = inst.amount - inst.paidAmount;
-        if (remaining >= owed) {
-          await prisma.installmentSchedule.update({
-            where: { id: inst.id },
-            data: { status: 'PAID', paidAmount: inst.amount, paidAt: new Date() },
-          });
-          remaining -= owed;
-        } else {
-          await prisma.installmentSchedule.update({
-            where: { id: inst.id },
-            data: { status: 'PARTIAL', paidAmount: inst.paidAmount + remaining },
-          });
-          remaining = 0;
-        }
-      }
-
-      // Update contract totals
-      await prisma.hirePurchaseContract.update({
-        where: { id: payment.contractId },
-        data: {
-          totalPaid: { increment: amountPaid },
-          outstandingBalance: { decrement: amountPaid },
-        },
-      });
+      // Use the canonical processSuccessfulPayment to update installments and contract totals
+      await processSuccessfulPayment(payment.id);
     }
 
-    // Acknowledge fulfillment to Hubtel (required within 1 hour)
+    // Always acknowledge fulfillment to Hubtel with 'success' — regardless of whether we found a matching
+    // payment record. Hubtel requires a 200 acknowledgment; sending 'failed' causes them to retry indefinitely.
     await fetch('https://gs-callback.hubtel.com:9055/callback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         SessionId,
         OrderId,
-        ServiceStatus: payment ? 'success' : 'failed',
+        ServiceStatus: 'success',
         MetaData: null,
       }),
     }).catch(err => console.error('Hubtel fulfillment callback failed:', err));
