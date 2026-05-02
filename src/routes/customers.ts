@@ -16,8 +16,12 @@ import {
 } from '../controllers/customerController';
 import { getCustomerContracts, getContractById } from '../controllers/contractController';
 import { downloadContractStatement } from '../controllers/statementController';
-import { authenticateAdmin, authenticateCustomer, requirePermission } from '../middleware/auth';
+import { authenticateAdmin, authenticateCustomer, requireAnyPermission } from '../middleware/auth';
 import { customerUpload } from '../config/upload';
+import {
+  CUSTOMER_ACCESS_PERMISSIONS,
+  PERMISSIONS,
+} from '../constants/permissions';
 
 const router = Router();
 
@@ -34,13 +38,13 @@ router.put('/profile/me', authenticateCustomer, updateOwnProfile);
 router.post('/profile/change-password', authenticateCustomer, changeCustomerPassword);
 
 // Admin routes for customer management
-router.post('/', authenticateAdmin, requirePermission('CREATE_CUSTOMER'), customerUpload, createCustomer);
-router.get('/', authenticateAdmin, requirePermission('VIEW_CUSTOMERS', 'VIEW_OWN_CUSTOMERS'), getAllCustomers);
-router.get('/membership/:membershipId', authenticateAdmin, requirePermission('VIEW_CUSTOMERS', 'VIEW_OWN_CUSTOMERS'), getCustomerByMembershipId);
-router.get('/:id/statement', authenticateAdmin, requirePermission('VIEW_CUSTOMERS'), getCustomerStatement);
-router.get('/:id', authenticateAdmin, requirePermission('VIEW_CUSTOMERS', 'VIEW_OWN_CUSTOMERS'), getCustomerById);
-router.put('/:id', authenticateAdmin, requirePermission('UPDATE_CUSTOMER'), customerUpload, updateCustomer);
-router.delete('/:id', authenticateAdmin, requirePermission('DELETE_CUSTOMER'), deleteCustomer);
-router.post('/:id/reset-account', authenticateAdmin, requirePermission('UPDATE_CUSTOMER'), resetCustomerAccount);
+router.post('/', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CUSTOMER), customerUpload, createCustomer);
+router.get('/', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getAllCustomers);
+router.get('/membership/:membershipId', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getCustomerByMembershipId);
+router.get('/:id/statement', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getCustomerStatement);
+router.get('/:id', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getCustomerById);
+router.put('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CUSTOMER), customerUpload, updateCustomer);
+router.delete('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.DELETE_CUSTOMER), deleteCustomer);
+router.post('/:id/reset-account', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CUSTOMER), resetCustomerAccount);
 
 export default router;

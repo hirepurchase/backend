@@ -1,7 +1,8 @@
 import { Response } from 'express';
 import prisma from '../config/database';
-import { AuthenticatedRequest } from '../types';
+import { AdminUserPayload, AuthenticatedRequest } from '../types';
 import { generateContractStatement } from '../services/pdfService';
+import { hasPermission, PERMISSIONS } from '../constants/permissions';
 
 // Generate and download contract statement
 export async function downloadContractStatement(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -32,6 +33,17 @@ export async function downloadContractStatement(req: AuthenticatedRequest, res: 
     if (!contract) {
       res.status(404).json({ error: 'Contract not found' });
       return;
+    }
+
+    if (req.userType === 'admin') {
+      const adminUser = req.user as AdminUserPayload;
+      const canViewAll = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_CONTRACTS);
+      const canViewOwn = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
+
+      if (!canViewAll && (!canViewOwn || contract.createdById !== adminUser.id)) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
     }
 
     // Check ownership for customers

@@ -15,7 +15,8 @@ import {
   getAvailableInventory,
   getAllInventoryItems,
 } from '../controllers/productController';
-import { authenticateAdmin, requirePermission } from '../middleware/auth';
+import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
+import { PERMISSIONS } from '../constants/permissions';
 
 const router = Router();
 
@@ -23,26 +24,26 @@ const router = Router();
 router.use(authenticateAdmin);
 
 // Categories
-router.post('/categories', requirePermission('MANAGE_PRODUCTS'), createCategory);
+router.post('/categories', requireAnyPermission(PERMISSIONS.MANAGE_PRODUCTS), createCategory);
 router.get('/categories', getAllCategories);
-router.put('/categories/:id', requirePermission('MANAGE_PRODUCTS'), updateCategory);
-router.delete('/categories/:id', requirePermission('MANAGE_PRODUCTS'), deleteCategory);
+router.put('/categories/:id', requireAnyPermission(PERMISSIONS.MANAGE_PRODUCTS), updateCategory);
+router.delete('/categories/:id', requireAnyPermission(PERMISSIONS.MANAGE_PRODUCTS), deleteCategory);
 
 // Products
-router.post('/', requirePermission('MANAGE_PRODUCTS'), createProduct);
+router.post('/', requireAnyPermission(PERMISSIONS.MANAGE_PRODUCTS), createProduct);
 router.get('/', getAllProducts);
 
 // Inventory - MUST be before /:id route to avoid matching issues
-router.post('/inventory', requirePermission('MANAGE_INVENTORY'), addInventoryItem);
-router.post('/inventory/bulk', requirePermission('MANAGE_INVENTORY'), addBulkInventoryItems);
-router.put('/inventory/:id', requirePermission('EDIT_INVENTORY'), updateInventoryItem);
-router.delete('/inventory/:id', requirePermission('DELETE_INVENTORY'), deleteInventoryItem);
+router.post('/inventory', requireAnyPermission(PERMISSIONS.MANAGE_INVENTORY), addInventoryItem);
+router.post('/inventory/bulk', requireAnyPermission(PERMISSIONS.MANAGE_INVENTORY), addBulkInventoryItems);
+router.put('/inventory/:id', requireAnyPermission(PERMISSIONS.EDIT_INVENTORY), updateInventoryItem);
+router.delete('/inventory/:id', requireAnyPermission(PERMISSIONS.DELETE_INVENTORY), deleteInventoryItem);
 router.get('/inventory', getAllInventoryItems); // General inventory endpoint
 router.get('/inventory/all', getAllInventoryItems);
 router.get('/:productId/inventory', getAvailableInventory);
 
 // Product by ID - MUST be after inventory routes
 router.get('/:id', getProductById);
-router.put('/:id', requirePermission('EDIT_PRODUCT'), updateProduct);
+router.put('/:id', requireAnyPermission(PERMISSIONS.EDIT_PRODUCT), updateProduct);
 
 export default router;

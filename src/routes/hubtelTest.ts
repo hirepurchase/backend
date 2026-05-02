@@ -13,12 +13,14 @@ import {
   getTestPreapprovals,
   getTestPayments,
 } from '../controllers/hubtelTestController';
-import { authenticateAdmin } from '../middleware/auth';
+import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
+import { PERMISSIONS } from '../constants/permissions';
 
 const router = Router();
 
 // All test routes require admin authentication
 router.use(authenticateAdmin);
+router.use(requireAnyPermission(PERMISSIONS.MANAGE_HUBTEL_PAYMENTS, PERMISSIONS.MANAGE_CONTRACTS));
 
 // Get test data
 router.get('/customers', getTestCustomers);

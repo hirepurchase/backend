@@ -13,9 +13,10 @@ import {
   processPreapprovalCallback,
   formatPhoneForHubtel,
 } from '../services/hubtelService';
-import { AuthenticatedRequest, WebhookPayload } from '../types';
+import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types';
 import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
+import { hasPermission, PERMISSIONS } from '../constants/permissions';
 
 function ensureContractCanAcceptPayments(status: string, res: Response): boolean {
   if (status === 'ACTIVE') {
@@ -471,6 +472,17 @@ export async function getContractPayments(req: AuthenticatedRequest, res: Respon
     if (!contract) {
       res.status(404).json({ error: 'Contract not found' });
       return;
+    }
+
+    if (req.userType === 'admin') {
+      const adminUser = req.user as AdminUserPayload;
+      const canViewAll = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_CONTRACTS);
+      const canViewOwn = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
+
+      if (!canViewAll && (!canViewOwn || contract.createdById !== adminUser.id)) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
     }
 
     // Check ownership for customers

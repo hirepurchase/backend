@@ -1,6 +1,10 @@
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
 import bcrypt from 'bcryptjs';
+import {
+  PERMISSIONS,
+  PERMISSION_DEFINITIONS,
+} from '../src/constants/permissions';
 
 const prisma = new PrismaClient();
 
@@ -8,44 +12,11 @@ async function main() {
   console.log('Seeding database...');
 
   // Create permissions
-  const permissions = [
-    { name: 'CREATE_CUSTOMER', description: 'Create new customers' },
-    { name: 'VIEW_CUSTOMERS', description: 'View customer list and details' },
-    { name: 'UPDATE_CUSTOMER', description: 'Edit customer information' },
-    { name: 'DELETE_CUSTOMER', description: 'Delete customers' },
-    { name: 'MANAGE_PRODUCTS', description: 'Create and manage products' },
-    { name: 'EDIT_PRODUCT', description: 'Edit product details (name, description, price, category)' },
-    { name: 'MANAGE_INVENTORY', description: 'Manage inventory items' },
-    { name: 'EDIT_INVENTORY', description: 'Edit inventory item details (lock status, registered under)' },
-    { name: 'DELETE_INVENTORY', description: 'Delete inventory items' },
-    { name: 'CREATE_CONTRACT', description: 'Create hire purchase contracts' },
-    { name: 'VIEW_CONTRACTS', description: 'View contracts' },
-    { name: 'UPDATE_CONTRACT', description: 'Update/amend contract terms' },
-    { name: 'CANCEL_CONTRACT', description: 'Cancel contracts' },
-    { name: 'DELETE_CONTRACT', description: 'Delete contracts' },
-    { name: 'MANAGE_CONTRACTS', description: 'Manage contract servicing operations such as direct debit and preapprovals' },
-    { name: 'RECORD_PAYMENT', description: 'Record manual payments' },
-    { name: 'VIEW_PAYMENTS', description: 'View payment transactions' },
-    { name: 'MANAGE_HUBTEL_PAYMENTS', description: 'Manage Hubtel payment settings and retry configurations' },
-    { name: 'VIEW_FAILED_PAYMENTS', description: 'View failed payment transactions' },
-    { name: 'RETRY_PAYMENTS', description: 'Retry failed payment transactions' },
-    { name: 'VIEW_DAILY_PAYMENTS', description: 'View daily payments notifications and summary' },
-    { name: 'VIEW_REPORTS', description: 'View reports' },
-    { name: 'EXPORT_REPORTS', description: 'Export reports to files' },
-    { name: 'MANAGE_SETTINGS', description: 'Manage system settings and notifications' },
-    { name: 'MANAGE_USERS', description: 'Manage admin users' },
-    { name: 'MANAGE_ROLES', description: 'Create and manage roles' },
-    { name: 'MANAGE_PERMISSIONS', description: 'Assign permissions to roles' },
-    { name: 'VIEW_AUDIT_LOGS', description: 'View system audit trail' },
-    { name: 'APPROVE_CONTRACT', description: 'Approve or reject contracts pending approval' },
-    { name: 'VIEW_CONTRACT_APPROVALS', description: 'View contracts pending approval' },
-  ];
-
-  for (const perm of permissions) {
+  for (const perm of PERMISSION_DEFINITIONS) {
     await prisma.permission.upsert({
       where: { name: perm.name },
-      update: {},
-      create: perm,
+      update: { description: perm.description },
+      create: { name: perm.name, description: perm.description },
     });
   }
 
@@ -73,7 +44,13 @@ async function main() {
     update: {
       permissions: {
         set: allPermissions
-          .filter(p => !['MANAGE_USERS', 'MANAGE_ROLES', 'MANAGE_PERMISSIONS', 'MANAGE_HUBTEL_PAYMENTS', 'DELETE_INVENTORY'].includes(p.name))
+          .filter(p => ![
+            PERMISSIONS.MANAGE_USERS,
+            PERMISSIONS.MANAGE_ROLES,
+            PERMISSIONS.MANAGE_PERMISSIONS,
+            PERMISSIONS.MANAGE_HUBTEL_PAYMENTS,
+            PERMISSIONS.DELETE_INVENTORY,
+          ].includes(p.name as typeof PERMISSIONS[keyof typeof PERMISSIONS]))
           .map(p => ({ id: p.id })),
       },
     },
@@ -83,7 +60,13 @@ async function main() {
       isSystem: true,
       permissions: {
         connect: allPermissions
-          .filter(p => !['MANAGE_USERS', 'MANAGE_ROLES', 'MANAGE_PERMISSIONS', 'MANAGE_HUBTEL_PAYMENTS', 'DELETE_INVENTORY'].includes(p.name))
+          .filter(p => ![
+            PERMISSIONS.MANAGE_USERS,
+            PERMISSIONS.MANAGE_ROLES,
+            PERMISSIONS.MANAGE_PERMISSIONS,
+            PERMISSIONS.MANAGE_HUBTEL_PAYMENTS,
+            PERMISSIONS.DELETE_INVENTORY,
+          ].includes(p.name as typeof PERMISSIONS[keyof typeof PERMISSIONS]))
           .map(p => ({ id: p.id })),
       },
     },
@@ -91,14 +74,40 @@ async function main() {
 
   const salesRole = await prisma.role.upsert({
     where: { name: 'SALES_AGENT' },
-    update: {},
+    update: {
+      permissions: {
+        set: allPermissions
+          .filter(p => [
+            PERMISSIONS.CREATE_CUSTOMER,
+            PERMISSIONS.VIEW_OWN_CUSTOMERS,
+            PERMISSIONS.UPDATE_CUSTOMER,
+            PERMISSIONS.CREATE_CONTRACT,
+            PERMISSIONS.VIEW_OWN_CONTRACTS,
+            PERMISSIONS.RECORD_PAYMENT,
+            PERMISSIONS.VIEW_PAYMENTS,
+            PERMISSIONS.VIEW_FAILED_PAYMENTS,
+            PERMISSIONS.VIEW_DASHBOARD,
+          ].includes(p.name))
+          .map(p => ({ id: p.id })),
+      },
+    },
     create: {
       name: 'SALES_AGENT',
       description: 'Sales agent with customer and contract management',
       isSystem: true,
       permissions: {
         connect: allPermissions
-          .filter(p => ['CREATE_CUSTOMER', 'VIEW_CUSTOMERS', 'UPDATE_CUSTOMER', 'CREATE_CONTRACT', 'VIEW_CONTRACTS', 'RECORD_PAYMENT', 'VIEW_PAYMENTS', 'VIEW_FAILED_PAYMENTS'].includes(p.name))
+          .filter(p => [
+            PERMISSIONS.CREATE_CUSTOMER,
+            PERMISSIONS.VIEW_OWN_CUSTOMERS,
+            PERMISSIONS.UPDATE_CUSTOMER,
+            PERMISSIONS.CREATE_CONTRACT,
+            PERMISSIONS.VIEW_OWN_CONTRACTS,
+            PERMISSIONS.RECORD_PAYMENT,
+            PERMISSIONS.VIEW_PAYMENTS,
+            PERMISSIONS.VIEW_FAILED_PAYMENTS,
+            PERMISSIONS.VIEW_DASHBOARD,
+          ].includes(p.name))
           .map(p => ({ id: p.id })),
       },
     },
@@ -107,7 +116,24 @@ async function main() {
   // AGENT role: can create customers, add inventory, create contracts (goes to approval)
   await prisma.role.upsert({
     where: { name: 'AGENT' },
-    update: {},
+    update: {
+      permissions: {
+        set: allPermissions
+          .filter(p => [
+            PERMISSIONS.CREATE_CUSTOMER,
+            PERMISSIONS.VIEW_OWN_CUSTOMERS,
+            PERMISSIONS.UPDATE_CUSTOMER,
+            PERMISSIONS.MANAGE_INVENTORY,
+            PERMISSIONS.EDIT_INVENTORY,
+            PERMISSIONS.CREATE_CONTRACT,
+            PERMISSIONS.VIEW_OWN_CONTRACTS,
+            PERMISSIONS.RECORD_PAYMENT,
+            PERMISSIONS.VIEW_PAYMENTS,
+            PERMISSIONS.VIEW_DASHBOARD,
+          ].includes(p.name))
+          .map(p => ({ id: p.id })),
+      },
+    },
     create: {
       name: 'AGENT',
       description: 'Field agent who registers customers, adds inventory and creates contracts (requires approval)',
@@ -115,10 +141,16 @@ async function main() {
       permissions: {
         connect: allPermissions
           .filter(p => [
-            'CREATE_CUSTOMER', 'VIEW_CUSTOMERS', 'UPDATE_CUSTOMER',
-            'MANAGE_INVENTORY', 'EDIT_INVENTORY',
-            'CREATE_CONTRACT', 'VIEW_CONTRACTS',
-            'RECORD_PAYMENT', 'VIEW_PAYMENTS',
+            PERMISSIONS.CREATE_CUSTOMER,
+            PERMISSIONS.VIEW_OWN_CUSTOMERS,
+            PERMISSIONS.UPDATE_CUSTOMER,
+            PERMISSIONS.MANAGE_INVENTORY,
+            PERMISSIONS.EDIT_INVENTORY,
+            PERMISSIONS.CREATE_CONTRACT,
+            PERMISSIONS.VIEW_OWN_CONTRACTS,
+            PERMISSIONS.RECORD_PAYMENT,
+            PERMISSIONS.VIEW_PAYMENTS,
+            PERMISSIONS.VIEW_DASHBOARD,
           ].includes(p.name))
           .map(p => ({ id: p.id })),
       },

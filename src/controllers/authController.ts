@@ -7,6 +7,7 @@ import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, CustomerPayload } from '../types';
 import { sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { sendSMS } from '../services/notificationService';
+import { toPermissionNames } from '../constants/permissions';
 
 // Admin Login
 export async function adminLogin(req: Request, res: Response): Promise<void> {
@@ -51,7 +52,7 @@ export async function adminLogin(req: Request, res: Response): Promise<void> {
         id: admin.id,
         email: admin.email,
         role: admin.role.name,
-        permissions: admin.role.permissions.map(p => p.name),
+        permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
       },
       'admin'
     );
@@ -73,7 +74,7 @@ export async function adminLogin(req: Request, res: Response): Promise<void> {
         firstName: admin.firstName,
         lastName: admin.lastName,
         role: admin.role.name,
-        permissions: admin.role.permissions.map(p => p.name),
+        permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
       },
     });
   } catch (error) {
@@ -492,7 +493,7 @@ export async function getCurrentAdmin(req: AuthenticatedRequest, res: Response):
       lastName: admin.lastName,
       phone: admin.phone,
       role: admin.role.name,
-      permissions: admin.role.permissions.map(p => p.name),
+      permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
     });
   } catch (error) {
     console.error('Get current admin error:', error);

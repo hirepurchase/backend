@@ -5,21 +5,22 @@ import {
   getNotificationLogs,
   getNotificationStats,
 } from '../controllers/notificationController';
-import { authenticateAdmin, requirePermission } from '../middleware/auth';
+import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { triggerManualCheck } from '../services/notificationScheduler';
+import { PERMISSIONS } from '../constants/permissions';
 
 const router = express.Router();
 
 // Notification settings routes
-router.get('/settings', authenticateAdmin, getNotificationSettings);
-router.put('/settings', authenticateAdmin, requirePermission('MANAGE_SETTINGS'), updateNotificationSettings);
+router.get('/settings', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), getNotificationSettings);
+router.put('/settings', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), updateNotificationSettings);
 
 // Notification logs routes
-router.get('/logs', authenticateAdmin, requirePermission('VIEW_REPORTS'), getNotificationLogs);
-router.get('/stats', authenticateAdmin, requirePermission('VIEW_REPORTS'), getNotificationStats);
+router.get('/logs', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getNotificationLogs);
+router.get('/stats', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getNotificationStats);
 
 // Manual trigger route
-router.post('/trigger', authenticateAdmin, requirePermission('MANAGE_SETTINGS'), async (req, res) => {
+router.post('/trigger', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), async (req, res) => {
   try {
     const result = await triggerManualCheck();
     res.json({

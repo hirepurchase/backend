@@ -30,43 +30,48 @@ import {
   editPendingContract,
 } from '../controllers/contractApprovalController';
 import { downloadContractStatement } from '../controllers/statementController';
-import { authenticateAdmin, authenticateCustomer, requirePermission } from '../middleware/auth';
+import { authenticateAdmin, authenticateCustomer, requireAnyPermission } from '../middleware/auth';
 import { contractUpload } from '../config/upload';
+import {
+  CONTRACT_ACCESS_PERMISSIONS,
+  CONTRACT_APPROVAL_ACCESS_PERMISSIONS,
+  PERMISSIONS,
+} from '../constants/permissions';
 
 const router = Router();
 
 // Agent portal routes (must be before /:id routes)
-router.get('/agent/mine', authenticateAdmin, requirePermission('VIEW_OWN_CONTRACTS'), getAgentContracts);
-router.patch('/agent/mine/:id/revision-edit', authenticateAdmin, requirePermission('CREATE_CONTRACT', 'VIEW_OWN_CONTRACTS'), editRevisionRequestedContract);
-router.post('/agent/mine/:id/resubmit', authenticateAdmin, requirePermission('CREATE_CONTRACT', 'VIEW_OWN_CONTRACTS'), resubmitAgentContract);
-router.get('/agent/mine/:id', authenticateAdmin, requirePermission('VIEW_OWN_CONTRACTS'), getAgentContractById);
+router.get('/agent/mine', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_OWN_CONTRACTS), getAgentContracts);
+router.patch('/agent/mine/:id/revision-edit', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CONTRACT, PERMISSIONS.VIEW_OWN_CONTRACTS), editRevisionRequestedContract);
+router.post('/agent/mine/:id/resubmit', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CONTRACT, PERMISSIONS.VIEW_OWN_CONTRACTS), resubmitAgentContract);
+router.get('/agent/mine/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_OWN_CONTRACTS), getAgentContractById);
 
 // Contract approval routes (must be before /:id routes)
-router.get('/approvals', authenticateAdmin, requirePermission('VIEW_CONTRACT_APPROVALS', 'APPROVE_CONTRACT'), getPendingApprovals);
-router.get('/approvals/count', authenticateAdmin, requirePermission('VIEW_CONTRACT_APPROVALS', 'APPROVE_CONTRACT'), getPendingApprovalsCount);
-router.get('/:id/approval-history', authenticateAdmin, requirePermission('VIEW_CONTRACT_APPROVALS', 'APPROVE_CONTRACT', 'VIEW_CONTRACTS'), getContractApprovalHistory);
-router.post('/:id/assign-approver', authenticateAdmin, requirePermission('VIEW_CONTRACT_APPROVALS', 'APPROVE_CONTRACT'), assignContractApprover);
-router.post('/:id/approve', authenticateAdmin, requirePermission('APPROVE_CONTRACT'), approveContract);
-router.post('/:id/request-revision', authenticateAdmin, requirePermission('APPROVE_CONTRACT'), requestContractRevision);
-router.post('/:id/reject', authenticateAdmin, requirePermission('APPROVE_CONTRACT'), requestContractRevision);
-router.patch('/:id/pending-edit', authenticateAdmin, requirePermission('APPROVE_CONTRACT'), editPendingContract);
+router.get('/approvals', authenticateAdmin, requireAnyPermission(...CONTRACT_APPROVAL_ACCESS_PERMISSIONS), getPendingApprovals);
+router.get('/approvals/count', authenticateAdmin, requireAnyPermission(...CONTRACT_APPROVAL_ACCESS_PERMISSIONS), getPendingApprovalsCount);
+router.get('/:id/approval-history', authenticateAdmin, requireAnyPermission(...CONTRACT_APPROVAL_ACCESS_PERMISSIONS, PERMISSIONS.VIEW_CONTRACTS), getContractApprovalHistory);
+router.post('/:id/assign-approver', authenticateAdmin, requireAnyPermission(...CONTRACT_APPROVAL_ACCESS_PERMISSIONS), assignContractApprover);
+router.post('/:id/approve', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), approveContract);
+router.post('/:id/request-revision', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), requestContractRevision);
+router.post('/:id/reject', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), requestContractRevision);
+router.patch('/:id/pending-edit', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), editPendingContract);
 
 // Admin routes
-router.post('/preflight', authenticateAdmin, requirePermission('CREATE_CONTRACT'), createContractPreflight);
-router.post('/', authenticateAdmin, requirePermission('CREATE_CONTRACT'), contractUpload, createContract);
-router.get('/', authenticateAdmin, requirePermission('VIEW_CONTRACTS', 'VIEW_OWN_CONTRACTS'), getAllContracts);
-router.get('/installments/pending', authenticateAdmin, getAllPendingInstallments);
-router.get('/admin/:id', authenticateAdmin, getContractById);
-router.put('/:id', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), updateContract);
-router.post('/:id/amend', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), amendContract);
-router.post('/update-overdue', authenticateAdmin, updateOverdueInstallments);
-router.post('/:id/reschedule', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), rescheduleInstallments);
-router.put('/:contractId/installments/:installmentId', authenticateAdmin, requirePermission('UPDATE_CONTRACT'), editInstallment);
-router.post('/:contractId/installments/:installmentId/pay', authenticateAdmin, requirePermission('RECORD_PAYMENT'), payInstallment);
-router.post('/:id/cancel', authenticateAdmin, requirePermission('CANCEL_CONTRACT'), cancelContract);
-router.post('/:id/transfer-ownership', authenticateAdmin, transferOwnership);
-router.delete('/:id', authenticateAdmin, requirePermission('CANCEL_CONTRACT'), deleteContract);
-router.get('/:contractId/statement', authenticateAdmin, downloadContractStatement);
+router.post('/preflight', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CONTRACT), createContractPreflight);
+router.post('/', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CONTRACT), contractUpload, createContract);
+router.get('/', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), getAllContracts);
+router.get('/installments/pending', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), getAllPendingInstallments);
+router.get('/admin/:id', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), getContractById);
+router.put('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), updateContract);
+router.post('/:id/amend', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), amendContract);
+router.post('/update-overdue', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), updateOverdueInstallments);
+router.post('/:id/reschedule', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), rescheduleInstallments);
+router.put('/:contractId/installments/:installmentId', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), editInstallment);
+router.post('/:contractId/installments/:installmentId/pay', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), payInstallment);
+router.post('/:id/cancel', authenticateAdmin, requireAnyPermission(PERMISSIONS.CANCEL_CONTRACT), cancelContract);
+router.post('/:id/transfer-ownership', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), transferOwnership);
+router.delete('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.DELETE_CONTRACT), deleteContract);
+router.get('/:contractId/statement', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), downloadContractStatement);
 
 // Customer routes
 router.get('/my-contracts', authenticateCustomer, getCustomerContracts);

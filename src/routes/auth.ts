@@ -10,7 +10,8 @@ import {
   resetAdminUserPassword,
 } from '../controllers/authController';
 import { updateOwnProfile, changeCustomerPassword } from '../controllers/customerController';
-import { authenticateAdmin, authenticateCustomer, requirePermission } from '../middleware/auth';
+import { authenticateAdmin, authenticateCustomer, requireAnyPermission } from '../middleware/auth';
+import { PERMISSIONS } from '../constants/permissions';
 
 const router = Router();
 
@@ -18,7 +19,7 @@ const router = Router();
 router.post('/admin/login', adminLogin);
 router.get('/admin/me', authenticateAdmin, getCurrentAdmin);
 router.put('/admin/me/password', authenticateAdmin, changeAdminPassword);
-router.put('/admin/users/:userId/reset-password', authenticateAdmin, requirePermission('MANAGE_USERS'), resetAdminUserPassword);
+router.put('/admin/users/:userId/reset-password', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_USERS), resetAdminUserPassword);
 
 // Customer authentication
 router.post('/customer/login', customerLogin);

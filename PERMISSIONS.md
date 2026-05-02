@@ -1,207 +1,140 @@
 # Permissions System
 
-This document describes the permissions system implemented in the Hire Purchase application.
+This project uses a role-permission model for admin users. The canonical permission list now lives in [src/constants/permissions.ts](/home/wilsonjunior/Documents/hirepurchase/backend/src/constants/permissions.ts:1), and both backend enforcement and frontend UI checks should reference that shared vocabulary.
 
-## New Permissions Added
+## Key Rules
 
-### Inventory Permissions
-- **EDIT_INVENTORY**: Edit inventory item details (lock status, registered under)
-  - Required for: Updating inventory item lock status and registered under fields
-  - Route: `PUT /api/products/inventory/:id`
-  - Used by: Inventory management page
+- `SUPER_ADMIN` bypasses permission checks.
+- Route middleware uses `requireAnyPermission(...)`, which means multiple permissions are treated as **OR**, not AND.
+- Scoped permissions such as `VIEW_OWN_CUSTOMERS` and `VIEW_OWN_CONTRACTS` are enforced in controllers, not only at the route layer.
+- Frontend checks are only for UX. Backend checks are the security boundary.
 
-### Hubtel Payment Permissions
-- **MANAGE_HUBTEL_PAYMENTS**: Manage Hubtel payment settings and retry configurations
-  - Required for: Viewing and updating retry settings
-  - Routes:
-    - `GET /api/payment-retry/settings`
-    - `PUT /api/payment-retry/settings`
-  - Used by: Payment Retry Settings page
+## Permission Model
 
-- **VIEW_FAILED_PAYMENTS**: View failed payment transactions
-  - Required for: Viewing list of failed payments and retry history
-  - Routes:
-    - `GET /api/payment-retry/failed`
-    - `GET /api/payment-retry/history/:paymentId`
-  - Used by: Failed Payments page
+### Customers
+- `CREATE_CUSTOMER`: create customer records
+- `VIEW_CUSTOMERS`: view all customers
+- `VIEW_OWN_CUSTOMERS`: view only customers created by the signed-in admin
+- `UPDATE_CUSTOMER`: edit customer information
+- `DELETE_CUSTOMER`: delete customers
 
-- **RETRY_PAYMENTS**: Retry failed payment transactions
-  - Required for: Triggering payment retries
-  - Routes:
-    - `POST /api/payment-retry/retry/:paymentId`
-    - `POST /api/payment-retry/retry-multiple`
-    - `POST /api/payment-retry/retry-all`
-  - Used by: Failed Payments page (retry actions)
+### Inventory
+- `MANAGE_PRODUCTS`: create and manage products
+- `EDIT_PRODUCT`: edit product details
+- `MANAGE_INVENTORY`: add and manage inventory items
+- `EDIT_INVENTORY`: edit inventory item details
+- `DELETE_INVENTORY`: delete inventory items
 
-## All Permissions
+### Contracts
+- `CREATE_CONTRACT`: create contracts
+- `VIEW_CONTRACTS`: view all contracts
+- `VIEW_OWN_CONTRACTS`: view only contracts created by the signed-in admin
+- `UPDATE_CONTRACT`: amend contracts, installments, transfers, and servicing data
+- `CANCEL_CONTRACT`: cancel contracts
+- `DELETE_CONTRACT`: permanently delete contracts
+- `MANAGE_CONTRACTS`: direct debit and preapproval operations
+- `APPROVE_CONTRACT`: approve or request revision for pending contracts
+- `VIEW_CONTRACT_APPROVALS`: view the approval queue
 
-1. **CREATE_CUSTOMER**: Create new customers
-2. **VIEW_CUSTOMERS**: View customer list and details
-3. **UPDATE_CUSTOMER**: Edit customer information
-4. **DELETE_CUSTOMER**: Delete customers
-5. **MANAGE_PRODUCTS**: Create and manage products
-6. **MANAGE_INVENTORY**: Manage inventory items (add, bulk import)
-7. **EDIT_INVENTORY**: Edit inventory item details (NEW)
-8. **CREATE_CONTRACT**: Create hire purchase contracts
-9. **VIEW_CONTRACTS**: View contracts
-10. **UPDATE_CONTRACT**: Update/amend contract terms
-11. **CANCEL_CONTRACT**: Cancel contracts
-12. **DELETE_CONTRACT**: Delete contracts
-13. **RECORD_PAYMENT**: Record manual payments
-14. **VIEW_PAYMENTS**: View payment transactions
-15. **MANAGE_HUBTEL_PAYMENTS**: Manage Hubtel payment settings (NEW)
-16. **VIEW_FAILED_PAYMENTS**: View failed payment transactions (NEW)
-17. **RETRY_PAYMENTS**: Retry failed payment transactions (NEW)
-18. **VIEW_REPORTS**: View reports
-19. **EXPORT_REPORTS**: Export reports to files
-20. **MANAGE_SETTINGS**: Manage system settings and notifications
-21. **MANAGE_USERS**: Manage admin users
-22. **MANAGE_ROLES**: Create and manage roles
-23. **MANAGE_PERMISSIONS**: Assign permissions to roles
-24. **VIEW_AUDIT_LOGS**: View system audit trail
+### Payments
+- `RECORD_PAYMENT`: record manual payments
+- `VIEW_PAYMENTS`: view payment transactions
+- `MANAGE_HUBTEL_PAYMENTS`: manage retry/payment gateway operational settings
+- `VIEW_FAILED_PAYMENTS`: view failed payment transactions
+- `RETRY_PAYMENTS`: retry failed payments
+- `VIEW_DAILY_PAYMENTS`: view daily payment summaries
 
-## Role Permissions
+### Reporting
+- `VIEW_DASHBOARD`: access dashboard summaries
+- `VIEW_REPORTS`: access reports
+- `EXPORT_REPORTS`: export report data
 
-### SUPER_ADMIN
-- Has ALL permissions
-- Cannot be deleted (system role)
-- Can manage users, roles, and Hubtel payment settings
+### Administration
+- `MANAGE_SETTINGS`: notifications, imports, operational SMS, and utility settings
+- `MANAGE_USERS`: manage admin users
+- `MANAGE_ROLES`: manage roles
+- `MANAGE_PERMISSIONS`: assign permissions to roles
+- `VIEW_AUDIT_LOGS`: view audit trails
 
-### ADMIN
-- Has all permissions EXCEPT:
-  - MANAGE_USERS
-  - MANAGE_ROLES
-  - MANAGE_PERMISSIONS
-  - MANAGE_HUBTEL_PAYMENTS
-- Can perform day-to-day operations but cannot modify system configuration
+## Shared Access Groups
 
-### SALES_AGENT
-- Limited permissions for sales operations:
-  - CREATE_CUSTOMER
-  - VIEW_CUSTOMERS
-  - UPDATE_CUSTOMER
-  - CREATE_CONTRACT
-  - VIEW_CONTRACTS
-  - RECORD_PAYMENT
-  - VIEW_PAYMENTS
-  - VIEW_FAILED_PAYMENTS
+These grouped rules are defined in code to keep routes and UI consistent:
 
-## Using Permissions in Frontend
+- `CUSTOMER_ACCESS_PERMISSIONS`
+  - `VIEW_CUSTOMERS`
+  - `VIEW_OWN_CUSTOMERS`
+- `CONTRACT_ACCESS_PERMISSIONS`
+  - `VIEW_CONTRACTS`
+  - `VIEW_OWN_CONTRACTS`
+- `CONTRACT_APPROVAL_ACCESS_PERMISSIONS`
+  - `VIEW_CONTRACT_APPROVALS`
+  - `APPROVE_CONTRACT`
+- `DASHBOARD_ACCESS_PERMISSIONS`
+  - `VIEW_DASHBOARD`
+  - `VIEW_REPORTS`
+  - `VIEW_CONTRACTS`
+  - `VIEW_OWN_CONTRACTS`
 
-### Hook: `usePermissions()`
+## Seeded Roles
 
-```typescript
+### `SUPER_ADMIN`
+- All permissions.
+
+### `ADMIN`
+- Operational access, excluding:
+  - `MANAGE_USERS`
+  - `MANAGE_ROLES`
+  - `MANAGE_PERMISSIONS`
+  - `MANAGE_HUBTEL_PAYMENTS`
+  - `DELETE_INVENTORY`
+
+### `SALES_AGENT`
+- Customer creation and own-customer visibility
+- Contract creation and own-contract visibility
+- Payment recording/viewing
+- Failed-payment viewing
+- Dashboard access
+
+### `AGENT`
+- Customer creation and own-customer visibility
+- Inventory management/editing
+- Contract creation and own-contract visibility
+- Payment recording/viewing
+- Dashboard access
+
+## Implementation Guidance
+
+### Backend
+
+Prefer importing constants and groups:
+
+```ts
+import { PERMISSIONS, CONTRACT_ACCESS_PERMISSIONS } from '../constants/permissions';
+import { requireAnyPermission } from '../middleware/auth';
+
+router.get('/', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), getAllContracts);
+router.delete('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.DELETE_CONTRACT), deleteContract);
+```
+
+For scoped resources, route guards are not enough. The controller must also check ownership when a user has only the `VIEW_OWN_*` permission.
+
+### Frontend
+
+Use [frontend/src/lib/permissions.ts](/home/wilsonjunior/Documents/hirepurchase/frontend/src/lib/permissions.ts:1) instead of raw strings:
+
+```ts
+import { PERMISSIONS, CONTRACT_ACCESS_PERMISSIONS } from '@/lib/permissions';
 import { usePermissions } from '@/hooks/usePermissions';
 
-function MyComponent() {
-  const { hasPermission, hasAnyPermission, hasAllPermissions } = usePermissions();
+const { hasPermission, hasAnyPermission } = usePermissions();
 
-  // Check single permission
-  if (hasPermission('EDIT_INVENTORY')) {
-    // Show edit button
-  }
-
-  // Check if user has any of the permissions
-  if (hasAnyPermission(['EDIT_INVENTORY', 'MANAGE_INVENTORY'])) {
-    // Show inventory management section
-  }
-
-  // Check if user has all permissions
-  if (hasAllPermissions(['CREATE_CONTRACT', 'RECORD_PAYMENT'])) {
-    // Show advanced contract creation
-  }
-}
+const canEditInventory = hasPermission(PERMISSIONS.EDIT_INVENTORY);
+const canViewContracts = hasAnyPermission(CONTRACT_ACCESS_PERMISSIONS);
 ```
 
-### Example: Conditional Rendering
+## Common Pitfalls
 
-```typescript
-const { hasPermission } = usePermissions();
-
-return (
-  <div>
-    {hasPermission('EDIT_INVENTORY') && (
-      <Button onClick={handleEdit}>Edit Inventory</Button>
-    )}
-
-    {hasPermission('MANAGE_HUBTEL_PAYMENTS') && (
-      <Link href="/admin/settings/retry-settings">Payment Settings</Link>
-    )}
-  </div>
-);
-```
-
-### Example: Disabling Buttons
-
-```typescript
-const { hasPermission } = usePermissions();
-const canEdit = hasPermission('EDIT_INVENTORY');
-
-return (
-  <Button
-    disabled={!canEdit}
-    onClick={handleEdit}
-  >
-    Edit
-  </Button>
-);
-```
-
-## Backend Route Protection
-
-All protected routes use the `requirePermission` middleware:
-
-```typescript
-router.put('/inventory/:id', requirePermission('EDIT_INVENTORY'), updateInventoryItem);
-router.get('/settings', requirePermission('MANAGE_HUBTEL_PAYMENTS'), getSettings);
-```
-
-## Adding New Permissions
-
-1. **Add to seed file** (`backend/prisma/seed.ts`):
-   ```typescript
-   const permissions = [
-     // ... existing permissions
-     { name: 'NEW_PERMISSION', description: 'Description of the permission' },
-   ];
-   ```
-
-2. **Update role assignments** (in seed file):
-   ```typescript
-   const adminRole = await prisma.role.upsert({
-     // ... config
-     permissions: {
-       connect: allPermissions
-         .filter(p => !['EXCLUDED_PERMS'].includes(p.name))
-         .map(p => ({ id: p.id })),
-     },
-   });
-   ```
-
-3. **Protect routes** in backend:
-   ```typescript
-   router.post('/new-route', requirePermission('NEW_PERMISSION'), handler);
-   ```
-
-4. **Use in frontend**:
-   ```typescript
-   const { hasPermission } = usePermissions();
-   if (hasPermission('NEW_PERMISSION')) {
-     // Show UI element
-   }
-   ```
-
-5. **Run seed** to update database:
-   ```bash
-   cd backend
-   npx ts-node prisma/seed.ts
-   ```
-
-## Security Notes
-
-- Permissions are checked on **both frontend and backend**
-- Frontend checks provide better UX (hide unauthorized UI)
-- Backend checks provide actual security (prevent unauthorized API calls)
-- Never rely on frontend-only permission checks for security
-- All sensitive operations must be protected by backend middleware
-- Super Admin role is system-protected and cannot be deleted
+- Do not assume `requireAnyPermission(A, B)` means both `A` and `B` are required.
+- Do not seed agent roles with broad `VIEW_CUSTOMERS` / `VIEW_CONTRACTS` if the intended behavior is “only my records.”
+- Do not expose UI based on one permission while the backend route uses a different permission name.
+- Do not add a new permission in routes or frontend without adding it to the seed definitions.

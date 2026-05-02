@@ -8,7 +8,8 @@ import {
   retryAllPayments,
   getRetryHistory,
 } from '../controllers/paymentRetryController';
-import { authenticateAdmin, requirePermission } from '../middleware/auth';
+import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
+import { PERMISSIONS } from '../constants/permissions';
 
 const router = express.Router();
 
@@ -16,18 +17,18 @@ const router = express.Router();
 router.use(authenticateAdmin);
 
 // Retry settings routes
-router.get('/settings', requirePermission('MANAGE_HUBTEL_PAYMENTS'), getSettings);
-router.put('/settings', requirePermission('MANAGE_HUBTEL_PAYMENTS'), updateSettings);
+router.get('/settings', requireAnyPermission(PERMISSIONS.MANAGE_HUBTEL_PAYMENTS), getSettings);
+router.put('/settings', requireAnyPermission(PERMISSIONS.MANAGE_HUBTEL_PAYMENTS), updateSettings);
 
 // Failed payments routes
-router.get('/failed', requirePermission('VIEW_FAILED_PAYMENTS'), getFailedPaymentsList);
+router.get('/failed', requireAnyPermission(PERMISSIONS.VIEW_FAILED_PAYMENTS), getFailedPaymentsList);
 
 // Retry routes
-router.post('/retry/:paymentId', requirePermission('RETRY_PAYMENTS'), retrySinglePayment);
-router.post('/retry-multiple', requirePermission('RETRY_PAYMENTS'), retryMultiplePayments);
-router.post('/retry-all', requirePermission('RETRY_PAYMENTS'), retryAllPayments);
+router.post('/retry/:paymentId', requireAnyPermission(PERMISSIONS.RETRY_PAYMENTS), retrySinglePayment);
+router.post('/retry-multiple', requireAnyPermission(PERMISSIONS.RETRY_PAYMENTS), retryMultiplePayments);
+router.post('/retry-all', requireAnyPermission(PERMISSIONS.RETRY_PAYMENTS), retryAllPayments);
 
 // Retry history
-router.get('/history/:paymentId', requirePermission('VIEW_FAILED_PAYMENTS'), getRetryHistory);
+router.get('/history/:paymentId', requireAnyPermission(PERMISSIONS.VIEW_FAILED_PAYMENTS), getRetryHistory);
 
 export default router;

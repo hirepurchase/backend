@@ -23,7 +23,11 @@ import {
   handleUssdSession,
   handleUssdFulfillment,
 } from '../controllers/paymentController';
-import { authenticateAdmin, authenticateCustomer, requirePermission, authenticateAny } from '../middleware/auth';
+import { authenticateAdmin, authenticateCustomer, requireAnyPermission, authenticateAny } from '../middleware/auth';
+import {
+  CONTRACT_ACCESS_PERMISSIONS,
+  PERMISSIONS,
+} from '../constants/permissions';
 
 const router = Router();
 
@@ -40,21 +44,21 @@ router.get('/status/:transactionRef', authenticateCustomer, getPaymentStatus);
 router.get('/hubtel/status/:transactionRef', authenticateCustomer, checkHubtelStatus);
 
 // Admin payment routes
-router.get('/contract/:contractId', authenticateAdmin, getContractPayments);
-router.post('/manual', authenticateAdmin, requirePermission('RECORD_PAYMENT'), recordManualPayment);
-router.put('/manual/:id', authenticateAdmin, requirePermission('RECORD_PAYMENT'), updateManualPayment);
-router.delete('/manual/:id', authenticateAdmin, requirePermission('RECORD_PAYMENT'), deleteManualPayment);
-router.get('/admin/status/:transactionRef', authenticateAdmin, getPaymentStatus);
-router.get('/admin/hubtel/status/:transactionRef', authenticateAdmin, checkHubtelStatus);
+router.get('/contract/:contractId', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_PAYMENTS, ...CONTRACT_ACCESS_PERMISSIONS), getContractPayments);
+router.post('/manual', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), recordManualPayment);
+router.put('/manual/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), updateManualPayment);
+router.delete('/manual/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), deleteManualPayment);
+router.get('/admin/status/:transactionRef', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_PAYMENTS), getPaymentStatus);
+router.get('/admin/hubtel/status/:transactionRef', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_PAYMENTS), checkHubtelStatus);
 
 // Direct Debit - Preapproval routes (Admin only)
-router.post('/hubtel/preapproval/initiate', authenticateAdmin, requirePermission('MANAGE_CONTRACTS'), initiateDirectDebitPreapproval);
-router.post('/hubtel/preapproval/verify-otp', authenticateAdmin, requirePermission('MANAGE_CONTRACTS'), verifyDirectDebitOTP);
-router.get('/hubtel/preapproval/:clientReferenceId', authenticateAdmin, getPreapprovalStatus);
-router.get('/hubtel/preapproval/customer/:customerId', authenticateAdmin, getCustomerPreapprovals);
+router.post('/hubtel/preapproval/initiate', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_CONTRACTS), initiateDirectDebitPreapproval);
+router.post('/hubtel/preapproval/verify-otp', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_CONTRACTS), verifyDirectDebitOTP);
+router.get('/hubtel/preapproval/:clientReferenceId', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_CONTRACTS), getPreapprovalStatus);
+router.get('/hubtel/preapproval/customer/:customerId', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_CONTRACTS), getCustomerPreapprovals);
 
 // Direct Debit - Payment route (Admin only - for recurring payments)
-router.post('/hubtel/direct-debit', authenticateAdmin, requirePermission('MANAGE_CONTRACTS'), initiateDirectDebitPayment);
+router.post('/hubtel/direct-debit', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_CONTRACTS), initiateDirectDebitPayment);
 
 // USSD payment routes (no auth - phone number identifies the customer)
 router.get('/ussd/balance', getUssdBalance);

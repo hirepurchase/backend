@@ -7,6 +7,17 @@ import { sendWelcomeNotification } from '../services/notificationService';
 import { AuthenticatedRequest, AdminUserPayload, CustomerPayload } from '../types';
 import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
+import { hasPermission, PERMISSIONS } from '../constants/permissions';
+
+function canViewAnyCustomer(adminUser: AdminUserPayload | undefined, customerCreatedById: string | null | undefined): boolean {
+  const permissions = adminUser?.permissions ?? [];
+
+  if (hasPermission(permissions, PERMISSIONS.VIEW_CUSTOMERS)) {
+    return true;
+  }
+
+  return hasPermission(permissions, PERMISSIONS.VIEW_OWN_CUSTOMERS) && customerCreatedById === adminUser?.id;
+}
 
 // Create customer (Admin only)
 export async function createCustomer(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -140,8 +151,8 @@ export async function getAllCustomers(req: AuthenticatedRequest, res: Response):
 
     const adminUser = req.user as AdminUserPayload;
     const permissions = adminUser?.permissions ?? [];
-    const hasViewAll = permissions.includes('VIEW_CUSTOMERS');
-    const hasViewOwn = permissions.includes('VIEW_OWN_CUSTOMERS');
+    const hasViewAll = hasPermission(permissions, PERMISSIONS.VIEW_CUSTOMERS);
+    const hasViewOwn = hasPermission(permissions, PERMISSIONS.VIEW_OWN_CUSTOMERS);
 
     // Agents with VIEW_OWN_CUSTOMERS but not VIEW_CUSTOMERS see only customers they registered
     const where: Record<string, unknown> = {};
@@ -254,6 +265,12 @@ export async function getCustomerById(req: AuthenticatedRequest, res: Response):
       return;
     }
 
+    const adminUser = req.user as AdminUserPayload;
+    if (!canViewAnyCustomer(adminUser, customer.createdById)) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
     res.json(customer);
   } catch (error) {
     console.error('Get customer error:', error);
@@ -284,6 +301,12 @@ export async function getCustomerByMembershipId(req: AuthenticatedRequest, res: 
 
     if (!customer) {
       res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+
+    const adminUser = req.user as AdminUserPayload;
+    if (!canViewAnyCustomer(adminUser, customer.createdById)) {
+      res.status(403).json({ error: 'Access denied' });
       return;
     }
 
@@ -712,6 +735,12 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
 
     if (!customer) {
       res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+
+    const adminUser = req.user as AdminUserPayload;
+    if (!canViewAnyCustomer(adminUser, customer.createdById)) {
+      res.status(403).json({ error: 'Access denied' });
       return;
     }
 

@@ -1,10 +1,11 @@
 import { Request } from 'express';
+import type { PermissionName } from '../constants/permissions';
 
 export interface AdminUserPayload {
   id: string;
   email: string;
   role: string;
-  permissions: string[];
+  permissions: PermissionName[];
 }
 
 export interface CustomerPayload {

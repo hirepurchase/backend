@@ -2,6 +2,8 @@ import { Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { AuthenticatedRequest, AdminUserPayload, CustomerPayload } from '../types';
 import prisma from '../config/database';
+import type { PermissionName } from '../constants/permissions';
+import { hasAnyPermission, toPermissionNames } from '../constants/permissions';
 
 export type { AuthenticatedRequest } from '../types';
 
@@ -70,7 +72,7 @@ export async function authenticateAdmin(
       id: admin.id,
       email: admin.email,
       role: admin.role.name,
-      permissions: admin.role.permissions.map(p => p.name),
+      permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
     };
     req.userType = 'admin';
 
@@ -176,7 +178,7 @@ export async function authenticateAny(
         id: admin.id,
         email: admin.email,
         role: admin.role.name,
-        permissions: admin.role.permissions.map(p => p.name),
+        permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
       };
       req.userType = 'admin';
     } else {
@@ -209,7 +211,7 @@ export async function authenticateAny(
   }
 }
 
-export function requirePermission(...permissions: string[]) {
+export function requireAnyPermission(...permissions: PermissionName[]) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     if (req.userType !== 'admin') {
       res.status(403).json({ error: 'Admin access required' });
@@ -224,11 +226,7 @@ export function requirePermission(...permissions: string[]) {
       return;
     }
 
-    const hasPermission = permissions.some(permission =>
-      adminUser.permissions.includes(permission)
-    );
-
-    if (!hasPermission) {
+    if (!hasAnyPermission(adminUser.permissions, permissions)) {
       res.status(403).json({ error: 'Insufficient permissions' });
       return;
     }
@@ -236,6 +234,10 @@ export function requirePermission(...permissions: string[]) {
     next();
   };
 }
+
+// Backward-compatible alias. Multiple permissions are treated as OR, so
+// newer route code should prefer the clearer requireAnyPermission name.
+export const requirePermission = requireAnyPermission;
 
 export function requireSuperAdmin(
   req: AuthenticatedRequest,

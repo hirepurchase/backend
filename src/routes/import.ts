@@ -1,6 +1,6 @@
 import express from 'express';
 import multer from 'multer';
-import { authenticateAdmin } from '../middleware/auth';
+import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import {
   importCustomersFromExcel,
   importProductsFromExcel,
@@ -11,6 +11,7 @@ import {
   downloadInventoryTemplate,
   downloadContractTemplate,
 } from '../controllers/importController';
+import { PERMISSIONS } from '../constants/permissions';
 
 const router = express.Router();
 
@@ -34,15 +35,15 @@ const upload = multer({
 });
 
 // Download templates
-router.get('/templates/customers', authenticateAdmin, downloadCustomerTemplate);
-router.get('/templates/products', authenticateAdmin, downloadProductTemplate);
-router.get('/templates/inventory', authenticateAdmin, downloadInventoryTemplate);
-router.get('/templates/contracts', authenticateAdmin, downloadContractTemplate);
+router.get('/templates/customers', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), downloadCustomerTemplate);
+router.get('/templates/products', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), downloadProductTemplate);
+router.get('/templates/inventory', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), downloadInventoryTemplate);
+router.get('/templates/contracts', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), downloadContractTemplate);
 
 // Import endpoints
-router.post('/customers', authenticateAdmin, upload.single('file'), importCustomersFromExcel);
-router.post('/products', authenticateAdmin, upload.single('file'), importProductsFromExcel);
-router.post('/inventory', authenticateAdmin, upload.single('file'), importInventoryFromExcel);
-router.post('/contracts', authenticateAdmin, upload.single('file'), importContractsFromExcel);
+router.post('/customers', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), upload.single('file'), importCustomersFromExcel);
+router.post('/products', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), upload.single('file'), importProductsFromExcel);
+router.post('/inventory', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), upload.single('file'), importInventoryFromExcel);
+router.post('/contracts', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), upload.single('file'), importContractsFromExcel);
 
 export default router;

@@ -15,6 +15,17 @@ import {
   sanitizePhoneNumber,
 } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
+import { hasPermission, PERMISSIONS } from '../constants/permissions';
+
+function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCreatedById: string | null | undefined): boolean {
+  const permissions = adminUser?.permissions ?? [];
+
+  if (hasPermission(permissions, PERMISSIONS.VIEW_CONTRACTS)) {
+    return true;
+  }
+
+  return hasPermission(permissions, PERMISSIONS.VIEW_OWN_CONTRACTS) && contractCreatedById === adminUser?.id;
+}
 
 export async function createContractPreflight(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
@@ -410,8 +421,8 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
 
     const adminUser = req.user as AdminUserPayload;
     const permissions = adminUser?.permissions ?? [];
-    const hasViewAll = permissions.includes('VIEW_CONTRACTS');
-    const hasViewOwn = permissions.includes('VIEW_OWN_CONTRACTS');
+    const hasViewAll = hasPermission(permissions, PERMISSIONS.VIEW_CONTRACTS);
+    const hasViewOwn = hasPermission(permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
 
     // Agents with VIEW_OWN_CONTRACTS but not VIEW_CONTRACTS see only their own
     const where: Record<string, unknown> = {};
@@ -534,6 +545,14 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
     if (!contract) {
       res.status(404).json({ error: 'Contract not found' });
       return;
+    }
+
+    if (req.userType === 'admin') {
+      const adminUser = req.user as AdminUserPayload;
+      if (!canViewAnyContract(adminUser, contract.createdById)) {
+        res.status(403).json({ error: 'Access denied' });
+        return;
+      }
     }
 
     // Check ownership for customers
@@ -1504,6 +1523,7 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
 export async function getAllPendingInstallments(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { status, search } = req.query;
+    const adminUser = req.user as AdminUserPayload;
 
     const where: any = {
       contract: {
@@ -1559,6 +1579,12 @@ export async function getAllPendingInstallments(req: AuthenticatedRequest, res: 
           },
         },
       ];
+    }
+
+    const hasViewAll = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_CONTRACTS);
+    const hasViewOwn = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
+    if (!hasViewAll && hasViewOwn) {
+      where.contract.createdById = adminUser.id;
     }
 
     const installments = await prisma.installmentSchedule.findMany({
