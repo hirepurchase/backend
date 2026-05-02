@@ -993,15 +993,18 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
     if (payment.externalRef) {
       const hubtelStatus = await checkHubtelPaymentStatus(payment.externalRef);
 
-      // Normalize Hubtel status to uppercase for case-insensitive comparison
+      // Normalize Hubtel status — check both data.status and top-level ResponseCode
       const rawHubtelStatus = String(
-        hubtelStatus.data?.status || hubtelStatus.Data?.Status || ''
+        hubtelStatus.data?.status || hubtelStatus.Data?.Status || hubtelStatus.data?.Status || ''
       ).toUpperCase();
+      const hubtelResponseCode = String(
+        hubtelStatus.ResponseCode || hubtelStatus.responseCode || hubtelStatus.data?.ResponseCode || ''
+      ).trim();
 
       let newStatus = payment.status;
-      if (['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawHubtelStatus)) {
+      if (hubtelResponseCode === '0000' || ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawHubtelStatus)) {
         newStatus = 'SUCCESS';
-      } else if (['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawHubtelStatus)) {
+      } else if (hubtelResponseCode === '2001' || ['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawHubtelStatus)) {
         newStatus = 'FAILED';
       }
 
@@ -2117,5 +2120,150 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
   } catch (error: any) {
     console.error('USSD fulfillment error:', error);
     res.status(200).json({ received: true });
+  }
+}
+
+// POST /payments/admin/reconcile
+// Finds all PENDING Hubtel payments, queries Hubtel for their actual status,
+// and updates any that have resolved without a callback being received.
+export async function reconcileHubtelPayments(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const olderThanMinutes = Number(req.query.olderThanMinutes) || 10;
+    const dryRun = req.query.dryRun === 'true';
+    const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
+
+    // Find PENDING Hubtel payments that have an externalRef (i.e. Hubtel accepted them)
+    const pendingPayments = await prisma.paymentTransaction.findMany({
+      where: {
+        status: 'PENDING',
+        paymentMethod: { in: ['HUBTEL_MOMO', 'HUBTEL_REGULAR', 'HUBTEL_DIRECT_DEBIT'] },
+        externalRef: { not: null },
+        createdAt: { lt: cutoff },
+      },
+      include: {
+        contract: {
+          select: {
+            contractNumber: true,
+            customerId_uuid: true,
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    const results: {
+      transactionRef: string;
+      contractNumber: string;
+      amount: number;
+      createdAt: Date;
+      hubtelStatus: string;
+      action: 'updated_success' | 'updated_failed' | 'still_pending' | 'error' | 'dry_run';
+      error?: string;
+    }[] = [];
+
+    for (const payment of pendingPayments) {
+      try {
+        const hubtelResponse = await checkHubtelPaymentStatus(payment.transactionRef);
+
+        // Hubtel status API can return status in data.status, Data.Status, or top-level ResponseCode
+        const rawStatus = String(
+          hubtelResponse.data?.status ||
+          hubtelResponse.Data?.Status ||
+          hubtelResponse.data?.Status ||
+          ''
+        ).toUpperCase();
+        const responseCode = String(
+          hubtelResponse.ResponseCode ||
+          hubtelResponse.responseCode ||
+          hubtelResponse.data?.ResponseCode ||
+          ''
+        ).trim();
+
+        let resolvedStatus: 'SUCCESS' | 'FAILED' | null = null;
+        if (responseCode === '0000' || ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawStatus)) {
+          resolvedStatus = 'SUCCESS';
+        } else if (responseCode === '2001' || ['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawStatus)) {
+          resolvedStatus = 'FAILED';
+        }
+
+        if (!resolvedStatus) {
+          results.push({
+            transactionRef: payment.transactionRef,
+            contractNumber: payment.contract?.contractNumber ?? '',
+            amount: payment.amount,
+            createdAt: payment.createdAt,
+            hubtelStatus: rawStatus || 'PENDING',
+            action: 'still_pending',
+          });
+          continue;
+        }
+
+        if (dryRun) {
+          results.push({
+            transactionRef: payment.transactionRef,
+            contractNumber: payment.contract?.contractNumber ?? '',
+            amount: payment.amount,
+            createdAt: payment.createdAt,
+            hubtelStatus: rawStatus,
+            action: 'dry_run',
+          });
+          continue;
+        }
+
+        // Update payment status
+        await prisma.paymentTransaction.update({
+          where: { id: payment.id },
+          data: {
+            status: resolvedStatus,
+            paymentDate: resolvedStatus === 'SUCCESS' ? new Date() : null,
+            metadata: JSON.stringify({
+              ...JSON.parse(payment.metadata || '{}'),
+              reconciledAt: new Date().toISOString(),
+              hubtelStatus: rawStatus,
+            }),
+          },
+        });
+
+        if (resolvedStatus === 'SUCCESS') {
+          await processSuccessfulPayment(payment.id);
+        }
+
+        results.push({
+          transactionRef: payment.transactionRef,
+          contractNumber: payment.contract?.contractNumber ?? '',
+          amount: payment.amount,
+          createdAt: payment.createdAt,
+          hubtelStatus: rawStatus,
+          action: resolvedStatus === 'SUCCESS' ? 'updated_success' : 'updated_failed',
+        });
+      } catch (err: any) {
+        results.push({
+          transactionRef: payment.transactionRef,
+          contractNumber: payment.contract?.contractNumber ?? '',
+          amount: payment.amount,
+          createdAt: payment.createdAt,
+          hubtelStatus: 'ERROR',
+          action: 'error',
+          error: err.message,
+        });
+      }
+    }
+
+    const summary = {
+      checkedCount: pendingPayments.length,
+      updatedSuccess: results.filter(r => r.action === 'updated_success').length,
+      updatedFailed: results.filter(r => r.action === 'updated_failed').length,
+      stillPending: results.filter(r => r.action === 'still_pending').length,
+      errors: results.filter(r => r.action === 'error').length,
+      dryRun,
+      olderThanMinutes,
+    };
+
+    console.log('Hubtel reconciliation complete:', summary);
+
+    res.json({ summary, results });
+  } catch (error: any) {
+    console.error('Reconciliation error:', error);
+    res.status(500).json({ error: 'Reconciliation failed' });
   }
 }

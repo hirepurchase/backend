@@ -22,6 +22,7 @@ import {
   getUssdPaymentStatus,
   handleUssdSession,
   handleUssdFulfillment,
+  reconcileHubtelPayments,
 } from '../controllers/paymentController';
 import { authenticateAdmin, authenticateCustomer, requireAnyPermission, authenticateAny } from '../middleware/auth';
 import {
@@ -59,6 +60,9 @@ router.get('/hubtel/preapproval/customer/:customerId', authenticateAdmin, requir
 
 // Direct Debit - Payment route (Admin only - for recurring payments)
 router.post('/hubtel/direct-debit', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_CONTRACTS), initiateDirectDebitPayment);
+
+// Reconciliation — check PENDING Hubtel payments against Hubtel's API and fix any that resolved without a callback
+router.post('/admin/reconcile', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_PAYMENTS), reconcileHubtelPayments);
 
 // USSD payment routes (no auth - phone number identifies the customer)
 router.get('/ussd/balance', getUssdBalance);
