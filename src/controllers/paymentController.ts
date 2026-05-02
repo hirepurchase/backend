@@ -18,40 +18,6 @@ import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 
-function resolveHubtelStatusPayload(payload: any): 'SUCCESS' | 'FAILED' | 'PENDING' {
-  const responseCode = String(payload?.ResponseCode || payload?.responseCode || '').trim().toUpperCase();
-  const rawStatus = String(
-    payload?.data?.status ||
-    payload?.Data?.Status ||
-    payload?.Data?.status ||
-    payload?.status ||
-    ''
-  ).trim().toUpperCase();
-
-  if (responseCode === '0000' || ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawStatus)) {
-    return 'SUCCESS';
-  }
-
-  if (responseCode === '2001' || ['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawStatus)) {
-    return 'FAILED';
-  }
-
-  return 'PENDING';
-}
-
-function parsePaymentMetadata(metadata: string | null | undefined): Record<string, unknown> {
-  if (!metadata) {
-    return {};
-  }
-
-  try {
-    const parsed = JSON.parse(metadata);
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
 function ensureContractCanAcceptPayments(status: string, res: Response): boolean {
   if (status === 'ACTIVE') {
     return true;
@@ -1024,11 +990,16 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
     }
 
     // Check status with Hubtel if pending
-    if (payment.transactionRef) {
-      const hubtelStatus = await checkHubtelPaymentStatus(payment.transactionRef);
+    if (payment.externalRef) {
+      const hubtelStatus = await checkHubtelPaymentStatus(payment.externalRef);
 
       // Update payment status based on Hubtel response
-      const newStatus = resolveHubtelStatusPayload(hubtelStatus);
+      let newStatus = payment.status;
+      if (hubtelStatus.data?.status === 'Success' || hubtelStatus.data?.status === 'successful') {
+        newStatus = 'SUCCESS';
+      } else if (hubtelStatus.data?.status === 'Failed' || hubtelStatus.data?.status === 'failed') {
+        newStatus = 'FAILED';
+      }
 
       if (newStatus !== payment.status) {
         await prisma.paymentTransaction.update({
@@ -1036,29 +1007,15 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
           data: {
             status: newStatus,
             paymentDate: newStatus === 'SUCCESS' ? new Date() : null,
-            metadata: JSON.stringify({
-              ...parsePaymentMetadata(payment.metadata),
-              lastHubtelStatusSyncAt: new Date().toISOString(),
-              lastHubtelStatusPayload: hubtelStatus,
-            }),
           },
         });
-
-        if (newStatus === 'SUCCESS') {
-          await processSuccessfulPayment(payment.id);
-        }
       }
 
       res.json({
         transactionRef: payment.transactionRef,
         status: newStatus,
         amount: payment.amount,
-        hubtelStatus:
-          hubtelStatus?.data?.status ||
-          hubtelStatus?.Data?.Status ||
-          hubtelStatus?.Data?.status ||
-          hubtelStatus?.status ||
-          null,
+        hubtelStatus: hubtelStatus.data?.status,
       });
     } else {
       res.json({
