@@ -477,6 +477,9 @@ interface NormalizedHubtelCallback {
   message: string;
   data: {
     amount?: number;
+    amountAfterCharges?: number;
+    amountCharged?: number;
+    charges?: number;
     clientReference?: string;
     transactionId?: string;
     externalTransactionId?: string;
@@ -489,16 +492,19 @@ interface NormalizedHubtelCallback {
 
 function normalizeHubtelCallback(callbackData: any): NormalizedHubtelCallback {
   const rawData = callbackData?.Data || callbackData?.data || {};
+  const parseAmount = (value: unknown): number | undefined => {
+    const parsed = typeof value === 'number' ? value : Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  };
 
   return {
     responseCode: String(callbackData?.ResponseCode || callbackData?.responseCode || '').trim(),
     message: String(callbackData?.Message || callbackData?.message || ''),
     data: {
-      amount: typeof rawData.Amount === 'number'
-        ? rawData.Amount
-        : typeof rawData.amount === 'number'
-          ? rawData.amount
-          : undefined,
+      amount: parseAmount(rawData.Amount ?? rawData.amount),
+      amountAfterCharges: parseAmount(rawData.AmountAfterCharges ?? rawData.amountAfterCharges),
+      amountCharged: parseAmount(rawData.AmountCharged ?? rawData.amountCharged),
+      charges: parseAmount(rawData.Charges ?? rawData.charges),
       clientReference: rawData.ClientReference || rawData.clientReference,
       transactionId: rawData.TransactionId || rawData.transactionId,
       externalTransactionId: rawData.ExternalTransactionId || rawData.externalTransactionId,
@@ -538,6 +544,9 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
     const normalizedCallback = normalizeHubtelCallback(callbackData);
     const {
       amount,
+      amountAfterCharges,
+      amountCharged,
+      charges,
       clientReference,
       transactionId,
       externalTransactionId,
@@ -574,8 +583,20 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
       return;
     }
 
-    if (typeof amount === 'number' && Math.abs(payment.amount - amount) > 0.01) {
-      throw new Error(`Callback amount mismatch for ${payment.transactionRef}`);
+    const acceptedAmounts = [
+      amountAfterCharges,
+      amount,
+      amountCharged,
+      typeof amount === 'number' && typeof charges === 'number' ? amount - charges : undefined,
+    ].filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+
+    if (
+      acceptedAmounts.length > 0 &&
+      !acceptedAmounts.some((callbackAmount) => Math.abs(payment.amount - callbackAmount) <= 0.01)
+    ) {
+      throw new Error(
+        `Callback amount mismatch for ${payment.transactionRef}: expected ${payment.amount}, received ${acceptedAmounts.join(', ')}`
+      );
     }
 
     if (phoneNumber && payment.mobileMoneyNumber) {
