@@ -17,6 +17,7 @@ import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types
 import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
+import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 
 function ensureContractCanAcceptPayments(status: string, res: Response): boolean {
   if (status === 'ACTIVE') {
@@ -458,6 +459,8 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
       data: contractUpdate,
     });
   });
+
+  await safelyEvaluateManagedDeviceForContract(contract.id);
 }
 
 // Get payment history for contract

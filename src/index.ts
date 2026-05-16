@@ -11,11 +11,18 @@ import routes from './routes';
 import prisma from './config/database';
 import { initializeNotificationScheduler } from './services/notificationScheduler';
 import { startPaymentRetryScheduler } from './services/paymentRetryScheduler';
+import { startDeviceControlScheduler } from './services/deviceControlScheduler';
 import { initializeIdleShutdown, stopIdleShutdown, getTimeUntilShutdown, getLastActivityTime, isIdleShutdownEnabled } from './services/idleShutdownService';
 import { activityTracker } from './middleware/activityTracker';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+function captureRawBody(req: express.Request, _res: express.Response, buf: Buffer): void {
+  if (buf?.length) {
+    req.rawBody = Buffer.from(buf);
+  }
+}
 
 // Middleware
 app.use(helmet({
@@ -26,8 +33,8 @@ app.use(cors({
   credentials: true,
 }));
 app.use(morgan('dev'));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ verify: captureRawBody }));
+app.use(express.urlencoded({ extended: true, verify: captureRawBody }));
 
 // Track activity for idle shutdown
 app.use(activityTracker);
@@ -129,6 +136,9 @@ app.listen(PORT, () => {
 
   // Initialize payment retry scheduler
   startPaymentRetryScheduler();
+
+  // Initialize Knox Guard device control scheduler
+  startDeviceControlScheduler();
 
   // Initialize idle shutdown service
   initializeIdleShutdown();

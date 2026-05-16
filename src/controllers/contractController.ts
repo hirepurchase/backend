@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendContractConfirmation, sendContractSubmittedForApprovalNotification } from '../services/notificationService';
+import { unenrollManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
@@ -15,7 +16,7 @@ import {
   sanitizePhoneNumber,
 } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
-import { hasPermission, PERMISSIONS } from '../constants/permissions';
+import { hasAnyPermission, hasPermission, PERMISSIONS } from '../constants/permissions';
 
 function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCreatedById: string | null | undefined): boolean {
   const permissions = adminUser?.permissions ?? [];
@@ -417,12 +418,19 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
       status,
       customerId,
       search,
+      includeDeviceControl,
     } = req.query;
 
     const adminUser = req.user as AdminUserPayload;
     const permissions = adminUser?.permissions ?? [];
     const hasViewAll = hasPermission(permissions, PERMISSIONS.VIEW_CONTRACTS);
     const hasViewOwn = hasPermission(permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
+    const canViewDeviceControl = hasAnyPermission(permissions, [
+      PERMISSIONS.VIEW_DEVICE_CONTROL,
+      PERMISSIONS.MANAGE_DEVICE_CONTROL,
+    ]);
+    const shouldIncludeDeviceControl =
+      String(includeDeviceControl).toLowerCase() === 'true' && canViewDeviceControl;
 
     // Agents with VIEW_OWN_CONTRACTS but not VIEW_CONTRACTS see only their own
     const where: Record<string, unknown> = {};
@@ -449,40 +457,63 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
       ];
     }
 
-    const [contracts, total] = await Promise.all([
-      prisma.hirePurchaseContract.findMany({
-        where,
+    const contractInclude: any = {
+      customer: {
+        select: {
+          id: true,
+          id_uuid: true,
+          membershipId: true,
+          firstName: true,
+          lastName: true,
+          phone: true,
+          photoUrl: true,
+        },
+      },
+      inventoryItem: {
         include: {
-          customer: {
+          product: {
             select: {
               id: true,
-              id_uuid: true,
-              membershipId: true,
-              firstName: true,
-              lastName: true,
-              phone: true,
-            },
-          },
-          inventoryItem: {
-            include: {
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-            },
-          },
-          createdBy: {
-            select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } },
-          },
-          _count: {
-            select: {
-              payments: true,
-              installments: true,
+              name: true,
             },
           },
         },
+      },
+      createdBy: {
+        select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } },
+      },
+      _count: {
+        select: {
+          payments: true,
+          installments: true,
+        },
+      },
+    };
+
+    if (shouldIncludeDeviceControl) {
+      contractInclude.managedDevice = {
+        select: {
+          id: true,
+          approveId: true,
+          deviceUid: true,
+          deviceUidType: true,
+          enrollmentStatus: true,
+          desiredState: true,
+          actualState: true,
+          isActive: true,
+          lastError: true,
+          lastEvaluatedAt: true,
+          lastLockedAt: true,
+          lastUnlockedAt: true,
+          lastSyncedAt: true,
+        },
+      };
+    }
+
+    const [contracts, total] = await Promise.all([
+      prisma.hirePurchaseContract.findMany({
+        where,
+        include: contractInclude,
         orderBy: { createdAt: 'desc' },
         skip: (Number(page) - 1) * Number(limit),
         take: Number(limit),
@@ -997,6 +1028,13 @@ export async function transferOwnership(req: AuthenticatedRequest, res: Response
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+
+    // Release device from Knox Guard management now that contract is complete
+    try {
+      await unenrollManagedDeviceForContract(id, 'Contract completed — ownership transferred to customer.');
+    } catch (knoxError) {
+      console.error(`Knox Guard unenrollment failed for contract ${id}:`, knoxError);
+    }
 
     res.json({ message: 'Ownership transferred successfully' });
   } catch (error) {

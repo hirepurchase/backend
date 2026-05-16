@@ -35,6 +35,8 @@ This project uses a role-permission model for admin users. The canonical permiss
 - `MANAGE_CONTRACTS`: direct debit and preapproval operations
 - `APPROVE_CONTRACT`: approve or request revision for pending contracts
 - `VIEW_CONTRACT_APPROVALS`: view the approval queue
+- `VIEW_DEVICE_CONTROL`: view financed device control status and command history
+- `MANAGE_DEVICE_CONTROL`: enroll, evaluate, lock, unlock, and process financed device actions
 
 ### Payments
 - `RECORD_PAYMENT`: record manual payments
@@ -87,6 +89,8 @@ These grouped rules are defined in code to keep routes and UI consistent:
   - `MANAGE_PERMISSIONS`
   - `MANAGE_HUBTEL_PAYMENTS`
   - `DELETE_INVENTORY`
+
+`VIEW_DEVICE_CONTROL` and `MANAGE_DEVICE_CONTROL` are included for seeded admins because financed-device operations are part of contract servicing.
 
 ### `SALES_AGENT`
 - Customer creation and own-customer visibility

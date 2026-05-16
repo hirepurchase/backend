@@ -1,0 +1,25 @@
+CREATE TABLE "KnoxGuardSettings" (
+  "id"                           TEXT NOT NULL DEFAULT gen_random_uuid()::text,
+  "supportPhone"                 TEXT,
+  "lockAfterOverdueDays"         INTEGER NOT NULL DEFAULT 7,
+  "blockOnUnpaidPenalties"       BOOLEAN NOT NULL DEFAULT false,
+  "maxCommandRetries"            INTEGER NOT NULL DEFAULT 3,
+  "commandCron"                  TEXT NOT NULL DEFAULT '*/5 * * * *',
+  "commandBatchSize"             INTEGER NOT NULL DEFAULT 10,
+  "paymentAppPackage"            TEXT NOT NULL DEFAULT 'com.aidootech.customer',
+  "paymentAppLabel"              TEXT NOT NULL DEFAULT 'AIDOO TECH',
+  "paymentUssd"                  TEXT,
+  "refreshActionLabel"           TEXT NOT NULL DEFAULT 'Refresh account status',
+  "disclosureVersion"            TEXT NOT NULL DEFAULT 'v1',
+  "disclosureSummary"            TEXT NOT NULL DEFAULT 'Customer informed that overdue payments can trigger device restriction while payment and support remain available.',
+  "termsReference"               TEXT,
+  "supportMessage"               TEXT NOT NULL DEFAULT 'Use the AIDOO TECH app, payment USSD, or customer support to bring the account back into good standing.',
+  "warningMessage"               TEXT NOT NULL DEFAULT 'Your account is overdue. Please make payment now to avoid or remove device restriction.',
+  "allowCustomerAppOnLockScreen" BOOLEAN NOT NULL DEFAULT true,
+  "allowSupportOnLockScreen"     BOOLEAN NOT NULL DEFAULT true,
+  "allowPaymentUssdOnLockScreen" BOOLEAN NOT NULL DEFAULT true,
+  "createdAt"                    TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt"                    TIMESTAMP(3) NOT NULL,
+
+  CONSTRAINT "KnoxGuardSettings_pkey" PRIMARY KEY ("id")
+);

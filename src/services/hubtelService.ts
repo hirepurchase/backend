@@ -3,6 +3,7 @@ import prisma from '../config/database';
 import { sendPaymentFailureNotification } from './notificationService';
 import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService';
 import { appendWebhookToken } from '../utils/callbackSecurity';
+import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
 
 // Hubtel API Configuration
 const HUBTEL_POS_SALES_ID = process.env.HUBTEL_POS_SALES_ID || '';
@@ -849,6 +850,8 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
       data: contractUpdate,
     });
   });
+
+  await safelyEvaluateManagedDeviceForContract(contract.id);
 }
 
 export default {

@@ -74,6 +74,7 @@ model Customer {
   payments            PaymentTransaction[]
   notifications       NotificationLog[]
   hubtelPreapprovals  HubtelPreapproval[]
+  managedDevices      ManagedDevice[]
   passwordResetOtps   PasswordResetOtp[]
   createdAt           DateTime              @default(now())
   updatedAt           DateTime              @updatedAt
@@ -113,6 +114,7 @@ model InventoryItem {
   registeredUnder   String?               // Name registered under (optional)
   contractId        String?               @unique
   contract          HirePurchaseContract? @relation(fields: [contractId], references: [id])
+  managedDevice     ManagedDevice?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 }
@@ -151,6 +153,7 @@ model HirePurchaseContract {
   rejectionReason     String?
   createdById         String
   createdBy           AdminUser           @relation("ContractCreatedBy", fields: [createdById], references: [id])
+  managedDevice       ManagedDevice?
   installments        InstallmentSchedule[]
   payments            PaymentTransaction[]
   penalties           Penalty[]
@@ -268,6 +271,63 @@ model HubtelPreapproval {
   @@index([status, createdAt])
 }
 
+model ManagedDevice {
+  id               String                @id @default(uuid())
+  contractId       String                @unique
+  contract         HirePurchaseContract  @relation(fields: [contractId], references: [id])
+  inventoryItemId  String?               @unique
+  inventoryItem    InventoryItem?        @relation(fields: [inventoryItemId], references: [id])
+  customerId_uuid  String                @db.Uuid
+  customer         Customer              @relation(fields: [customerId_uuid], references: [id_uuid])
+  provider         String                @default("KNOX_GUARD")
+  deviceUid        String
+  deviceUidType    String                @default("SERIAL_NUMBER") // IMEI, SERIAL_NUMBER
+  approveId        String                @unique
+  knoxObjectId     String?               @unique
+  knoxTenantDomain String?
+  knoxStatus       String?
+  enrollmentStatus  String                @default("PENDING") // PENDING, APPROVAL_QUEUED, APPROVED, ACTIVE, COMPLETING, COMPLETE
+  desiredState      String                @default("UNLOCKED") // LOCKED, UNLOCKED
+  actualState       String                @default("UNKNOWN") // UNKNOWN, LOCKED, UNLOCKED, PENDING
+  isActive          Boolean               @default(true)
+  lastLockedAt      DateTime?
+  lastUnlockedAt    DateTime?
+  lastEvaluatedAt   DateTime?
+  lastSyncedAt      DateTime?
+  lastError         String?
+  lastKnoxAction    String?               // Last command type dispatched to Knox Guard
+  lastTransactionId String?               // Last x-knox-transactionId for debugging
+  metadata          String?
+  commands         ManagedDeviceCommand[]
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
+
+  @@index([customerId_uuid, createdAt])
+  @@index([approveId, deviceUid])
+  @@index([desiredState, actualState, isActive])
+}
+
+model ManagedDeviceCommand {
+  id              String        @id @default(uuid())
+  managedDeviceId String
+  managedDevice   ManagedDevice @relation(fields: [managedDeviceId], references: [id])
+  type            String        // APPROVE_DEVICE, BLINK_DEVICE, LOCK_DEVICE, UNLOCK_DEVICE, SYNC_DEVICE, COMPLETE_DEVICE, CANCEL_COMPLETE
+  status          String        @default("PENDING") // PENDING, PROCESSING, SUCCEEDED, FAILED
+  idempotencyKey  String        @unique
+  payload         String?
+  response        String?
+  attempts        Int           @default(0)
+  nextAttemptAt   DateTime?
+  lastAttemptAt   DateTime?
+  completedAt     DateTime?
+  errorMessage    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([managedDeviceId, createdAt])
+  @@index([status, nextAttemptAt, createdAt])
+}
+
 // ============= AUDIT LOGGING =============
 
 model AuditLog {
@@ -312,6 +372,30 @@ model RetrySettings {
   failureSMSTemplate      String?  @default("Dear {customerName}, your payment of GHS {amount} failed due to insufficient funds. Please ensure you have enough balance for the next retry.")
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
+}
+
+model KnoxGuardSettings {
+  id                           String   @id @default(uuid())
+  supportPhone                 String?
+  lockAfterOverdueDays         Int      @default(7)
+  blockOnUnpaidPenalties       Boolean  @default(false)
+  maxCommandRetries            Int      @default(3)
+  commandCron                  String   @default("*/5 * * * *")
+  commandBatchSize             Int      @default(10)
+  paymentAppPackage            String   @default("com.aidootech.customer")
+  paymentAppLabel              String   @default("AIDOO TECH")
+  paymentUssd                  String?
+  refreshActionLabel           String   @default("Refresh account status")
+  disclosureVersion            String   @default("v1")
+  disclosureSummary            String   @default("Customer informed that overdue payments can trigger device restriction while payment and support remain available.")
+  termsReference               String?
+  supportMessage               String   @default("Use the AIDOO TECH app, payment USSD, or customer support to bring the account back into good standing.")
+  warningMessage               String   @default("Your account is overdue. Please make payment now to avoid or remove device restriction.")
+  allowCustomerAppOnLockScreen Boolean  @default(true)
+  allowSupportOnLockScreen     Boolean  @default(true)
+  allowPaymentUssdOnLockScreen Boolean  @default(true)
+  createdAt                    DateTime @default(now())
+  updatedAt                    DateTime @updatedAt
 }
 
 model NotificationLog {

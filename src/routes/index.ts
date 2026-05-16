@@ -12,6 +12,7 @@ import notificationRoutes from './notifications';
 import importRoutes from './import';
 import paymentRetryRoutes from './paymentRetry';
 import hubtelTestRoutes from './hubtelTest';
+import knoxGuardRoutes from './knoxGuard';
 import smsRoutes from './sms';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -33,6 +34,7 @@ router.use('/audit', auditRoutes);
 router.use('/notifications', notificationRoutes);
 router.use('/import', importRoutes);
 router.use('/sms', smsRoutes);
+router.use('/knox-guard', knoxGuardRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

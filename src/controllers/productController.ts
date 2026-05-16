@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
+import { uploadKnoxGuardDevices } from '../services/knoxGuardService';
 import { AuthenticatedRequest } from '../types';
 
 // ==================== CATEGORIES ====================
@@ -401,6 +402,11 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
       userAgent: req.headers['user-agent'],
     });
 
+    // Fire-and-forget Knox Guard upload — failure does not block inventory creation
+    uploadKnoxGuardDevices([serialNumber]).catch((err) =>
+      console.error(`[KnoxGuard] Failed to upload device ${serialNumber} to Knox Guard:`, err?.message ?? err)
+    );
+
     res.status(201).json(inventoryItem);
   } catch (error) {
     console.error('Add inventory item error:', error);
@@ -453,6 +459,12 @@ export async function addBulkInventoryItems(req: AuthenticatedRequest, res: Resp
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+
+    // Fire-and-forget Knox Guard upload — failure does not block inventory creation
+    // Knox accepts up to 10,000 devices per call; our bulk endpoint already enforces array input
+    uploadKnoxGuardDevices(serialNumbers).catch((err) =>
+      console.error(`[KnoxGuard] Failed to bulk-upload ${serialNumbers.length} devices to Knox Guard:`, err?.message ?? err)
+    );
 
     res.status(201).json({ message: `${items.count} items added successfully` });
   } catch (error) {

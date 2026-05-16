@@ -3,6 +3,7 @@ import prisma from '../config/database';
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { isOverdue, calculatePenalty } from '../utils/helpers';
+import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
 
 // Mark past-due installments as OVERDUE and apply penalties
 export async function markOverdueInstallments(): Promise<{ updated: number; penalties: number }> {
@@ -22,6 +23,8 @@ export async function markOverdueInstallments(): Promise<{ updated: number; pena
     let penalties = 0;
 
     for (const contract of activeContracts) {
+      let requiresManagedDeviceEvaluation = false;
+
       for (const installment of contract.installments) {
         if (isOverdue(installment.dueDate, contract.gracePeriodDays)) {
           await prisma.installmentSchedule.update({
@@ -29,6 +32,7 @@ export async function markOverdueInstallments(): Promise<{ updated: number; pena
             data: { status: 'OVERDUE' },
           });
           updated++;
+          requiresManagedDeviceEvaluation = true;
 
           if (contract.penaltyPercentage > 0) {
             const remaining = installment.amount - installment.paidAmount;
@@ -56,9 +60,14 @@ export async function markOverdueInstallments(): Promise<{ updated: number; pena
                 data: { outstandingBalance: { increment: penaltyAmount } },
               });
               penalties++;
+              requiresManagedDeviceEvaluation = true;
             }
           }
         }
+      }
+
+      if (requiresManagedDeviceEvaluation) {
+        await safelyEvaluateManagedDeviceForContract(contract.id);
       }
     }
 

@@ -10,6 +10,7 @@
     "db:migrate": "prisma migrate dev",
     "db:push": "prisma db push",
     "db:seed": "ts-node prisma/seed.ts",
+    "demo:seed": "ts-node prisma/demoSeed.ts",
     "db:studio": "prisma studio",
     "db:generate": "prisma generate",
     "customers:activate-from-contracts": "ts-node src/scripts/activateCustomersFromContracts.ts",

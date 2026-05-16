@@ -69,4 +69,6 @@ temp/
 
 # Misc
 *.pem
+*.key
+certs/
 .vercel
