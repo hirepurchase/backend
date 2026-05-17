@@ -140,7 +140,7 @@ export async function evaluateKnoxGuardContractDevice(req: AuthenticatedRequest,
 export async function lockKnoxGuardContractDevice(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { contractId } = req.params;
-    const { message } = req.body;
+    const { message } = req.body || {};
     const command = await requestManagedDeviceLock(contractId, message);
 
     await createAuditLog({
@@ -169,7 +169,7 @@ export async function lockKnoxGuardContractDevice(req: AuthenticatedRequest, res
 export async function unlockKnoxGuardContractDevice(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { contractId } = req.params;
-    const { reason } = req.body;
+    const { reason } = req.body || {};
     const command = await requestManagedDeviceUnlock(contractId, reason);
 
     await createAuditLog({

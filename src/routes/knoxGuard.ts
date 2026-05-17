@@ -12,6 +12,11 @@ import {
   unlockKnoxGuardContractDevice,
 } from '../controllers/knoxGuardController';
 import { getKnoxGuardSettings, updateKnoxGuardSettings } from '../controllers/knoxGuardSettingsController';
+import {
+  getKnoxUploadStatuses,
+  getSamsungUploadStatus,
+  retryKnoxUpload,
+} from '../controllers/knoxGuardUploadController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
 
@@ -97,6 +102,27 @@ router.post(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   processKnoxGuardCommands
+);
+
+router.get(
+  '/upload/status',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  getKnoxUploadStatuses
+);
+
+router.post(
+  '/upload/retry',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  retryKnoxUpload
+);
+
+router.get(
+  '/upload/:uploadId/samsung-status',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  getSamsungUploadStatus
 );
 
 export default router;

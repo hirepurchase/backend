@@ -402,10 +402,33 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
       userAgent: req.headers['user-agent'],
     });
 
-    // Fire-and-forget Knox Guard upload — failure does not block inventory creation
-    uploadKnoxGuardDevices([serialNumber]).catch((err) =>
-      console.error(`[KnoxGuard] Failed to upload device ${serialNumber} to Knox Guard:`, err?.message ?? err)
-    );
+    // Mark PENDING then upload — failure is recorded, not thrown
+    await prisma.inventoryItem.update({
+      where: { id: inventoryItem.id },
+      data: { knoxUploadStatus: 'PENDING' },
+    });
+    uploadKnoxGuardDevices([serialNumber])
+      .then(async (result) => {
+        const uploadId = (result.data as any)?.uploadID ?? null;
+        await prisma.inventoryItem.update({
+          where: { id: inventoryItem.id },
+          data: {
+            knoxUploadStatus: result.dryRun ? 'SKIPPED' : result.success ? 'UPLOADED' : 'FAILED',
+            knoxUploadId: uploadId,
+            knoxUploadError: result.success ? null : (result.error ?? 'Unknown error'),
+          },
+        });
+      })
+      .catch(async (err) => {
+        console.error(`[KnoxGuard] Upload failed for device ${serialNumber}:`, err?.message ?? err);
+        await prisma.inventoryItem.update({
+          where: { id: inventoryItem.id },
+          data: {
+            knoxUploadStatus: 'FAILED',
+            knoxUploadError: err?.message ?? String(err),
+          },
+        });
+      });
 
     res.status(201).json(inventoryItem);
   } catch (error) {
@@ -460,11 +483,33 @@ export async function addBulkInventoryItems(req: AuthenticatedRequest, res: Resp
       userAgent: req.headers['user-agent'],
     });
 
-    // Fire-and-forget Knox Guard upload — failure does not block inventory creation
-    // Knox accepts up to 10,000 devices per call; our bulk endpoint already enforces array input
-    uploadKnoxGuardDevices(serialNumbers).catch((err) =>
-      console.error(`[KnoxGuard] Failed to bulk-upload ${serialNumbers.length} devices to Knox Guard:`, err?.message ?? err)
-    );
+    // Mark all PENDING then upload in one batch
+    await prisma.inventoryItem.updateMany({
+      where: { serialNumber: { in: serialNumbers } },
+      data: { knoxUploadStatus: 'PENDING' },
+    });
+    uploadKnoxGuardDevices(serialNumbers)
+      .then(async (result) => {
+        const uploadId = (result.data as any)?.uploadID ?? null;
+        await prisma.inventoryItem.updateMany({
+          where: { serialNumber: { in: serialNumbers } },
+          data: {
+            knoxUploadStatus: result.dryRun ? 'SKIPPED' : result.success ? 'UPLOADED' : 'FAILED',
+            knoxUploadId: uploadId,
+            knoxUploadError: result.success ? null : (result.error ?? 'Unknown error'),
+          },
+        });
+      })
+      .catch(async (err) => {
+        console.error(`[KnoxGuard] Bulk upload failed for ${serialNumbers.length} devices:`, err?.message ?? err);
+        await prisma.inventoryItem.updateMany({
+          where: { serialNumber: { in: serialNumbers } },
+          data: {
+            knoxUploadStatus: 'FAILED',
+            knoxUploadError: err?.message ?? String(err),
+          },
+        });
+      });
 
     res.status(201).json({ message: `${items.count} items added successfully` });
   } catch (error) {

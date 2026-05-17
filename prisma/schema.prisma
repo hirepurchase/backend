@@ -115,6 +115,10 @@ model InventoryItem {
   contractId        String?               @unique
   contract          HirePurchaseContract? @relation(fields: [contractId], references: [id])
   managedDevice     ManagedDevice?
+  knoxUploadStatus  String?               // PENDING, UPLOADED, FAILED, SKIPPED
+  knoxUploadId      String?               // Samsung uploadID from POST /devices/uploads
+  knoxUploadError   String?               // Last error message if FAILED
+  knoxUploadRetries Int                   @default(0)
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 }
