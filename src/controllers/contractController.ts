@@ -1358,9 +1358,56 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
       reason,
     } = req.body;
 
+    const hasValue = (value: unknown): boolean => value !== undefined && value !== null;
+
     if (!reason || !reason.trim()) {
       res.status(400).json({ error: 'A reason is required for contract amendments' });
       return;
+    }
+
+    if (hasValue(totalPrice)) {
+      const parsedTotalPrice = Number(totalPrice);
+      if (!Number.isFinite(parsedTotalPrice) || parsedTotalPrice <= 0) {
+        res.status(400).json({ error: 'Total price must be greater than zero' });
+        return;
+      }
+    }
+
+    if (hasValue(depositAmount)) {
+      const parsedDepositAmount = Number(depositAmount);
+      if (!Number.isFinite(parsedDepositAmount) || parsedDepositAmount < 0) {
+        res.status(400).json({ error: 'Deposit amount cannot be negative' });
+        return;
+      }
+    }
+
+    if (hasValue(totalInstallments)) {
+      const parsedTotalInstallments = Number(totalInstallments);
+      if (!Number.isInteger(parsedTotalInstallments) || parsedTotalInstallments < 1) {
+        res.status(400).json({ error: 'Total installments must be a whole number greater than zero' });
+        return;
+      }
+    }
+
+    if (hasValue(paymentFrequency) && !['DAILY', 'WEEKLY', 'MONTHLY'].includes(String(paymentFrequency))) {
+      res.status(400).json({ error: 'Invalid payment frequency' });
+      return;
+    }
+
+    if (hasValue(penaltyPercentage)) {
+      const parsedPenaltyPercentage = Number(penaltyPercentage);
+      if (!Number.isFinite(parsedPenaltyPercentage) || parsedPenaltyPercentage < 0) {
+        res.status(400).json({ error: 'Penalty percentage cannot be negative' });
+        return;
+      }
+    }
+
+    if (hasValue(gracePeriodDays)) {
+      const parsedGracePeriodDays = Number(gracePeriodDays);
+      if (!Number.isInteger(parsedGracePeriodDays) || parsedGracePeriodDays < 0) {
+        res.status(400).json({ error: 'Grace period days must be a whole number that is zero or greater' });
+        return;
+      }
     }
 
     const contract = await prisma.hirePurchaseContract.findUnique({
@@ -1425,8 +1472,15 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
 
     // How many installments remain unpaid
     const newTotalInstallments = totalInstallments !== undefined ? Number(totalInstallments) : contract.totalInstallments;
+    if (newTotalInstallments < paidInstallments.length) {
+      res.status(400).json({
+        error: `Total installments cannot be less than the ${paidInstallments.length} installment(s) already paid`,
+      });
+      return;
+    }
+
     const remainingInstallmentCount = totalInstallments !== undefined
-      ? Math.max(1, newTotalInstallments - paidInstallments.length)
+      ? newTotalInstallments - paidInstallments.length
       : unpaidInstallments.length;
 
     if (remainingInstallmentCount === 0) {
@@ -1436,18 +1490,20 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
 
     const newInstallmentAmount = Math.ceil((remainingBalance / remainingInstallmentCount) * 100) / 100;
 
-    // Rebuild unpaid installment amounts, preserving their due dates
-    // (dates stay the same unless the admin separately reschedules)
-    // Only recalculate the installments that will be kept (first remainingInstallmentCount of unpaid)
+    // Rebuild unpaid installment amounts, preserving existing due dates where possible.
+    // The last remaining installment absorbs any rounding difference.
     const keptUnpaidInstallments = unpaidInstallments.slice(0, remainingInstallmentCount);
-    const updatedUnpaidData = keptUnpaidInstallments.map((inst, idx) => {
+    const redistributedAmounts = Array.from({ length: remainingInstallmentCount }, (_, idx) => {
       const isLast = idx === remainingInstallmentCount - 1;
-      // Last installment absorbs rounding difference
       const amount = isLast
         ? Math.round((remainingBalance - newInstallmentAmount * (remainingInstallmentCount - 1)) * 100) / 100
         : newInstallmentAmount;
-      return { id: inst.id, amount: Math.max(0, amount) };
+      return Math.max(0, amount);
     });
+    const updatedUnpaidData = keptUnpaidInstallments.map((inst, idx) => ({
+      id: inst.id,
+      amount: redistributedAmounts[idx],
+    }));
 
     // If the number of total installments changed, we may need to add or remove unpaid installments
     const installmentCountDelta = remainingInstallmentCount - unpaidInstallments.length;
@@ -1464,29 +1520,44 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
       // If we need MORE installments (count increased), append new ones after the last existing
       if (installmentCountDelta > 0) {
         const lastInstallment = contract.installments[contract.installments.length - 1];
+        if (!lastInstallment) {
+          throw new Error('Contract has no installment schedule to amend');
+        }
+
         let nextDueDate = getNextDueDate(new Date(lastInstallment.dueDate), newPaymentFrequency);
         // Use actual max installmentNo from loaded installments — not contract.totalInstallments,
         // which may lag behind after previous amendments
         const maxInstallmentNo = Math.max(...contract.installments.map((i) => i.installmentNo));
         const startNo = maxInstallmentNo + 1;
+        const newInstallments: Array<{
+          contractId: string;
+          installmentNo: number;
+          dueDate: Date;
+          amount: number;
+        }> = [];
+
         for (let i = 0; i < installmentCountDelta; i++) {
-          await tx.installmentSchedule.create({
-            data: {
-              contractId: id,
-              installmentNo: startNo + i,
-              dueDate: new Date(nextDueDate),
-              amount: newInstallmentAmount,
-            },
+          newInstallments.push({
+            contractId: id,
+            installmentNo: startNo + i,
+            dueDate: new Date(nextDueDate),
+            amount: redistributedAmounts[keptUnpaidInstallments.length + i],
           });
           nextDueDate = getNextDueDate(nextDueDate, newPaymentFrequency);
         }
+
+        await tx.installmentSchedule.createMany({
+          data: newInstallments,
+        });
       }
 
       // If we need FEWER installments (count decreased), delete excess unpaid ones from the end
       if (installmentCountDelta < 0) {
-        const toRemove = unpaidInstallments.slice(remainingInstallmentCount);
-        for (const inst of toRemove) {
-          await tx.installmentSchedule.delete({ where: { id: inst.id } });
+        const idsToRemove = unpaidInstallments.slice(remainingInstallmentCount).map((inst) => inst.id);
+        if (idsToRemove.length > 0) {
+          await tx.installmentSchedule.deleteMany({
+            where: { id: { in: idsToRemove } },
+          });
         }
       }
 
