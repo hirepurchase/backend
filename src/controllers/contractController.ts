@@ -1359,6 +1359,7 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
     } = req.body;
 
     const hasValue = (value: unknown): boolean => value !== undefined && value !== null;
+    const roundMoney = (value: number): number => Math.round(value * 100) / 100;
 
     if (!reason || !reason.trim()) {
       res.status(400).json({ error: 'A reason is required for contract amendments' });
@@ -1447,6 +1448,7 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
       penaltyPercentage: contract.penaltyPercentage,
       gracePeriodDays: contract.gracePeriodDays,
       outstandingBalance: contract.outstandingBalance,
+      endDate: contract.endDate,
     };
 
     // Resolve new values, falling back to existing
@@ -1457,7 +1459,9 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
     const newGracePeriodDays = gracePeriodDays !== undefined ? Number(gracePeriodDays) : contract.gracePeriodDays;
 
     // How much has actually been paid across all installments (partial credits count)
-    const totalPaidOnInstallments = contract.installments.reduce((sum, i) => sum + i.paidAmount, 0);
+    const totalPaidOnInstallments = roundMoney(
+      contract.installments.reduce((sum, i) => sum + i.paidAmount, 0)
+    );
 
     // The corrected finance amount is everything above the deposit
     const newFinanceAmount = newTotalPrice - newDepositAmount;
@@ -1470,131 +1474,241 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
     // Remaining balance = new finance amount minus what has already been paid on installments
     const remainingBalance = Math.max(0, newFinanceAmount - totalPaidOnInstallments);
 
-    // How many installments remain unpaid
     const newTotalInstallments = totalInstallments !== undefined ? Number(totalInstallments) : contract.totalInstallments;
-    if (newTotalInstallments < paidInstallments.length) {
-      res.status(400).json({
-        error: `Total installments cannot be less than the ${paidInstallments.length} installment(s) already paid`,
-      });
-      return;
-    }
+    const shouldRebucketPaidHistory =
+      totalInstallments !== undefined && newTotalInstallments <= paidInstallments.length;
+    const newOutstandingBalance = roundMoney(Math.max(0, newFinanceAmount - totalPaidOnInstallments));
+    const totalPaidWithDeposit = roundMoney(totalPaidOnInstallments + newDepositAmount);
+    const newContractStatus = newOutstandingBalance <= 0 ? 'COMPLETED' : 'ACTIVE';
+    const newInstallmentAmount = Math.ceil((newFinanceAmount / newTotalInstallments) * 100) / 100;
 
-    const remainingInstallmentCount = totalInstallments !== undefined
-      ? newTotalInstallments - paidInstallments.length
-      : unpaidInstallments.length;
+    let summaryPaidInstallments = paidInstallments.length;
+    let summaryRemainingInstallments = unpaidInstallments.length;
+    let correctedEndDate = contract.endDate;
 
-    if (remainingInstallmentCount === 0) {
-      res.status(400).json({ error: 'No unpaid installments remain to amend' });
-      return;
-    }
-
-    const newInstallmentAmount = Math.ceil((remainingBalance / remainingInstallmentCount) * 100) / 100;
-
-    // Rebuild unpaid installment amounts, preserving existing due dates where possible.
-    // The last remaining installment absorbs any rounding difference.
-    const keptUnpaidInstallments = unpaidInstallments.slice(0, remainingInstallmentCount);
-    const redistributedAmounts = Array.from({ length: remainingInstallmentCount }, (_, idx) => {
-      const isLast = idx === remainingInstallmentCount - 1;
-      const amount = isLast
-        ? Math.round((remainingBalance - newInstallmentAmount * (remainingInstallmentCount - 1)) * 100) / 100
-        : newInstallmentAmount;
-      return Math.max(0, amount);
-    });
-    const updatedUnpaidData = keptUnpaidInstallments.map((inst, idx) => ({
-      id: inst.id,
-      amount: redistributedAmounts[idx],
-    }));
-
-    // If the number of total installments changed, we may need to add or remove unpaid installments
-    const installmentCountDelta = remainingInstallmentCount - unpaidInstallments.length;
-
-    await prisma.$transaction(async (tx) => {
-      // Update each unpaid installment amount
-      for (const upd of updatedUnpaidData) {
-        await tx.installmentSchedule.update({
-          where: { id: upd.id },
-          data: { amount: upd.amount },
-        });
-      }
-
-      // If we need MORE installments (count increased), append new ones after the last existing
-      if (installmentCountDelta > 0) {
-        const lastInstallment = contract.installments[contract.installments.length - 1];
-        if (!lastInstallment) {
-          throw new Error('Contract has no installment schedule to amend');
-        }
-
-        let nextDueDate = getNextDueDate(new Date(lastInstallment.dueDate), newPaymentFrequency);
-        // Use actual max installmentNo from loaded installments — not contract.totalInstallments,
-        // which may lag behind after previous amendments
-        const maxInstallmentNo = Math.max(...contract.installments.map((i) => i.installmentNo));
-        const startNo = maxInstallmentNo + 1;
-        const newInstallments: Array<{
-          contractId: string;
-          installmentNo: number;
-          dueDate: Date;
-          amount: number;
-        }> = [];
-
-        for (let i = 0; i < installmentCountDelta; i++) {
-          newInstallments.push({
-            contractId: id,
-            installmentNo: startNo + i,
-            dueDate: new Date(nextDueDate),
-            amount: redistributedAmounts[keptUnpaidInstallments.length + i],
+    if (shouldRebucketPaidHistory) {
+      const correctedSchedule = calculateInstallmentSchedule(
+        newFinanceAmount,
+        newPaymentFrequency,
+        newTotalInstallments,
+        new Date(contract.startDate)
+      );
+      const paymentMilestones = contract.payments
+        .filter((payment) => payment.status === 'SUCCESS')
+        .sort((a, b) => {
+          const left = a.paymentDate ?? a.createdAt;
+          const right = b.paymentDate ?? b.createdAt;
+          return left.getTime() - right.getTime();
+        })
+        .reduce<Array<{ cumulativePaid: number; paidAt: Date }>>((milestones, payment) => {
+          const previousTotal = milestones.length > 0 ? milestones[milestones.length - 1].cumulativePaid : 0;
+          milestones.push({
+            cumulativePaid: roundMoney(previousTotal + payment.amount),
+            paidAt: payment.paymentDate ?? payment.createdAt,
           });
-          nextDueDate = getNextDueDate(nextDueDate, newPaymentFrequency);
+          return milestones;
+        }, []);
+      const fallbackPaidDates = paidInstallments
+        .map((installment) => installment.paidAt)
+        .filter((paidAt): paidAt is Date => Boolean(paidAt));
+
+      let cumulativeScheduledAmount = 0;
+      let remainingPaidToAllocate = totalPaidOnInstallments;
+      let completedInstallmentCount = 0;
+
+      const rebucketedInstallments = correctedSchedule.map((scheduleInstallment) => {
+        const paidAmount = roundMoney(Math.min(scheduleInstallment.amount, Math.max(0, remainingPaidToAllocate)));
+        remainingPaidToAllocate = roundMoney(Math.max(0, remainingPaidToAllocate - paidAmount));
+        cumulativeScheduledAmount = roundMoney(cumulativeScheduledAmount + scheduleInstallment.amount);
+
+        const isFullyPaid = paidAmount >= scheduleInstallment.amount - 0.005;
+        const hasPartialPayment = paidAmount > 0 && !isFullyPaid;
+        const overdue = !isFullyPaid && isOverdue(scheduleInstallment.dueDate, newGracePeriodDays);
+        const paidAt = isFullyPaid
+          ? paymentMilestones.find((milestone) => milestone.cumulativePaid >= cumulativeScheduledAmount - 0.005)?.paidAt
+            ?? fallbackPaidDates[completedInstallmentCount]
+            ?? fallbackPaidDates[fallbackPaidDates.length - 1]
+            ?? null
+          : null;
+
+        if (isFullyPaid) {
+          completedInstallmentCount++;
         }
+
+        return {
+          installmentNo: scheduleInstallment.installmentNo,
+          dueDate: scheduleInstallment.dueDate,
+          amount: scheduleInstallment.amount,
+          paidAmount,
+          status: isFullyPaid
+            ? 'PAID'
+            : hasPartialPayment
+              ? (overdue ? 'OVERDUE' : 'PARTIAL')
+              : (overdue ? 'OVERDUE' : 'PENDING'),
+          paidAt,
+        };
+      });
+
+      correctedEndDate = calculateEndDate(
+        new Date(contract.startDate),
+        newPaymentFrequency,
+        newTotalInstallments
+      );
+      summaryPaidInstallments = rebucketedInstallments.filter((installment) => installment.status === 'PAID').length;
+      summaryRemainingInstallments = rebucketedInstallments.length - summaryPaidInstallments;
+
+      await prisma.$transaction(async (tx) => {
+        await tx.installmentSchedule.deleteMany({
+          where: { contractId: id },
+        });
 
         await tx.installmentSchedule.createMany({
-          data: newInstallments,
+          data: rebucketedInstallments.map((installment) => ({
+            contractId: id,
+            installmentNo: installment.installmentNo,
+            dueDate: installment.dueDate,
+            amount: installment.amount,
+            paidAmount: installment.paidAmount,
+            status: installment.status,
+            paidAt: installment.paidAt,
+          })),
         });
+
+        await tx.hirePurchaseContract.update({
+          where: { id },
+          data: {
+            totalPrice: newTotalPrice,
+            depositAmount: newDepositAmount,
+            financeAmount: newFinanceAmount,
+            installmentAmount: newInstallmentAmount,
+            totalInstallments: newTotalInstallments,
+            paymentFrequency: newPaymentFrequency,
+            penaltyPercentage: newPenaltyPercentage,
+            gracePeriodDays: newGracePeriodDays,
+            outstandingBalance: newOutstandingBalance,
+            totalPaid: totalPaidWithDeposit,
+            endDate: correctedEndDate,
+            status: newContractStatus,
+          },
+        });
+      });
+    } else {
+      const remainingInstallmentCount = totalInstallments !== undefined
+        ? newTotalInstallments - paidInstallments.length
+        : unpaidInstallments.length;
+
+      if (remainingInstallmentCount === 0) {
+        res.status(400).json({ error: 'No unpaid installments remain to amend' });
+        return;
       }
 
-      // If we need FEWER installments (count decreased), delete excess unpaid ones from the end
-      if (installmentCountDelta < 0) {
-        const idsToRemove = unpaidInstallments.slice(remainingInstallmentCount).map((inst) => inst.id);
-        if (idsToRemove.length > 0) {
-          await tx.installmentSchedule.deleteMany({
-            where: { id: { in: idsToRemove } },
+      summaryRemainingInstallments = remainingInstallmentCount;
+
+      // Rebuild unpaid installment amounts, preserving existing due dates where possible.
+      // The last remaining installment absorbs any rounding difference.
+      const keptUnpaidInstallments = unpaidInstallments.slice(0, remainingInstallmentCount);
+      const redistributedAmounts = Array.from({ length: remainingInstallmentCount }, (_, idx) => {
+        const isLast = idx === remainingInstallmentCount - 1;
+        const amount = isLast
+          ? Math.round((remainingBalance - newInstallmentAmount * (remainingInstallmentCount - 1)) * 100) / 100
+          : newInstallmentAmount;
+        return Math.max(0, amount);
+      });
+      const updatedUnpaidData = keptUnpaidInstallments.map((inst, idx) => ({
+        id: inst.id,
+        amount: redistributedAmounts[idx],
+      }));
+
+      // If the number of total installments changed, we may need to add or remove unpaid installments
+      const installmentCountDelta = remainingInstallmentCount - unpaidInstallments.length;
+
+      await prisma.$transaction(async (tx) => {
+        // Update each unpaid installment amount
+        for (const upd of updatedUnpaidData) {
+          await tx.installmentSchedule.update({
+            where: { id: upd.id },
+            data: { amount: upd.amount },
           });
         }
-      }
 
-      // Recalculate contract-level totals
-      const newOutstandingBalance = Math.max(0, newFinanceAmount - totalPaidOnInstallments);
-      const totalPaidWithDeposit = totalPaidOnInstallments + newDepositAmount;
+        // If we need MORE installments (count increased), append new ones after the last existing
+        if (installmentCountDelta > 0) {
+          const lastInstallment = contract.installments[contract.installments.length - 1];
+          if (!lastInstallment) {
+            throw new Error('Contract has no installment schedule to amend');
+          }
 
-      await tx.hirePurchaseContract.update({
-        where: { id },
-        data: {
-          totalPrice: newTotalPrice,
-          depositAmount: newDepositAmount,
-          financeAmount: newFinanceAmount,
-          installmentAmount: newInstallmentAmount,
-          totalInstallments: paidInstallments.length + remainingInstallmentCount,
-          paymentFrequency: newPaymentFrequency,
-          penaltyPercentage: newPenaltyPercentage,
-          gracePeriodDays: newGracePeriodDays,
-          outstandingBalance: newOutstandingBalance,
-          totalPaid: totalPaidWithDeposit,
-        },
+          let nextDueDate = getNextDueDate(new Date(lastInstallment.dueDate), newPaymentFrequency);
+          // Use actual max installmentNo from loaded installments — not contract.totalInstallments,
+          // which may lag behind after previous amendments
+          const maxInstallmentNo = Math.max(...contract.installments.map((i) => i.installmentNo));
+          const startNo = maxInstallmentNo + 1;
+          const newInstallments: Array<{
+            contractId: string;
+            installmentNo: number;
+            dueDate: Date;
+            amount: number;
+          }> = [];
+
+          for (let i = 0; i < installmentCountDelta; i++) {
+            newInstallments.push({
+              contractId: id,
+              installmentNo: startNo + i,
+              dueDate: new Date(nextDueDate),
+              amount: redistributedAmounts[keptUnpaidInstallments.length + i],
+            });
+            nextDueDate = getNextDueDate(nextDueDate, newPaymentFrequency);
+          }
+
+          await tx.installmentSchedule.createMany({
+            data: newInstallments,
+          });
+        }
+
+        // If we need FEWER installments (count decreased), delete excess unpaid ones from the end
+        if (installmentCountDelta < 0) {
+          const idsToRemove = unpaidInstallments.slice(remainingInstallmentCount).map((inst) => inst.id);
+          if (idsToRemove.length > 0) {
+            await tx.installmentSchedule.deleteMany({
+              where: { id: { in: idsToRemove } },
+            });
+          }
+        }
+
+        await tx.hirePurchaseContract.update({
+          where: { id },
+          data: {
+            totalPrice: newTotalPrice,
+            depositAmount: newDepositAmount,
+            financeAmount: newFinanceAmount,
+            installmentAmount: newInstallmentAmount,
+            totalInstallments: paidInstallments.length + remainingInstallmentCount,
+            paymentFrequency: newPaymentFrequency,
+            penaltyPercentage: newPenaltyPercentage,
+            gracePeriodDays: newGracePeriodDays,
+            outstandingBalance: newOutstandingBalance,
+            totalPaid: totalPaidWithDeposit,
+            status: newContractStatus,
+          },
+        });
       });
-    });
+    }
 
     const newValues = {
       totalPrice: newTotalPrice,
       depositAmount: newDepositAmount,
       financeAmount: newFinanceAmount,
-      totalInstallments: paidInstallments.length + remainingInstallmentCount,
+      totalInstallments: shouldRebucketPaidHistory ? newTotalInstallments : paidInstallments.length + summaryRemainingInstallments,
       installmentAmount: newInstallmentAmount,
       paymentFrequency: newPaymentFrequency,
       penaltyPercentage: newPenaltyPercentage,
       gracePeriodDays: newGracePeriodDays,
-      outstandingBalance: Math.max(0, newFinanceAmount - totalPaidOnInstallments),
+      outstandingBalance: newOutstandingBalance,
+      endDate: correctedEndDate,
       amendmentReason: reason,
-      paidInstallmentsPreserved: paidInstallments.length,
-      unpaidInstallmentsRecalculated: remainingInstallmentCount,
+      historyRebucketed: shouldRebucketPaidHistory,
+      paidInstallmentsAfterCorrection: summaryPaidInstallments,
+      remainingInstallmentsAfterCorrection: summaryRemainingInstallments,
     };
 
     await createAuditLog({
@@ -1620,10 +1734,13 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
     res.json({
       message: 'Contract amended successfully',
       summary: {
-        paidInstallmentsPreserved: paidInstallments.length,
-        unpaidInstallmentsRecalculated: remainingInstallmentCount,
+        historyRebucketed: shouldRebucketPaidHistory,
+        paidInstallmentsPreserved: summaryPaidInstallments,
+        unpaidInstallmentsRecalculated: summaryRemainingInstallments,
+        paidInstallmentLabel: shouldRebucketPaidHistory ? 'Corrected paid installments' : 'Paid installments preserved',
+        unpaidInstallmentLabel: shouldRebucketPaidHistory ? 'Corrected remaining installments' : 'Unpaid installments recalculated',
         newInstallmentAmount,
-        newOutstandingBalance: Math.max(0, newFinanceAmount - totalPaidOnInstallments),
+        newOutstandingBalance,
       },
       contract: updatedContract,
     });
