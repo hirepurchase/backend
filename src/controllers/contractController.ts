@@ -1438,7 +1438,9 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
 
     // Rebuild unpaid installment amounts, preserving their due dates
     // (dates stay the same unless the admin separately reschedules)
-    const updatedUnpaidData = unpaidInstallments.map((inst, idx) => {
+    // Only recalculate the installments that will be kept (first remainingInstallmentCount of unpaid)
+    const keptUnpaidInstallments = unpaidInstallments.slice(0, remainingInstallmentCount);
+    const updatedUnpaidData = keptUnpaidInstallments.map((inst, idx) => {
       const isLast = idx === remainingInstallmentCount - 1;
       // Last installment absorbs rounding difference
       const amount = isLast
@@ -1463,7 +1465,10 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
       if (installmentCountDelta > 0) {
         const lastInstallment = contract.installments[contract.installments.length - 1];
         let nextDueDate = getNextDueDate(new Date(lastInstallment.dueDate), newPaymentFrequency);
-        const startNo = contract.totalInstallments + 1;
+        // Use actual max installmentNo from loaded installments — not contract.totalInstallments,
+        // which may lag behind after previous amendments
+        const maxInstallmentNo = Math.max(...contract.installments.map((i) => i.installmentNo));
+        const startNo = maxInstallmentNo + 1;
         for (let i = 0; i < installmentCountDelta; i++) {
           await tx.installmentSchedule.create({
             data: {
