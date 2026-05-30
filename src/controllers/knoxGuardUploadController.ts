@@ -56,12 +56,15 @@ export async function retryKnoxUpload(req: AuthenticatedRequest, res: Response):
   try {
     const { inventoryItemIds } = req.body as { inventoryItemIds?: string[] };
 
-    const where: Record<string, unknown> = {
-      // Accept items that have never been uploaded (null) OR previously failed
-      knoxUploadStatus: { in: ['FAILED', null] },
+    const idFilter = inventoryItemIds?.length ? { id: { in: inventoryItemIds } } : {};
+    const where = {
+      ...idFilter,
       knoxUploadRetries: { lt: MAX_RETRIES },
+      OR: [
+        { knoxUploadStatus: null },
+        { knoxUploadStatus: 'FAILED' },
+      ],
     };
-    if (inventoryItemIds?.length) where.id = { in: inventoryItemIds };
 
     const items = await prisma.inventoryItem.findMany({
       where,
