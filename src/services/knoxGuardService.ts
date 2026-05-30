@@ -45,6 +45,9 @@ const KNOX_GUARD_TIMEOUT_MS = Number(process.env.KNOX_GUARD_TIMEOUT_MS || '15000
 const KNOX_GUARD_API_TOKEN_STATIC = (process.env.KNOX_GUARD_API_TOKEN || '').trim();
 const KNOX_GUARD_CLIENT_IDENTIFIER = (process.env.KNOX_GUARD_CLIENT_IDENTIFIER || '').trim();
 const KNOX_GUARD_PRIVATE_KEY_PATH = (process.env.KNOX_GUARD_PRIVATE_KEY_PATH || '').trim();
+// Inline key takes priority over file path — useful for cloud deployments where
+// mounting a file is not possible. Set KNOX_GUARD_PRIVATE_KEY to the full PEM content.
+const KNOX_GUARD_PRIVATE_KEY_INLINE = (process.env.KNOX_GUARD_PRIVATE_KEY || '').trim().replace(/\\n/g, '\n');
 const KNOX_GUARD_ACCESS_TOKEN_VALIDITY_MINUTES = Number(process.env.KNOX_GUARD_ACCESS_TOKEN_VALIDITY_MINUTES || '30');
 const KNOX_GUARD_JWT_AUDIENCE = 'KnoxWSM';
 // Token expiry buffer: refresh 2 minutes before actual expiry
@@ -81,13 +84,18 @@ function getKnoxTokenEndpoint(): string {
 }
 
 function loadPrivateKeyPem(): string {
+  // 1. Inline env var (preferred for cloud — no file needed)
+  if (KNOX_GUARD_PRIVATE_KEY_INLINE) {
+    const raw = KNOX_GUARD_PRIVATE_KEY_INLINE;
+    if (raw.startsWith('-----BEGIN')) return raw;
+    return `-----BEGIN PRIVATE KEY-----\n${raw.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
+  }
+  // 2. File path fallback
   if (!KNOX_GUARD_PRIVATE_KEY_PATH) {
-    throw new Error('KNOX_GUARD_PRIVATE_KEY_PATH is not configured');
+    throw new Error('Knox Guard private key not configured. Set KNOX_GUARD_PRIVATE_KEY (inline) or KNOX_GUARD_PRIVATE_KEY_PATH (file path).');
   }
   const raw = fs.readFileSync(KNOX_GUARD_PRIVATE_KEY_PATH, 'utf8').trim();
-  // If already PEM-formatted, return as-is
   if (raw.startsWith('-----BEGIN')) return raw;
-  // keys.json Private field is base64-encoded PKCS#8 DER — wrap it in PEM headers
   return `-----BEGIN PRIVATE KEY-----\n${raw.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
 }
 

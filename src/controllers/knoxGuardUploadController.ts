@@ -202,8 +202,8 @@ export async function deleteDevices(req: AuthenticatedRequest, res: Response): P
       return;
     }
 
-    // Validate each IMEI is 14 digits
-    const invalid = imeis.filter((imei) => !/^\d{14}$/.test(imei));
+    // Validate each IMEI is 14–16 digits (standard IMEI is 15 digits)
+    const invalid = imeis.filter((imei) => !/^\d{14,16}$/.test(imei));
     if (invalid.length > 0) {
       res.status(400).json({ error: `Invalid IMEIs (must be 14 digits): ${invalid.join(', ')}` });
       return;

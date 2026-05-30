@@ -68,7 +68,5 @@ temp/
 .claude/
 
 # Misc
-*.pem
-*.key
 certs/
 .vercel
