@@ -161,7 +161,7 @@ async function fetchFreshToken(): Promise<string> {
 
 async function getApiToken(): Promise<string> {
   // Auto-refresh via Knox Cloud Authentication
-  if (KNOX_GUARD_CLIENT_IDENTIFIER && KNOX_GUARD_PRIVATE_KEY_PATH) {
+  if (KNOX_GUARD_CLIENT_IDENTIFIER && (KNOX_GUARD_PRIVATE_KEY_INLINE || KNOX_GUARD_PRIVATE_KEY_PATH)) {
     if (!cachedToken || Date.now() >= cachedToken.expiresAt - TOKEN_REFRESH_BUFFER_MS) {
       return fetchFreshToken();
     }
@@ -281,7 +281,7 @@ function normalizeIdentifier(identifier: DeviceIdentifier): Record<string, unkno
 
 export function getKnoxGuardConfigurationSummary(): KnoxGuardConfigurationSummary {
   const webhookSecurity = getKnoxWebhookSecuritySummary();
-  const tokenRefreshConfigured = Boolean(KNOX_GUARD_CLIENT_IDENTIFIER && KNOX_GUARD_PRIVATE_KEY_PATH);
+  const tokenRefreshConfigured = Boolean(KNOX_GUARD_CLIENT_IDENTIFIER && (KNOX_GUARD_PRIVATE_KEY_INLINE || KNOX_GUARD_PRIVATE_KEY_PATH));
 
   return {
     configured: Boolean(KNOX_GUARD_BASE_URL && (KNOX_GUARD_API_TOKEN_STATIC || tokenRefreshConfigured)),
