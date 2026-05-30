@@ -20,6 +20,7 @@ import {
   listDevicesFromDevicesApi,
   deleteDevices,
   resetKnoxDevice,
+  removeManagedDevice,
 } from '../controllers/knoxGuardUploadController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -155,6 +156,13 @@ router.post(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   resetKnoxDevice
+);
+
+router.delete(
+  '/devices/managed/:imei',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  removeManagedDevice
 );
 
 export default router;

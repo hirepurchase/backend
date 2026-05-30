@@ -199,6 +199,46 @@ async function verifyVisibleKnoxSerials(serialNumbers: string[]): Promise<Set<st
   return visible;
 }
 
+function serializePortalTimestamp(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (/^\d+$/.test(trimmed)) {
+      const date = new Date(Number(trimmed));
+      return Number.isNaN(date.getTime()) ? null : date.toISOString();
+    }
+
+    const date = new Date(trimmed);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  }
+
+  return null;
+}
+
+function derivePortalSyncState(localStatus: string | null, portalVisible: boolean, lookupError: string | null): string {
+  if (lookupError) {
+    return 'LOOKUP_FAILED';
+  }
+
+  if (portalVisible) {
+    return localStatus === 'UPLOADED' ? 'SYNCED' : 'VISIBLE_WITH_LOCAL_MISMATCH';
+  }
+
+  if (localStatus === 'UPLOADED') {
+    return 'MISSING_IN_KNOX';
+  }
+
+  return 'NOT_VISIBLE';
+}
+
 async function syncManagedDevicesFromSamsung(serialNumbers: string[]): Promise<void> {
   const items = await prisma.inventoryItem.findMany({
     where: {
@@ -301,7 +341,8 @@ async function syncManagedDevicesAfterDeletion(serialNumbers: string[], transact
 // GET /api/knox-guard/upload/status
 export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { status, page = 1, limit = 50 } = req.query;
+    const { status, page = 1, limit = 50, includePortal } = req.query;
+    const includePortalData = String(includePortal || '').toLowerCase() === 'true';
 
     const where: Record<string, unknown> = {
       knoxUploadStatus: { not: null },
@@ -314,12 +355,27 @@ export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Resp
         select: {
           id: true,
           serialNumber: true,
+          status: true,
+          lockStatus: true,
           knoxUploadStatus: true,
           knoxUploadId: true,
           knoxUploadError: true,
           knoxUploadRetries: true,
           updatedAt: true,
           product: { select: { id: true, name: true } },
+          contract: { select: { id: true, contractNumber: true, status: true } },
+          managedDevice: {
+            select: {
+              id: true,
+              approveId: true,
+              knoxObjectId: true,
+              knoxStatus: true,
+              enrollmentStatus: true,
+              actualState: true,
+              desiredState: true,
+              isActive: true,
+            },
+          },
         },
         orderBy: { updatedAt: 'desc' },
         skip: (Number(page) - 1) * Number(limit),
@@ -328,8 +384,76 @@ export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Resp
       prisma.inventoryItem.count({ where }),
     ]);
 
+    const portalItems = includePortalData
+      ? await Promise.all(items.map(async (item) => {
+        try {
+          const lookup = await lookupKnoxGuardDevice({ deviceUid: item.serialNumber });
+          const portalDevice = lookup.success ? findExactPortalDeviceForSerial(item.serialNumber, lookup.data) : null;
+          const portalVisible = Boolean(portalDevice);
+
+          return {
+            ...item,
+            portal: {
+              visible: portalVisible,
+              status: normalizeKnoxPortalStatus(portalDevice?.status) || null,
+              objectId: normalizeDeviceIdentifier(portalDevice?.objectId) || null,
+              model: normalizeDeviceIdentifier(portalDevice?.model) || null,
+              portalSerial: normalizeDeviceIdentifier(portalDevice?.serial) || null,
+              createDate: serializePortalTimestamp(portalDevice?.createDate),
+              modifiedDate: serializePortalTimestamp(portalDevice?.modifiedDate),
+              syncState: derivePortalSyncState(item.knoxUploadStatus || null, portalVisible, lookup.success ? null : (lookup.error || 'Lookup failed')),
+              lookupStatusCode: lookup.statusCode ?? null,
+              lookupError: lookup.success ? null : (lookup.error || 'Lookup failed'),
+            },
+          };
+        } catch (error: any) {
+          return {
+            ...item,
+            portal: {
+              visible: false,
+              status: null,
+              objectId: null,
+              model: null,
+              portalSerial: null,
+              createDate: null,
+              modifiedDate: null,
+              syncState: 'LOOKUP_FAILED',
+              lookupStatusCode: null,
+              lookupError: error?.message || 'Lookup failed',
+            },
+          };
+        }
+      }))
+      : items;
+
+    const portalSummary = includePortalData
+      ? portalItems.reduce((summary, item: any) => {
+        if (item.portal?.visible) {
+          summary.visible += 1;
+        } else {
+          summary.notVisible += 1;
+        }
+
+        if (item.portal?.syncState === 'MISSING_IN_KNOX') {
+          summary.missingInKnox += 1;
+        }
+
+        if (item.portal?.syncState === 'LOOKUP_FAILED') {
+          summary.lookupFailed += 1;
+        }
+
+        return summary;
+      }, {
+        visible: 0,
+        notVisible: 0,
+        missingInKnox: 0,
+        lookupFailed: 0,
+      })
+      : null;
+
     res.json({
-      items,
+      items: portalItems,
+      portalSummary,
       pagination: { page: Number(page), limit: Number(limit), total, totalPages: Math.ceil(total / Number(limit)) },
     });
   } catch (error) {
@@ -649,17 +773,26 @@ export async function resetKnoxDevice(req: AuthenticatedRequest, res: Response):
 
     const serialNumber = imei.trim();
 
-    // 1. Remove from Knox API (best-effort — clear local state regardless)
+    // Check current upload status — only call Knox API if the device was actually uploaded
+    const inventoryItem = await prisma.inventoryItem.findFirst({
+      where: { serialNumber },
+      select: { knoxUploadStatus: true },
+    });
+
+    const isUploadedToKnox = inventoryItem?.knoxUploadStatus === 'UPLOADED';
+
     let transactionId: string | null = null;
-    try {
-      const result = await deleteDevicesFromApi([serialNumber]);
-      const data = result.data as any;
-      transactionId = data?.transactionId ?? data?.transaction_id ?? null;
-    } catch (err) {
-      console.warn(`Knox API delete failed for ${serialNumber}, continuing with local reset:`, err);
+    if (isUploadedToKnox) {
+      try {
+        const result = await deleteDevicesFromApi([serialNumber]);
+        const data = result.data as any;
+        transactionId = data?.transactionId ?? data?.transaction_id ?? null;
+      } catch (err) {
+        console.warn(`Knox API delete failed for ${serialNumber}, continuing with local reset:`, err);
+      }
     }
 
-    // 2. Reset InventoryItem Knox fields to null
+    // Reset InventoryItem Knox fields to null
     await prisma.inventoryItem.updateMany({
       where: { serialNumber },
       data: {
@@ -669,16 +802,67 @@ export async function resetKnoxDevice(req: AuthenticatedRequest, res: Response):
       },
     });
 
-    // 3. Reset ManagedDevice back to PENDING so it can be re-enrolled
+    // Reset ManagedDevice back to PENDING so it can be re-enrolled
     await syncManagedDevicesAfterDeletion([serialNumber], transactionId);
 
     res.json({
-      message: `Device ${serialNumber} removed from Knox and reset for re-upload`,
+      message: isUploadedToKnox
+        ? `Device ${serialNumber} removed from Knox and reset for re-upload`
+        : `Device ${serialNumber} reset for upload (was not previously uploaded to Knox)`,
       imei: serialNumber,
       transactionId,
     });
   } catch (error) {
     console.error('Knox device reset error:', error);
     res.status(500).json({ error: 'Failed to reset Knox device' });
+  }
+}
+
+// DELETE /api/knox-guard/devices/managed/:imei
+// Removes a ManagedDevice record (and its commands) from the system entirely.
+// Also clears Knox upload state on the linked InventoryItem.
+export async function removeManagedDevice(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { imei } = req.params;
+
+    if (!imei || !/^\d{14,16}$/.test(imei.trim())) {
+      res.status(400).json({ error: 'imei must be a 14–16 digit string' });
+      return;
+    }
+
+    const serialNumber = imei.trim();
+
+    const inventoryItem = await prisma.inventoryItem.findFirst({
+      where: { serialNumber },
+      select: { id: true, managedDevice: { select: { id: true } } },
+    });
+
+    if (!inventoryItem?.managedDevice) {
+      res.status(404).json({ error: `No managed device found for IMEI ${serialNumber}` });
+      return;
+    }
+
+    const managedDeviceId = inventoryItem.managedDevice.id;
+
+    // Delete commands first (no cascade on the relation)
+    await prisma.managedDeviceCommand.deleteMany({ where: { managedDeviceId } });
+
+    // Delete the managed device record
+    await prisma.managedDevice.delete({ where: { id: managedDeviceId } });
+
+    // Clear Knox upload state on the inventory item
+    await prisma.inventoryItem.update({
+      where: { id: inventoryItem.id },
+      data: {
+        knoxUploadStatus: null,
+        knoxUploadId: null,
+        knoxUploadError: null,
+      },
+    });
+
+    res.json({ message: `Managed device for IMEI ${serialNumber} removed from the system` });
+  } catch (error) {
+    console.error('Remove managed device error:', error);
+    res.status(500).json({ error: 'Failed to remove managed device' });
   }
 }
