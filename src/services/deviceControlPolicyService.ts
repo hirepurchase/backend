@@ -670,7 +670,8 @@ function resolveEnrollmentState(value: unknown): ManagedDeviceEnrollmentState | 
     normalized.includes('QUEUE') ||
     normalized.includes('PENDING') ||
     normalized.includes('PROCESS') ||
-    normalized.includes('REQUEST')
+    normalized.includes('REQUEST') ||
+    normalized === 'ACCEPTED'
   ) {
     return 'APPROVAL_QUEUED';
   }
@@ -1061,6 +1062,10 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
     `Contract: ${contract.contractNumber}`,
   ].join(' | ').slice(0, 1000);
 
+  // Queue a SYNC_DEVICE command first — this checks the Knox Guard device list
+  // and auto-triggers APPROVE_DEVICE once the phone self-registers (status moves
+  // from 'Accepted' → 'Pending' on Samsung's side).
+  // APPROVE_DEVICE is also queued immediately in case the device is already Pending.
   const command = await queueManagedDeviceCommand(managedDevice.id, 'APPROVE_DEVICE', {
     approveId: managedDevice.approveId,
     deviceUid: managedDevice.deviceUid,
@@ -1070,6 +1075,7 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
   await prismaAny.managedDevice.update({
     where: { id: managedDevice.id },
     data: {
+      // ACCEPTED = uploaded to Devices API, waiting for Knox Guard app on device to phone home
       enrollmentStatus: 'APPROVAL_QUEUED',
       desiredState: 'UNLOCKED',
       lastEvaluatedAt: new Date(),
@@ -1405,6 +1411,35 @@ export async function safelyEvaluateManagedDeviceForContract(contractId: string)
   }
 }
 
+export async function requestManagedDeviceApprove(contractId: string) {
+  const contract = await getContractWithDevice(contractId);
+  if (!contract || !contract.managedDevice) {
+    throw new Error('Managed device not found for contract');
+  }
+
+  const approveComment = [
+    `Customer: ${contract.customer.firstName} ${contract.customer.lastName}`,
+    `Contract: ${contract.contractNumber}`,
+  ].join(' | ').slice(0, 1000);
+
+  const command = await queueManagedDeviceCommand(contract.managedDevice.id, 'APPROVE_DEVICE', {
+    approveId: contract.managedDevice.approveId,
+    deviceUid: contract.managedDevice.deviceUid,
+    approveComment,
+  });
+
+  await prismaAny.managedDevice.update({
+    where: { id: contract.managedDevice.id },
+    data: {
+      enrollmentStatus: 'APPROVAL_QUEUED',
+      lastEvaluatedAt: new Date(),
+      lastError: null,
+    },
+  });
+
+  return command;
+}
+
 export async function requestManagedDeviceLock(contractId: string, message?: string) {
   const contract = await getContractWithDevice(contractId);
   if (!contract || !contract.managedDevice) {
@@ -1694,6 +1729,35 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
         },
       });
       summary.results.push({ commandId: command.id, type: command.type, status: 'RATE_LIMITED', dryRun: false, error: result.error || null });
+      continue;
+    }
+
+    // APPROVE_DEVICE: device is still in 'Accepted' state (Knox Guard app not yet installed on phone)
+    // Reschedule every 10 minutes without burning a retry — it will auto-approve once the app connects
+    if (
+      !result.success &&
+      command.type === 'APPROVE_DEVICE' &&
+      (result.error?.includes('DEVICE_STATE_INVALID') || result.error?.includes("Current status is 'Accepted'"))
+    ) {
+      await prismaAny.managedDeviceCommand.update({
+        where: { id: command.id },
+        data: {
+          status: 'PENDING',
+          attempts: command.attempts, // do NOT burn retry
+          nextAttemptAt: new Date(Date.now() + 2 * 60 * 1000), // retry in 2 min
+          lastAttemptAt: new Date(),
+          errorMessage: 'Device not yet registered by Knox Guard app — waiting for phone to connect.',
+        },
+      });
+      await prismaAny.managedDevice.update({
+        where: { id: command.managedDevice.id },
+        data: {
+          enrollmentStatus: 'APPROVAL_QUEUED',
+          lastError: 'Waiting for Knox Guard app to connect on device.',
+          lastKnoxAction: command.type,
+        },
+      });
+      summary.results.push({ commandId: command.id, type: command.type, status: 'RATE_LIMITED', dryRun: false, error: 'Device in Accepted state — waiting for app' });
       continue;
     }
 

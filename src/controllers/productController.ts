@@ -586,6 +586,47 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
   }
 }
 
+// Lock / unlock inventory item — MANAGE_DEVICE_CONTROL only
+export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const { lockStatus } = req.body as { lockStatus?: string };
+
+    if (lockStatus !== 'LOCKED' && lockStatus !== 'UNLOCKED') {
+      res.status(400).json({ error: 'lockStatus must be LOCKED or UNLOCKED' });
+      return;
+    }
+
+    const item = await prisma.inventoryItem.findUnique({ where: { id } });
+    if (!item) {
+      res.status(404).json({ error: 'Inventory item not found' });
+      return;
+    }
+
+    const updated = await prisma.inventoryItem.update({
+      where: { id },
+      data: { lockStatus },
+      include: { product: { select: { name: true } } },
+    });
+
+    await createAuditLog({
+      userId: req.user!.id,
+      action: lockStatus === 'LOCKED' ? 'LOCK_INVENTORY_ITEM' : 'UNLOCK_INVENTORY_ITEM',
+      entity: 'InventoryItem',
+      entityId: id,
+      oldValues: { lockStatus: item.lockStatus },
+      newValues: { lockStatus },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({ id: updated.id, serialNumber: updated.serialNumber, lockStatus: updated.lockStatus });
+  } catch (error) {
+    console.error('Update inventory lock status error:', error);
+    res.status(500).json({ error: 'Failed to update lock status' });
+  }
+}
+
 // Delete inventory item
 export async function deleteInventoryItem(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {

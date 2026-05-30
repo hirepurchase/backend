@@ -83,36 +83,68 @@ export async function retryKnoxUpload(req: AuthenticatedRequest, res: Response):
 
     const serialNumbers = items.map((i) => i.serialNumber);
 
-    res.json({ message: `Retrying Knox upload for ${items.length} device(s)`, retried: items.length });
+    // Await the upload synchronously so the caller gets a real result, not just "queued"
+    const result = await uploadKnoxGuardDevices(serialNumbers);
+    const transactionId = (result.data as any)?.transaction_id ?? null;
 
-    uploadKnoxGuardDevices(serialNumbers)
-      .then(async (result) => {
-        // New Devices API returns transaction_id (not uploadID)
-        const uploadId = (result.data as any)?.transaction_id ?? null;
-        await prisma.inventoryItem.updateMany({
-          where: { id: { in: items.map((i) => i.id) } },
-          data: {
-            knoxUploadStatus: result.dryRun ? 'SKIPPED' : result.success ? 'UPLOADED' : 'FAILED',
-            knoxUploadId: uploadId,
-            knoxUploadError: result.success ? null : (result.error ?? 'Unknown error'),
-            knoxUploadRetries: { increment: 1 },
-          },
-        });
-      })
-      .catch(async (err) => {
-        console.error('[KnoxGuard] Retry upload failed:', err?.message ?? err);
-        await prisma.inventoryItem.updateMany({
-          where: { id: { in: items.map((i) => i.id) } },
-          data: {
-            knoxUploadStatus: 'FAILED',
-            knoxUploadError: err?.message ?? String(err),
-            knoxUploadRetries: { increment: 1 },
-          },
-        });
+    if (!result.success && !result.dryRun) {
+      await prisma.inventoryItem.updateMany({
+        where: { id: { in: items.map((i) => i.id) } },
+        data: {
+          knoxUploadStatus: 'FAILED',
+          knoxUploadId: transactionId,
+          knoxUploadError: result.error ?? 'Upload failed',
+          knoxUploadRetries: { increment: 1 },
+        },
       });
+      res.status(500).json({ error: result.error ?? 'Upload failed', retried: 0 });
+      return;
+    }
+
+    // Poll transaction status (up to 10s) to confirm completion
+    let finalStatus: 'UPLOADED' | 'FAILED' | 'SKIPPED' = result.dryRun ? 'SKIPPED' : 'UPLOADED';
+    let failedDevices: any[] = [];
+
+    if (!result.dryRun && transactionId) {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const poll = await getKnoxGuardUploadStatus(transactionId);
+        const data = poll.data as any;
+        if (data?.status === 'Complete') {
+          if (Array.isArray(data?.devices) && data.devices.length > 0) {
+            failedDevices = data.devices;
+            finalStatus = 'FAILED';
+          }
+          break;
+        }
+      }
+    }
+
+    await prisma.inventoryItem.updateMany({
+      where: { id: { in: items.map((i) => i.id) } },
+      data: {
+        knoxUploadStatus: finalStatus,
+        knoxUploadId: transactionId,
+        knoxUploadError: failedDevices.length > 0 ? `${failedDevices.length} device(s) failed` : null,
+        knoxUploadRetries: { increment: 1 },
+      },
+    });
+    res.json({
+      message: result.dryRun
+        ? `Dry-run: ${items.length} device(s) skipped`
+        : failedDevices.length > 0
+          ? `${items.length - failedDevices.length} uploaded, ${failedDevices.length} failed`
+          : `${items.length} device(s) uploaded successfully`,
+      uploaded: result.dryRun ? 0 : items.length - failedDevices.length,
+      failed: failedDevices.length,
+      skipped: result.dryRun ? items.length : 0,
+      transactionId,
+      failedDevices,
+      dryRun: result.dryRun,
+    });
   } catch (error) {
     console.error('Knox upload retry error:', error);
-    res.status(500).json({ error: 'Failed to retry Knox upload' });
+    res.status(500).json({ error: 'Failed to upload devices to Knox' });
   }
 }
 

@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { createAuditLog } from '../services/auditService';
+import { runDeviceControlSchedulerManually } from '../services/deviceControlScheduler';
 import {
   enrollManagedDeviceForContract,
   evaluateManagedDeviceForContract,
@@ -10,6 +11,7 @@ import {
   listManagedDeviceCommands,
   listManagedDevices,
   processPendingManagedDeviceCommands,
+  requestManagedDeviceApprove,
   requestManagedDeviceLock,
   requestManagedDeviceUnlock,
 } from '../services/deviceControlPolicyService';
@@ -102,6 +104,9 @@ export async function enrollKnoxGuardContractDevice(req: AuthenticatedRequest, r
       userAgent: req.headers['user-agent'],
     });
 
+    // Immediately try to process the APPROVE_DEVICE command — don't wait for cron
+    runDeviceControlSchedulerManually().catch(() => {});
+
     res.status(201).json({
       message: 'Managed device enrolled and approval queued successfully',
       result,
@@ -134,6 +139,31 @@ export async function evaluateKnoxGuardContractDevice(req: AuthenticatedRequest,
   } catch (error: any) {
     console.error('Evaluate Knox Guard device error:', error);
     res.status(400).json({ error: error.message || 'Failed to evaluate managed device' });
+  }
+}
+
+export async function approveKnoxGuardContractDevice(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { contractId } = req.params;
+    const command = await requestManagedDeviceApprove(contractId);
+
+    await createAuditLog({
+      userId: getAdminUserId(req),
+      action: 'APPROVE_KNOX_GUARD_DEVICE',
+      entity: 'ManagedDeviceCommand',
+      entityId: command.id,
+      newValues: { contractId, type: command.type },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    // Fire the command processor immediately — no need to wait for cron
+    runDeviceControlSchedulerManually().catch(() => {});
+
+    res.json({ message: 'Approval command queued and processing started.', command });
+  } catch (error: any) {
+    console.error('Approve Knox Guard device error:', error);
+    res.status(400).json({ error: error.message || 'Failed to queue approval command' });
   }
 }
 

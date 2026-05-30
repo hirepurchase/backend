@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   enrollKnoxGuardContractDevice,
+  approveKnoxGuardContractDevice,
   evaluateKnoxGuardContractDevice,
   getKnoxGuardContractDevice,
   getKnoxGuardHealth,
@@ -76,6 +77,13 @@ router.post(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   enrollKnoxGuardContractDevice
+);
+
+router.post(
+  '/contracts/:contractId/approve',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  approveKnoxGuardContractDevice
 );
 
 router.post(

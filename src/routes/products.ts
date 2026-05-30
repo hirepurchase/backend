@@ -11,6 +11,7 @@ import {
   addInventoryItem,
   addBulkInventoryItems,
   updateInventoryItem,
+  updateInventoryLockStatus,
   deleteInventoryItem,
   getAvailableInventory,
   getAllInventoryItems,
@@ -37,6 +38,7 @@ router.get('/', getAllProducts);
 router.post('/inventory', requireAnyPermission(PERMISSIONS.MANAGE_INVENTORY), addInventoryItem);
 router.post('/inventory/bulk', requireAnyPermission(PERMISSIONS.MANAGE_INVENTORY), addBulkInventoryItems);
 router.put('/inventory/:id', requireAnyPermission(PERMISSIONS.EDIT_INVENTORY), updateInventoryItem);
+router.patch('/inventory/:id/lock-status', requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL), updateInventoryLockStatus);
 router.delete('/inventory/:id', requireAnyPermission(PERMISSIONS.DELETE_INVENTORY), deleteInventoryItem);
 router.get('/inventory', getAllInventoryItems); // General inventory endpoint
 router.get('/inventory/all', getAllInventoryItems);
