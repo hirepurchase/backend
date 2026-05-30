@@ -987,6 +987,97 @@ export async function cancelContract(req: AuthenticatedRequest, res: Response): 
   }
 }
 
+// Write off contract — mark unrecoverable debt, release device, preserve payment history
+export async function writeOffContract(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body as { reason?: string };
+
+    if (!reason?.trim()) {
+      res.status(400).json({ error: 'A write-off reason is required.' });
+      return;
+    }
+
+    const contract = await prisma.hirePurchaseContract.findUnique({
+      where: { id },
+      include: { inventoryItem: true },
+    });
+
+    if (!contract) {
+      res.status(404).json({ error: 'Contract not found' });
+      return;
+    }
+
+    const eligibleStatuses = ['ACTIVE', 'DEFAULTED'];
+    if (!eligibleStatuses.includes(contract.status)) {
+      res.status(400).json({
+        error: `Only active or defaulted contracts can be written off. Current status: ${contract.status}`,
+      });
+      return;
+    }
+
+    const now = new Date();
+
+    await prisma.$transaction(async (tx) => {
+      // Mark contract as written off
+      await tx.hirePurchaseContract.update({
+        where: { id },
+        data: {
+          status: 'WRITTEN_OFF',
+          writeOffReason: reason.trim(),
+          writtenOffAt: now,
+          writtenOffById: req.user!.id,
+        },
+      });
+
+      // Mark all remaining PENDING/OVERDUE/PARTIAL installments as written off
+      await tx.installmentSchedule.updateMany({
+        where: {
+          contractId: id,
+          status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] },
+        },
+        data: { status: 'WRITTEN_OFF' },
+      });
+
+      // Return inventory item to available so it can be re-used or repossessed
+      if (contract.inventoryItem) {
+        await tx.inventoryItem.update({
+          where: { id: contract.inventoryItem.id },
+          data: { status: 'AVAILABLE', contractId: null },
+        });
+      }
+    });
+
+    // Audit log
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'WRITE_OFF_CONTRACT',
+      entity: 'HirePurchaseContract',
+      entityId: id,
+      oldValues: { status: contract.status, outstandingBalance: contract.outstandingBalance },
+      newValues: { status: 'WRITTEN_OFF', reason: reason.trim(), writtenOffAt: now },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    // Release device from Knox Guard — customer no longer has a live contract
+    try {
+      await unenrollManagedDeviceForContract(id, `Contract written off: ${reason.trim()}`);
+    } catch (knoxError) {
+      console.error(`Knox Guard unenrollment failed for written-off contract ${id}:`, knoxError);
+    }
+
+    res.json({
+      message: 'Contract written off successfully.',
+      contractId: id,
+      writtenOffAt: now,
+    });
+  } catch (error) {
+    console.error('Write-off contract error:', error);
+    res.status(500).json({ error: 'Failed to write off contract' });
+  }
+}
+
 // Transfer ownership (when fully paid)
 export async function transferOwnership(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {

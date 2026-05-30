@@ -398,50 +398,151 @@ export interface KnoxUploadOptions {
   blockADBCommand?: boolean;
 }
 
-export async function uploadKnoxGuardDevices(
-  imeis: string[],
-  options: KnoxUploadOptions = {}
-): Promise<KnoxGuardActionResult> {
-  const deviceList = imeis.map((imei) => ({ deviceUid: imei }));
-  const payload: Record<string, unknown> = {
-    deviceList,
-    autoAccept: options.autoAccept ?? true,
-    autoLock: options.autoLock ?? false,
-    applySimControl: options.applySimControl ?? false,
-    enableBlockFactoryReset: options.enableBlockFactoryReset ?? true,
-    blockDOProvision: options.blockDOProvision ?? true,
-    blockADBCommand: options.blockADBCommand ?? true,
-  };
-  return postAction(KNOX_GUARD_PATHS.uploadDevices, payload);
+// ─── Devices API (separate from Knox Guard — manages device registration) ─────
+
+const DEVICES_API_BASE_URL = (process.env.DEVICES_API_BASE_URL || '').trim();
+const DEVICES_API_KEY = (process.env.DEVICES_API_KEY || '').trim();
+
+function buildDevicesApiClient() {
+  return axios.create({
+    baseURL: DEVICES_API_BASE_URL,
+    timeout: KNOX_GUARD_TIMEOUT_MS,
+    headers: {
+      'x-vtkdp-key': DEVICES_API_KEY,
+      'Content-Type': 'application/json',
+    },
+    httpsAgent: KNOX_HTTPS_AGENT,
+  } as any);
 }
 
-export async function getKnoxGuardUploadStatus(uploadId: string): Promise<KnoxGuardActionResult> {
-  const path = `${KNOX_GUARD_PATHS.uploadDevices}/${uploadId}`;
-  const transactionId = generateTransactionId();
+function isDevicesApiReady(): boolean {
+  return !!(DEVICES_API_BASE_URL && DEVICES_API_KEY);
+}
 
-  if (KNOX_GUARD_DRY_RUN || !isLiveModeReady(path)) {
+export interface DevicesApiResult {
+  success: boolean;
+  dryRun: boolean;
+  statusCode?: number;
+  data?: unknown;
+  error?: string;
+  transactionId?: string;
+}
+
+// POST /devices/upload — register IMEIs; returns transaction_id for polling
+export async function uploadKnoxGuardDevices(
+  imeis: string[],
+  _options: KnoxUploadOptions = {}
+): Promise<KnoxGuardActionResult> {
+  if (KNOX_GUARD_DRY_RUN || !isDevicesApiReady()) {
     return {
       success: true,
       dryRun: true,
-      transactionId,
-      data: { message: 'Knox Guard upload status check simulated.', uploadId },
+      data: { transaction_id: `dry-run-${Date.now()}`, status: 'Progress', message: 'Simulated upload.' },
     };
   }
-
   try {
-    const client = await buildClient();
-    const response = await client.get(`${path}?pageSize=1000`, {
-      headers: { 'x-knox-transactionId': transactionId },
-    });
-    return { success: true, dryRun: false, statusCode: response.status, transactionId, data: response.data };
+    const client = buildDevicesApiClient();
+    const response = await client.post('/devices/upload', { devices: imeis });
+    const body = response.data as any;
+    if (body?.errors?.length) {
+      return { success: false, dryRun: false, statusCode: response.status, data: body, error: body.message };
+    }
+    return { success: true, dryRun: false, statusCode: response.status, data: body.data };
   } catch (error: any) {
+    const body = error.response?.data as any;
     return {
       success: false,
       dryRun: false,
       statusCode: error.response?.status,
-      transactionId,
-      data: error.response?.data,
-      error: error.response?.data?.message || error.message || 'Knox Guard upload status check failed',
+      data: body,
+      error: body?.errors?.[0]?.message || body?.message || error.message || 'Devices API upload failed',
+    };
+  }
+}
+
+// GET /devices/transaction-status/{transactionId} — poll upload or delete result
+export async function getKnoxGuardUploadStatus(transactionId: string): Promise<KnoxGuardActionResult> {
+  if (KNOX_GUARD_DRY_RUN || !isDevicesApiReady()) {
+    return {
+      success: true,
+      dryRun: true,
+      data: { status: 'Complete', devices: null },
+    };
+  }
+  try {
+    const client = buildDevicesApiClient();
+    const response = await client.get(`/devices/transaction-status/${transactionId}`);
+    const body = response.data as any;
+    // HTTP 201 = completed with partial failures; 200 = all succeeded
+    const hasFailures = response.status === 201 && Array.isArray(body?.data?.devices);
+    return {
+      success: !hasFailures,
+      dryRun: false,
+      statusCode: response.status,
+      data: body.data,
+    };
+  } catch (error: any) {
+    const body = error.response?.data as any;
+    return {
+      success: false,
+      dryRun: false,
+      statusCode: error.response?.status,
+      data: body,
+      error: body?.errors?.[0]?.message || body?.message || error.message || 'Transaction status check failed',
+    };
+  }
+}
+
+// GET /devices — list all devices registered to the tenant
+export async function listDevicesFromApi(): Promise<DevicesApiResult> {
+  if (KNOX_GUARD_DRY_RUN || !isDevicesApiReady()) {
+    return { success: true, dryRun: true, data: { result: 'SUCCESS', totalCount: 0, deviceList: [] } };
+  }
+  try {
+    const client = buildDevicesApiClient();
+    const response = await client.get('/devices');
+    const body = response.data as any;
+    if (body?.errors?.length) {
+      return { success: false, dryRun: false, statusCode: response.status, data: body, error: body.message };
+    }
+    return { success: true, dryRun: false, statusCode: response.status, data: body.data };
+  } catch (error: any) {
+    const body = error.response?.data as any;
+    return {
+      success: false,
+      dryRun: false,
+      statusCode: error.response?.status,
+      data: body,
+      error: body?.errors?.[0]?.message || body?.message || error.message || 'Devices API list failed',
+    };
+  }
+}
+
+// DELETE /devices/delete — remove IMEIs from tenant; returns transactionId for polling
+export async function deleteDevicesFromApi(imeis: string[]): Promise<DevicesApiResult> {
+  if (KNOX_GUARD_DRY_RUN || !isDevicesApiReady()) {
+    return {
+      success: true,
+      dryRun: true,
+      data: { result: 'SUCCESS', transactionId: `dry-run-del-${Date.now()}`, message: 'Simulated delete.' },
+    };
+  }
+  try {
+    const client = buildDevicesApiClient();
+    const response = await client.delete('/devices/delete', { data: { devices: imeis } } as any);
+    const body = response.data as any;
+    if (body?.errors?.length) {
+      return { success: false, dryRun: false, statusCode: response.status, data: body, error: body.message };
+    }
+    return { success: true, dryRun: false, statusCode: response.status, data: body.data };
+  } catch (error: any) {
+    const body = error.response?.data as any;
+    return {
+      success: false,
+      dryRun: false,
+      statusCode: error.response?.status,
+      data: body,
+      error: body?.errors?.[0]?.message || body?.message || error.message || 'Devices API delete failed',
     };
   }
 }

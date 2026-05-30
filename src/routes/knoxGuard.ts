@@ -16,6 +16,8 @@ import {
   getKnoxUploadStatuses,
   getSamsungUploadStatus,
   retryKnoxUpload,
+  listDevicesFromDevicesApi,
+  deleteDevices,
 } from '../controllers/knoxGuardUploadController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -123,6 +125,20 @@ router.get(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
   getSamsungUploadStatus
+);
+
+router.get(
+  '/devices/list-api',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  listDevicesFromDevicesApi
+);
+
+router.delete(
+  '/devices/delete',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  deleteDevices
 );
 
 export default router;

@@ -1,12 +1,16 @@
 import { Response } from 'express';
 import prisma from '../config/database';
-import { uploadKnoxGuardDevices, getKnoxGuardUploadStatus } from '../services/knoxGuardService';
+import {
+  uploadKnoxGuardDevices,
+  getKnoxGuardUploadStatus,
+  listDevicesFromApi,
+  deleteDevicesFromApi,
+} from '../services/knoxGuardService';
 import { AuthenticatedRequest } from '../types';
 
 const MAX_RETRIES = 5;
 
 // GET /api/knox-guard/upload/status
-// Returns all inventory items with a Knox upload status, filterable by status
 export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { status, page = 1, limit = 50 } = req.query;
@@ -53,7 +57,8 @@ export async function retryKnoxUpload(req: AuthenticatedRequest, res: Response):
     const { inventoryItemIds } = req.body as { inventoryItemIds?: string[] };
 
     const where: Record<string, unknown> = {
-      knoxUploadStatus: 'FAILED',
+      // Accept items that have never been uploaded (null) OR previously failed
+      knoxUploadStatus: { in: ['FAILED', null] },
       knoxUploadRetries: { lt: MAX_RETRIES },
     };
     if (inventoryItemIds?.length) where.id = { in: inventoryItemIds };
@@ -64,11 +69,10 @@ export async function retryKnoxUpload(req: AuthenticatedRequest, res: Response):
     });
 
     if (items.length === 0) {
-      res.json({ message: 'No failed items eligible for retry', retried: 0 });
+      res.json({ message: 'No items eligible for Knox upload', retried: 0 });
       return;
     }
 
-    // Mark all as PENDING before firing
     await prisma.inventoryItem.updateMany({
       where: { id: { in: items.map((i) => i.id) } },
       data: { knoxUploadStatus: 'PENDING' },
@@ -76,12 +80,12 @@ export async function retryKnoxUpload(req: AuthenticatedRequest, res: Response):
 
     const serialNumbers = items.map((i) => i.serialNumber);
 
-    // Fire upload and update results — non-blocking response
     res.json({ message: `Retrying Knox upload for ${items.length} device(s)`, retried: items.length });
 
     uploadKnoxGuardDevices(serialNumbers)
       .then(async (result) => {
-        const uploadId = (result.data as any)?.uploadID ?? null;
+        // New Devices API returns transaction_id (not uploadID)
+        const uploadId = (result.data as any)?.transaction_id ?? null;
         await prisma.inventoryItem.updateMany({
           where: { id: { in: items.map((i) => i.id) } },
           data: {
@@ -110,18 +114,83 @@ export async function retryKnoxUpload(req: AuthenticatedRequest, res: Response):
 }
 
 // GET /api/knox-guard/upload/:uploadId/samsung-status
-// Polls Samsung's servers for the upload batch result
+// Polls the Devices API transaction-status endpoint for the result of an upload or delete
 export async function getSamsungUploadStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { uploadId } = req.params;
     const result = await getKnoxGuardUploadStatus(uploadId);
-    if (!result.success) {
+
+    if (!result.success && !result.dryRun) {
+      res.status(result.statusCode ?? 500).json({ error: result.error, data: result.data });
+      return;
+    }
+
+    const data = result.data as any;
+    // Normalise response: expose completion status and any failed devices
+    res.json({
+      status: data?.status ?? 'Unknown',
+      complete: data?.status === 'Complete',
+      failedDevices: Array.isArray(data?.devices) ? data.devices : [],
+      raw: data,
+    });
+  } catch (error) {
+    console.error('Devices API transaction status error:', error);
+    res.status(500).json({ error: 'Failed to fetch transaction status' });
+  }
+}
+
+// GET /api/knox-guard/devices/list-api
+// Lists all devices from the Devices API (not the local DB)
+export async function listDevicesFromDevicesApi(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const result = await listDevicesFromApi();
+    if (!result.success && !result.dryRun) {
       res.status(result.statusCode ?? 500).json({ error: result.error, data: result.data });
       return;
     }
     res.json(result.data);
   } catch (error) {
-    console.error('Samsung Knox upload status error:', error);
-    res.status(500).json({ error: 'Failed to fetch Samsung upload status' });
+    console.error('Devices API list error:', error);
+    res.status(500).json({ error: 'Failed to list devices from Devices API' });
+  }
+}
+
+// DELETE /api/knox-guard/devices/delete
+// Body: { imeis: string[] }
+// Asynchronously removes devices from the tenant; returns transactionId for polling
+export async function deleteDevices(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { imeis } = req.body as { imeis?: string[] };
+
+    if (!Array.isArray(imeis) || imeis.length === 0) {
+      res.status(400).json({ error: 'imeis must be a non-empty array of IMEI strings' });
+      return;
+    }
+
+    // Validate each IMEI is 14 digits
+    const invalid = imeis.filter((imei) => !/^\d{14}$/.test(imei));
+    if (invalid.length > 0) {
+      res.status(400).json({ error: `Invalid IMEIs (must be 14 digits): ${invalid.join(', ')}` });
+      return;
+    }
+
+    const result = await deleteDevicesFromApi(imeis);
+
+    if (!result.success && !result.dryRun) {
+      res.status(result.statusCode ?? 500).json({ error: result.error, data: result.data });
+      return;
+    }
+
+    const data = result.data as any;
+    res.json({
+      message: result.dryRun
+        ? `Dry-run: deletion of ${imeis.length} device(s) simulated`
+        : `Deletion of ${imeis.length} device(s) queued`,
+      transactionId: data?.transactionId ?? data?.transaction_id ?? null,
+      dryRun: result.dryRun,
+    });
+  } catch (error) {
+    console.error('Devices API delete error:', error);
+    res.status(500).json({ error: 'Failed to delete devices' });
   }
 }

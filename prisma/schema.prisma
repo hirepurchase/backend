@@ -46,6 +46,7 @@ model AdminUser {
   customersCreated      Customer[]            @relation("CreatedByAdmin")
   contractsCreated      HirePurchaseContract[] @relation("ContractCreatedBy")
   contractsApproved     HirePurchaseContract[] @relation("ContractApprovedBy")
+  contractsWrittenOff   HirePurchaseContract[] @relation("ContractWrittenOffBy")
   auditLogs             AuditLog[]
   createdAt             DateTime              @default(now())
   updatedAt             DateTime              @updatedAt
@@ -141,10 +142,14 @@ model HirePurchaseContract {
   penaltyPercentage   Float               @default(0)
   startDate           DateTime
   endDate             DateTime
-  status              String              @default("ACTIVE") // ACTIVE, COMPLETED, DEFAULTED, CANCELLED, PENDING_APPROVAL, REVISION_REQUESTED
+  status              String              @default("ACTIVE") // ACTIVE, COMPLETED, DEFAULTED, CANCELLED, PENDING_APPROVAL, REVISION_REQUESTED, WRITTEN_OFF
   totalPaid           Float               @default(0)
   outstandingBalance  Float
   ownershipTransferred Boolean            @default(false)
+  writeOffReason      String?             // Reason provided when contract is written off
+  writtenOffAt        DateTime?           // When the write-off was recorded
+  writtenOffById      String?             // Admin who performed the write-off
+  writtenOffBy        AdminUser?          @relation("ContractWrittenOffBy", fields: [writtenOffById], references: [id])
   signatureUrl        String?             // Customer signature image
   paymentMethod       String?             // HUBTEL_REGULAR, HUBTEL_DIRECT_DEBIT, MANUAL, CASH
   mobileMoneyNetwork  String?             // MTN, VODAFONE, AIRTELTIGO
@@ -176,7 +181,7 @@ model InstallmentSchedule {
   dueDate         DateTime
   amount          Float
   paidAmount      Float                @default(0)
-  status          String               @default("PENDING") // PENDING, PARTIAL, PAID, OVERDUE
+  status          String               @default("PENDING") // PENDING, PARTIAL, PAID, OVERDUE, WRITTEN_OFF
   paidAt          DateTime?
   createdAt       DateTime             @default(now())
   updatedAt       DateTime             @updatedAt

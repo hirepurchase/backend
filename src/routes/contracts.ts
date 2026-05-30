@@ -9,6 +9,7 @@ import {
   updateContract,
   amendContract,
   cancelContract,
+  writeOffContract,
   transferOwnership,
   deleteContract,
   rescheduleInstallments,
@@ -69,6 +70,7 @@ router.post('/:id/reschedule', authenticateAdmin, requireAnyPermission(PERMISSIO
 router.put('/:contractId/installments/:installmentId', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), editInstallment);
 router.post('/:contractId/installments/:installmentId/pay', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), payInstallment);
 router.post('/:id/cancel', authenticateAdmin, requireAnyPermission(PERMISSIONS.CANCEL_CONTRACT), cancelContract);
+router.post('/:id/write-off', authenticateAdmin, requireAnyPermission(PERMISSIONS.WRITE_OFF_CONTRACT), writeOffContract);
 router.post('/:id/transfer-ownership', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), transferOwnership);
 router.delete('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.DELETE_CONTRACT), deleteContract);
 router.get('/:contractId/statement', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), downloadContractStatement);
