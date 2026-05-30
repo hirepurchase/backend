@@ -341,13 +341,24 @@ async function syncManagedDevicesAfterDeletion(serialNumbers: string[], transact
 // GET /api/knox-guard/upload/status
 export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { status, page = 1, limit = 50, includePortal } = req.query;
+    const { status, page = 1, limit = 50, includePortal, q } = req.query;
     const includePortalData = String(includePortal || '').toLowerCase() === 'true';
+    const normalizedQuery = String(q || '').trim();
+    const pageNumber = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNumber = Math.min(Math.max(1, parseInt(String(limit), 10) || 50), 100);
 
     const where: Record<string, unknown> = {
       knoxUploadStatus: { not: null },
     };
     if (status) where.knoxUploadStatus = status;
+    if (normalizedQuery) {
+      where.OR = [
+        { serialNumber: { contains: normalizedQuery, mode: 'insensitive' } },
+        { product: { is: { name: { contains: normalizedQuery, mode: 'insensitive' } } } },
+        { contract: { is: { contractNumber: { contains: normalizedQuery, mode: 'insensitive' } } } },
+        { managedDevice: { is: { approveId: { contains: normalizedQuery, mode: 'insensitive' } } } },
+      ];
+    }
 
     const [items, total] = await Promise.all([
       prisma.inventoryItem.findMany({
@@ -378,8 +389,8 @@ export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Resp
           },
         },
         orderBy: { updatedAt: 'desc' },
-        skip: (Number(page) - 1) * Number(limit),
-        take: Number(limit),
+        skip: (pageNumber - 1) * limitNumber,
+        take: limitNumber,
       }),
       prisma.inventoryItem.count({ where }),
     ]);
@@ -454,7 +465,12 @@ export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Resp
     res.json({
       items: portalItems,
       portalSummary,
-      pagination: { page: Number(page), limit: Number(limit), total, totalPages: Math.ceil(total / Number(limit)) },
+      pagination: {
+        page: pageNumber,
+        limit: limitNumber,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limitNumber)),
+      },
     });
   } catch (error) {
     console.error('Knox upload status fetch error:', error);

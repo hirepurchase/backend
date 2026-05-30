@@ -34,8 +34,11 @@ export async function getKnoxGuardHealth(req: AuthenticatedRequest, res: Respons
 
 export async function listKnoxGuardDevices(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const devices = await listManagedDevices();
-    res.json({ devices });
+    const page = Math.min(Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1), 100000);
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || '10'), 10) || 10, 1), 100);
+    const q = String(req.query.q || '').trim();
+    const result = await listManagedDevices({ page, limit, q });
+    res.json(result);
   } catch (error) {
     console.error('List Knox Guard devices error:', error);
     res.status(500).json({ error: 'Failed to list managed devices' });

@@ -1104,45 +1104,73 @@ export async function getManagedDeviceHealthSummary() {
   };
 }
 
-export async function listManagedDevices() {
-  const devices = await prismaAny.managedDevice.findMany({
-    include: {
-      contract: {
-        select: {
-          id: true,
-          contractNumber: true,
-          status: true,
-          outstandingBalance: true,
+export async function listManagedDevices(options: { page?: number; limit?: number; q?: string } = {}) {
+  const page = Math.max(1, Number(options.page) || 1);
+  const limit = Math.min(Math.max(1, Number(options.limit) || 10), 100);
+  const q = String(options.q || '').trim();
+
+  const where = q
+    ? {
+        OR: [
+          { deviceUid: { contains: q, mode: 'insensitive' } },
+          { approveId: { contains: q, mode: 'insensitive' } },
+          { contract: { is: { contractNumber: { contains: q, mode: 'insensitive' } } } },
+          { customer: { is: { firstName: { contains: q, mode: 'insensitive' } } } },
+          { customer: { is: { lastName: { contains: q, mode: 'insensitive' } } } },
+          { customer: { is: { phone: { contains: q, mode: 'insensitive' } } } },
+          { inventoryItem: { is: { serialNumber: { contains: q, mode: 'insensitive' } } } },
+        ],
+      }
+    : {};
+
+  const [devices, total] = await Promise.all([
+    prismaAny.managedDevice.findMany({
+      where,
+      include: {
+        contract: {
+          select: {
+            id: true,
+            contractNumber: true,
+            status: true,
+            outstandingBalance: true,
+          },
+        },
+        customer: {
+          select: {
+            id: true,
+            id_uuid: true,
+            membershipId: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+          },
+        },
+        inventoryItem: {
+          select: {
+            id: true,
+            serialNumber: true,
+            lockStatus: true,
+            status: true,
+          },
         },
       },
-      customer: {
-        select: {
-          id: true,
-          id_uuid: true,
-          membershipId: true,
-          firstName: true,
-          lastName: true,
-          phone: true,
-        },
-      },
-      inventoryItem: {
-        select: {
-          id: true,
-          serialNumber: true,
-          lockStatus: true,
-          status: true,
-        },
-      },
-      commands: {
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-      },
-    },
-    orderBy: { createdAt: 'desc' },
-  });
+      orderBy: { createdAt: 'desc' },
+      skip: (page - 1) * limit,
+      take: limit,
+    }),
+    prismaAny.managedDevice.count({ where }),
+  ]);
 
   const listDefaults = await getDeviceControlEnrollmentDefaults();
-  return devices.map((device: any) => decorateStandaloneManagedDevice(device, listDefaults));
+  return {
+    devices: devices.map((device: any) => decorateStandaloneManagedDevice(device, listDefaults)),
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
+    },
+  };
 }
 
 export async function listManagedDeviceCommands(limit: number = 50) {
