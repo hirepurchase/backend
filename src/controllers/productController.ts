@@ -2,6 +2,8 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { uploadKnoxGuardDevices } from '../services/knoxGuardService';
+import { requestManagedDeviceLock, requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
+import { runDeviceControlSchedulerManually } from '../services/deviceControlScheduler';
 import { AuthenticatedRequest } from '../types';
 
 // ==================== CATEGORIES ====================
@@ -597,12 +599,52 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
       return;
     }
 
-    const item = await prisma.inventoryItem.findUnique({ where: { id } });
+    const item = await prisma.inventoryItem.findUnique({
+      where: { id },
+      include: { managedDevice: { select: { id: true, contractId: true, enrollmentStatus: true, isActive: true } } },
+    });
+
     if (!item) {
       res.status(404).json({ error: 'Inventory item not found' });
       return;
     }
 
+    const enrolledDevice = item.managedDevice;
+    const isKnoxEnrolled = enrolledDevice?.isActive &&
+      ['ACTIVE', 'APPROVED', 'APPROVAL_QUEUED'].includes(enrolledDevice.enrollmentStatus ?? '');
+
+    if (isKnoxEnrolled && enrolledDevice) {
+      // Route through Knox Guard — this sends a real command to the device
+      if (lockStatus === 'LOCKED') {
+        await requestManagedDeviceLock(enrolledDevice.contractId);
+      } else {
+        await requestManagedDeviceUnlock(enrolledDevice.contractId);
+      }
+      // Fire the command processor immediately
+      runDeviceControlSchedulerManually().catch(() => {});
+
+      await createAuditLog({
+        userId: req.user!.id,
+        action: lockStatus === 'LOCKED' ? 'KNOX_LOCK_FROM_INVENTORY' : 'KNOX_UNLOCK_FROM_INVENTORY',
+        entity: 'InventoryItem',
+        entityId: id,
+        oldValues: { lockStatus: item.lockStatus },
+        newValues: { lockStatus, via: 'knox_guard' },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
+      });
+
+      res.json({
+        id: item.id,
+        serialNumber: item.serialNumber,
+        lockStatus: item.lockStatus, // DB value unchanged until Knox webhook confirms
+        knoxCommandQueued: true,
+        message: `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} command queued and processing.`,
+      });
+      return;
+    }
+
+    // No Knox device — just update the local DB flag
     const updated = await prisma.inventoryItem.update({
       where: { id },
       data: { lockStatus },
@@ -620,7 +662,7 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
       userAgent: req.headers['user-agent'],
     });
 
-    res.json({ id: updated.id, serialNumber: updated.serialNumber, lockStatus: updated.lockStatus });
+    res.json({ id: updated.id, serialNumber: updated.serialNumber, lockStatus: updated.lockStatus, knoxCommandQueued: false });
   } catch (error) {
     console.error('Update inventory lock status error:', error);
     res.status(500).json({ error: 'Failed to update lock status' });

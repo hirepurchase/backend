@@ -2,7 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendContractConfirmation, sendContractSubmittedForApprovalNotification } from '../services/notificationService';
-import { unenrollManagedDeviceForContract } from '../services/deviceControlPolicyService';
+import { unenrollManagedDeviceForContract, safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
@@ -2094,6 +2094,9 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+
+    // Evaluate Knox Guard policy — unlocks device if all overdue amounts are now cleared
+    await safelyEvaluateManagedDeviceForContract(contractId);
 
     res.status(201).json({
       message: 'Payment recorded successfully',
