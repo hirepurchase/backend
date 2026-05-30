@@ -26,12 +26,21 @@ See `.env.production.example` for the full list.
 At minimum you’ll need:
 
 - `KNOX_GUARD_BASE_URL` — regional Samsung URL, e.g. `https://us-kcs-api.samsungknox.com/kcs/v1.1/kg`
-- `KNOX_GUARD_API_TOKEN` — static token from Knox API Portal (expires every 30 min; regenerate before use)
 - `KNOX_GUARD_CHECK_AUTH_PATH` — must be `/authorization`
 - `KNOX_GUARD_LIST_DEVICES_PATH` — must be `/devices/list`
 - `KNOX_GUARD_APPROVE_DEVICE_PATH`
 - `KNOX_GUARD_LOCK_DEVICE_PATH`
 - `KNOX_GUARD_UNLOCK_DEVICE_PATH`
+
+For authentication, configure one of these modes:
+
+- Static token mode:
+  - `KNOX_GUARD_API_TOKEN` — static token from Knox API Portal (expires every 30 min; regenerate before use)
+- Knox Cloud Authentication mode:
+  - `KNOX_GUARD_CLIENT_IDENTIFIER`
+  - either `KNOX_GUARD_PRIVATE_KEY` or `KNOX_GUARD_PRIVATE_KEY_PATH`
+
+The backend supports inline PEM keys through `KNOX_GUARD_PRIVATE_KEY`, which is useful in cloud deployments where mounting a key file is inconvenient.
 
 Policy and customer-experience settings (support phone, lock threshold, messages, disclosure text, lock-screen toggles, scheduler config) are now stored in the database and managed via the admin **Knox Guard Settings** page at `/admin/settings/knox-guard`. They no longer require env vars.
 

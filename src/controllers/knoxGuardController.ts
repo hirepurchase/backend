@@ -132,6 +132,10 @@ export async function evaluateKnoxGuardContractDevice(req: AuthenticatedRequest,
       userAgent: req.headers['user-agent'],
     });
 
+    if (result.queuedCommand) {
+      runDeviceControlSchedulerManually().catch(() => {});
+    }
+
     res.json({
       message: 'Managed device evaluated successfully',
       result,
@@ -186,6 +190,8 @@ export async function lockKnoxGuardContractDevice(req: AuthenticatedRequest, res
       userAgent: req.headers['user-agent'],
     });
 
+    runDeviceControlSchedulerManually().catch(() => {});
+
     res.json({
       message: 'Lock command queued successfully',
       command,
@@ -214,6 +220,8 @@ export async function unlockKnoxGuardContractDevice(req: AuthenticatedRequest, r
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+
+    runDeviceControlSchedulerManually().catch(() => {});
 
     res.json({
       message: 'Unlock command queued successfully',

@@ -1062,10 +1062,9 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
     `Contract: ${contract.contractNumber}`,
   ].join(' | ').slice(0, 1000);
 
-  // Queue a SYNC_DEVICE command first — this checks the Knox Guard device list
-  // and auto-triggers APPROVE_DEVICE once the phone self-registers (status moves
-  // from 'Accepted' → 'Pending' on Samsung's side).
-  // APPROVE_DEVICE is also queued immediately in case the device is already Pending.
+  // Queue APPROVE_DEVICE immediately.
+  // If Samsung still reports the device as 'Accepted', the command processor
+  // will reschedule approval until the Knox Guard app connects on the phone.
   const command = await queueManagedDeviceCommand(managedDevice.id, 'APPROVE_DEVICE', {
     approveId: managedDevice.approveId,
     deviceUid: managedDevice.deviceUid,
@@ -1346,15 +1345,24 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const isActive = contract.status === 'ACTIVE';
   const isOverdueEnoughToBlink = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= BLINK_AFTER_OVERDUE_DAYS;
   const isOverdueEnoughToLock = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
-  const deviceIsLockedOrPending = ['LOCKED', 'PENDING'].includes(contract.managedDevice.actualState);
+  const actualState = resolveManagedState(contract.managedDevice.actualState) || 'UNKNOWN';
+  const enrollmentStatus = resolveEnrollmentState(contract.managedDevice.enrollmentStatus) || 'PENDING';
+  const deviceCanAcceptControlCommand = ['APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(enrollmentStatus);
+  const deviceIsLockedOrPending = ['LOCKED', 'PENDING'].includes(actualState);
   const shouldLock = isOverdueEnoughToLock;
   const shouldBlink = BLINK_BEFORE_LOCK_ENABLED && isOverdueEnoughToBlink && !isOverdueEnoughToLock;
   const shouldUnlock = deviceIsLockedOrPending && metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
+  const needsLockCommand = shouldLock
+    && deviceCanAcceptControlCommand
+    && !['LOCKED', 'PENDING'].includes(actualState);
+  const needsUnlockCommand = shouldUnlock
+    && deviceCanAcceptControlCommand
+    && !['UNLOCKED', 'PENDING'].includes(actualState);
 
   const desiredState: ManagedDeviceState = shouldLock ? 'LOCKED' : 'UNLOCKED';
   let queuedCommand = null;
 
-  if (shouldLock && contract.managedDevice.desiredState !== 'LOCKED') {
+  if (needsLockCommand) {
     queuedCommand = await queueManagedDeviceCommand(
       contract.managedDevice.id,
       'LOCK_DEVICE',
@@ -1366,7 +1374,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
       'BLINK_DEVICE',
       buildBlinkCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults)
     );
-  } else if (shouldUnlock && contract.managedDevice.desiredState !== 'UNLOCKED') {
+  } else if (needsUnlockCommand) {
     queuedCommand = await queueManagedDeviceCommand(contract.managedDevice.id, 'UNLOCK_DEVICE', {
       message: 'Your payment has been received. Your device has been unlocked.',
     });
@@ -1472,6 +1480,7 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
   }
 
   const command = await queueManagedDeviceCommand(contract.managedDevice.id, 'UNLOCK_DEVICE', {
+    message: reason || 'Manual unlock requested by administrator.',
     reason: reason || 'Manual unlock requested by administrator.',
   });
 
@@ -1691,7 +1700,9 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
         case 'UNLOCK_DEVICE':
           result = await unlockKnoxGuardDevice({
             ...identifier,
-            message: normalizeOptionalString(payload.message, null) || undefined,
+            message: normalizeOptionalString(payload.message, null)
+              || normalizeOptionalString(payload.reason, null)
+              || undefined,
           });
           break;
         case 'COMPLETE_DEVICE':
@@ -1733,7 +1744,7 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
     }
 
     // APPROVE_DEVICE: device is still in 'Accepted' state (Knox Guard app not yet installed on phone)
-    // Reschedule every 10 minutes without burning a retry — it will auto-approve once the app connects
+    // Reschedule every 2 minutes without burning a retry — it will auto-approve once the app connects
     if (
       !result.success &&
       command.type === 'APPROVE_DEVICE' &&
@@ -1889,6 +1900,10 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
       dryRun: isDryRun,
       error: null,
     });
+
+    if (command.type === 'APPROVE_DEVICE') {
+      await safelyEvaluateManagedDeviceForContract(command.managedDevice.contractId);
+    }
   }
 
   return summary;

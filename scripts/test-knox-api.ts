@@ -20,6 +20,7 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 
 const CLIENT_IDENTIFIER = (process.env.KNOX_GUARD_CLIENT_IDENTIFIER || '').trim();
 const PRIVATE_KEY_PATH = (process.env.KNOX_GUARD_PRIVATE_KEY_PATH || '').trim();
+const PRIVATE_KEY_INLINE = (process.env.KNOX_GUARD_PRIVATE_KEY || '').trim().replace(/\\n/g, '\n');
 const BASE_URL = (process.env.KNOX_GUARD_BASE_URL || '').trim();
 const CHECK_AUTH_PATH = (process.env.KNOX_GUARD_CHECK_AUTH_PATH || '/authorization').trim();
 const ACCESS_TOKEN_VALIDITY_MINUTES = Number(process.env.KNOX_GUARD_ACCESS_TOKEN_VALIDITY_MINUTES || '30');
@@ -43,10 +44,30 @@ function ok(msg: string) { console.log(`  ✓  ${msg}`); }
 function fail(msg: string) { console.error(`  ✗  ${msg}`); }
 function info(msg: string) { console.log(`     ${msg}`); }
 
+function formatPrivateKeyPem(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('-----BEGIN')) return trimmed;
+  const compact = trimmed.replace(/\s+/g, '');
+  return `-----BEGIN PRIVATE KEY-----\n${compact.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
+}
+
+function looksLikeInlinePrivateKey(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith('-----BEGIN')) return true;
+  const compact = trimmed.replace(/\s+/g, '');
+  return compact.length > 256 && /^[A-Za-z0-9+/=]+$/.test(compact);
+}
+
 function loadPrivateKeyPem(): string {
+  if (PRIVATE_KEY_INLINE) {
+    return formatPrivateKeyPem(PRIVATE_KEY_INLINE);
+  }
+  if (looksLikeInlinePrivateKey(PRIVATE_KEY_PATH)) {
+    return formatPrivateKeyPem(PRIVATE_KEY_PATH);
+  }
   const raw = fs.readFileSync(PRIVATE_KEY_PATH, 'utf8').trim();
-  if (raw.startsWith('-----BEGIN')) return raw;
-  return `-----BEGIN PRIVATE KEY-----\n${raw.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
+  return formatPrivateKeyPem(raw);
 }
 
 function getBase64EncodedStringPublicKey(privateKeyPem: string): string {
@@ -81,8 +102,13 @@ async function run() {
   if (!CLIENT_IDENTIFIER) { fail('KNOX_GUARD_CLIENT_IDENTIFIER is not set'); hasError = true; }
   else ok(`CLIENT_IDENTIFIER loaded (${CLIENT_IDENTIFIER.slice(0, 40)}…)`);
 
-  if (!PRIVATE_KEY_PATH) { fail('KNOX_GUARD_PRIVATE_KEY_PATH is not set'); hasError = true; }
-  else if (!fs.existsSync(path.resolve(__dirname, '..', PRIVATE_KEY_PATH))) {
+  if (PRIVATE_KEY_INLINE) {
+    ok('Inline private key loaded from KNOX_GUARD_PRIVATE_KEY');
+  } else if (looksLikeInlinePrivateKey(PRIVATE_KEY_PATH)) {
+    ok('Inline private key loaded from KNOX_GUARD_PRIVATE_KEY_PATH fallback');
+  } else if (!PRIVATE_KEY_PATH) {
+    fail('Set either KNOX_GUARD_PRIVATE_KEY or KNOX_GUARD_PRIVATE_KEY_PATH'); hasError = true;
+  } else if (!fs.existsSync(path.resolve(__dirname, '..', PRIVATE_KEY_PATH))) {
     fail(`Private key file not found: ${PRIVATE_KEY_PATH}`); hasError = true;
   } else ok(`Private key file found: ${PRIVATE_KEY_PATH}`);
 

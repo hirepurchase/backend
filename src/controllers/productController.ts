@@ -1,10 +1,138 @@
 import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
-import { uploadKnoxGuardDevices } from '../services/knoxGuardService';
+import { getKnoxGuardUploadStatus, lookupKnoxGuardDevice, uploadKnoxGuardDevices } from '../services/knoxGuardService';
 import { requestManagedDeviceLock, requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
 import { runDeviceControlSchedulerManually } from '../services/deviceControlScheduler';
 import { AuthenticatedRequest } from '../types';
+
+const KNOX_UPLOAD_POLL_ATTEMPTS = 5;
+const KNOX_UPLOAD_POLL_DELAY_MS = 2000;
+
+function normalizeKnoxUploadIdentifier(value: unknown): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function collectFailedKnoxUploadIdentifiers(devices: unknown): Set<string> {
+  if (!Array.isArray(devices)) {
+    return new Set<string>();
+  }
+
+  const ids = new Set<string>();
+
+  for (const device of devices) {
+    if (!device || typeof device !== 'object') {
+      continue;
+    }
+
+    const record = device as Record<string, unknown>;
+    for (const candidate of [
+      record.imei,
+      record.deviceUid,
+      record.serialNumber,
+      record.serial,
+      record.device,
+      record.id,
+    ]) {
+      const normalized = normalizeKnoxUploadIdentifier(candidate);
+      if (normalized) {
+        ids.add(normalized);
+      }
+    }
+  }
+
+  return ids;
+}
+
+function extractKnoxUploadFailure(devices: unknown, serialNumber: string): string {
+  if (!Array.isArray(devices)) {
+    return 'Upload failed';
+  }
+
+  for (const device of devices) {
+    if (!device || typeof device !== 'object') {
+      continue;
+    }
+
+    const record = device as Record<string, unknown>;
+    const matches = [
+      record.imei,
+      record.deviceUid,
+      record.serialNumber,
+      record.serial,
+      record.device,
+      record.id,
+    ].some((value) => normalizeKnoxUploadIdentifier(value) === serialNumber);
+
+    if (!matches) {
+      continue;
+    }
+
+    return normalizeKnoxUploadIdentifier(record.message)
+      || normalizeKnoxUploadIdentifier(record.error)
+      || normalizeKnoxUploadIdentifier(record.reason)
+      || 'Upload failed';
+  }
+
+  return 'Upload failed';
+}
+
+function didKnoxLookupFindSerial(serialNumber: string, payload: unknown): boolean {
+  const deviceList = (payload as any)?.deviceList;
+  if (!Array.isArray(deviceList)) {
+    return false;
+  }
+
+  return deviceList.some((candidate) => {
+    if (!candidate || typeof candidate !== 'object') {
+      return false;
+    }
+
+    const record = candidate as Record<string, unknown>;
+    return [
+      record.deviceUid,
+      record.imei,
+      record.serialNumber,
+      record.serial,
+    ].some((value) => normalizeKnoxUploadIdentifier(value) === serialNumber);
+  });
+}
+
+async function verifyKnoxVisibility(serialNumbers: string[]): Promise<Set<string>> {
+  const visible = new Set<string>();
+
+  for (const serialNumber of serialNumbers) {
+    try {
+      const lookup = await lookupKnoxGuardDevice({ deviceUid: serialNumber });
+      if (lookup.success && didKnoxLookupFindSerial(serialNumber, lookup.data)) {
+        visible.add(serialNumber);
+      }
+    } catch (error) {
+      console.error(`[KnoxGuard] Visibility check failed for ${serialNumber}:`, error);
+    }
+  }
+
+  return visible;
+}
+
+async function pollKnoxUploadFailures(transactionId: string): Promise<any[]> {
+  for (let attempt = 0; attempt < KNOX_UPLOAD_POLL_ATTEMPTS; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, KNOX_UPLOAD_POLL_DELAY_MS));
+    const poll = await getKnoxGuardUploadStatus(transactionId);
+    const data = poll.data as any;
+
+    if (data?.status === 'Complete') {
+      return Array.isArray(data?.devices) ? data.devices : [];
+    }
+  }
+
+  return [];
+}
 
 // ==================== CATEGORIES ====================
 
@@ -411,13 +539,39 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
     });
     uploadKnoxGuardDevices([serialNumber])
       .then(async (result) => {
-        const uploadId = (result.data as any)?.uploadID ?? null;
+        const transactionId = (result.data as any)?.transaction_id ?? (result.data as any)?.uploadID ?? null;
+        let failedDevices: any[] = [];
+
+        if (!result.dryRun && result.success && transactionId) {
+          failedDevices = await pollKnoxUploadFailures(transactionId);
+        }
+
+        const failedByTransaction = collectFailedKnoxUploadIdentifiers(failedDevices).has(serialNumber);
+        const visibleInKnox = result.dryRun
+          ? false
+          : !failedByTransaction && (await verifyKnoxVisibility([serialNumber])).has(serialNumber);
+        const knoxUploadStatus = result.dryRun
+          ? 'SKIPPED'
+          : result.success && !failedByTransaction && visibleInKnox
+            ? 'UPLOADED'
+            : 'FAILED';
+        const knoxUploadError = !result.success
+          ? (result.error ?? 'Unknown error')
+          : failedByTransaction
+            ? extractKnoxUploadFailure(failedDevices, serialNumber)
+            : result.dryRun
+              ? null
+              : visibleInKnox
+                ? null
+                : 'Upload completed but device is still not visible in Knox Guard lookup.';
+
         await prisma.inventoryItem.update({
           where: { id: inventoryItem.id },
           data: {
-            knoxUploadStatus: result.dryRun ? 'SKIPPED' : result.success ? 'UPLOADED' : 'FAILED',
-            knoxUploadId: uploadId,
-            knoxUploadError: result.success ? null : (result.error ?? 'Unknown error'),
+            knoxUploadStatus,
+            knoxUploadId: transactionId,
+            knoxUploadError,
+            knoxUploadRetries: { increment: 1 },
           },
         });
       })
@@ -428,6 +582,7 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
           data: {
             knoxUploadStatus: 'FAILED',
             knoxUploadError: err?.message ?? String(err),
+            knoxUploadRetries: { increment: 1 },
           },
         });
       });
@@ -492,15 +647,51 @@ export async function addBulkInventoryItems(req: AuthenticatedRequest, res: Resp
     });
     uploadKnoxGuardDevices(serialNumbers)
       .then(async (result) => {
-        const uploadId = (result.data as any)?.uploadID ?? null;
-        await prisma.inventoryItem.updateMany({
-          where: { serialNumber: { in: serialNumbers } },
-          data: {
-            knoxUploadStatus: result.dryRun ? 'SKIPPED' : result.success ? 'UPLOADED' : 'FAILED',
-            knoxUploadId: uploadId,
-            knoxUploadError: result.success ? null : (result.error ?? 'Unknown error'),
-          },
-        });
+        const transactionId = (result.data as any)?.transaction_id ?? (result.data as any)?.uploadID ?? null;
+        let failedDevices: any[] = [];
+
+        if (!result.dryRun && result.success && transactionId) {
+          failedDevices = await pollKnoxUploadFailures(transactionId);
+        }
+
+        const failedIds = collectFailedKnoxUploadIdentifiers(failedDevices);
+        const serialsToVerify = result.dryRun
+          ? []
+          : serialNumbers.filter((serialNumber: string) => !failedIds.has(serialNumber));
+        const visibleSerials = result.dryRun
+          ? new Set<string>()
+          : await verifyKnoxVisibility(serialsToVerify);
+
+        await Promise.all(serialNumbers.map((serialNumber: string) => {
+          const failedByTransaction = failedIds.has(serialNumber);
+          const visibleInKnox = result.dryRun
+            ? false
+            : !failedByTransaction && visibleSerials.has(serialNumber);
+          const knoxUploadStatus = result.dryRun
+            ? 'SKIPPED'
+            : result.success && !failedByTransaction && visibleInKnox
+              ? 'UPLOADED'
+              : 'FAILED';
+          const knoxUploadError = !result.success
+            ? (result.error ?? 'Unknown error')
+            : failedByTransaction
+              ? extractKnoxUploadFailure(failedDevices, serialNumber)
+              : result.dryRun
+                ? null
+                : visibleInKnox
+                  ? null
+                  : 'Upload completed but device is still not visible in Knox Guard lookup.';
+
+          return prisma.inventoryItem.update({
+            where: { serialNumber },
+            data: {
+              knoxUploadStatus,
+              knoxUploadId: transactionId,
+              knoxUploadError,
+              knoxUploadRetries: { increment: 1 },
+            },
+          });
+        }));
       })
       .catch(async (err) => {
         console.error(`[KnoxGuard] Bulk upload failed for ${serialNumbers.length} devices:`, err?.message ?? err);
@@ -509,6 +700,7 @@ export async function addBulkInventoryItems(req: AuthenticatedRequest, res: Resp
           data: {
             knoxUploadStatus: 'FAILED',
             knoxUploadError: err?.message ?? String(err),
+            knoxUploadRetries: { increment: 1 },
           },
         });
       });

@@ -52,6 +52,7 @@ const KNOX_GUARD_ACCESS_TOKEN_VALIDITY_MINUTES = Number(process.env.KNOX_GUARD_A
 const KNOX_GUARD_JWT_AUDIENCE = 'KnoxWSM';
 // Token expiry buffer: refresh 2 minutes before actual expiry
 const TOKEN_REFRESH_BUFFER_MS = 2 * 60 * 1000;
+let warnedAboutPrivateKeyPathFallback = false;
 
 const KNOX_GUARD_PATHS = {
   checkAuthorization: (process.env.KNOX_GUARD_CHECK_AUTH_PATH || '/authorization').trim(),
@@ -83,20 +84,52 @@ function getKnoxTokenEndpoint(): string {
   return 'https://us-kcs-api.samsungknox.com/ams/v1/users/accesstoken';
 }
 
+function formatPrivateKeyPem(raw: string): string {
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('-----BEGIN')) {
+    return trimmed;
+  }
+
+  const compact = trimmed.replace(/\s+/g, '');
+  return `-----BEGIN PRIVATE KEY-----\n${compact.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
+}
+
+function looksLikeInlinePrivateKey(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  if (trimmed.startsWith('-----BEGIN')) {
+    return true;
+  }
+
+  const compact = trimmed.replace(/\s+/g, '');
+  return compact.length > 256 && /^[A-Za-z0-9+/=]+$/.test(compact);
+}
+
 function loadPrivateKeyPem(): string {
   // 1. Inline env var (preferred for cloud — no file needed)
   if (KNOX_GUARD_PRIVATE_KEY_INLINE) {
-    const raw = KNOX_GUARD_PRIVATE_KEY_INLINE;
-    if (raw.startsWith('-----BEGIN')) return raw;
-    return `-----BEGIN PRIVATE KEY-----\n${raw.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
+    return formatPrivateKeyPem(KNOX_GUARD_PRIVATE_KEY_INLINE);
   }
   // 2. File path fallback
   if (!KNOX_GUARD_PRIVATE_KEY_PATH) {
     throw new Error('Knox Guard private key not configured. Set KNOX_GUARD_PRIVATE_KEY (inline) or KNOX_GUARD_PRIVATE_KEY_PATH (file path).');
   }
+
+  // Some deployments accidentally store raw key material in the *_PATH variable.
+  // Tolerate that misconfiguration so command processing doesn't fail hard.
+  if (looksLikeInlinePrivateKey(KNOX_GUARD_PRIVATE_KEY_PATH)) {
+    if (!warnedAboutPrivateKeyPathFallback) {
+      warnedAboutPrivateKeyPathFallback = true;
+      console.warn('Knox Guard: KNOX_GUARD_PRIVATE_KEY_PATH contains inline key material. Rename it to KNOX_GUARD_PRIVATE_KEY when possible.');
+    }
+    return formatPrivateKeyPem(KNOX_GUARD_PRIVATE_KEY_PATH);
+  }
+
   const raw = fs.readFileSync(KNOX_GUARD_PRIVATE_KEY_PATH, 'utf8').trim();
-  if (raw.startsWith('-----BEGIN')) return raw;
-  return `-----BEGIN PRIVATE KEY-----\n${raw.match(/.{1,64}/g)!.join('\n')}\n-----END PRIVATE KEY-----`;
+  return formatPrivateKeyPem(raw);
 }
 
 function getBase64EncodedStringPublicKey(privateKeyPem = loadPrivateKeyPem()): string {
@@ -210,6 +243,17 @@ function summarizePaths(): Record<string, boolean> {
   );
 }
 
+function extractKnoxErrorMessage(error: any, fallback: string): string {
+  const responseData = error?.response?.data;
+  const nestedError = responseData?.error;
+
+  return nestedError?.message
+    || nestedError?.reason
+    || responseData?.message
+    || error?.message
+    || fallback;
+}
+
 async function postAction(path: string, payload: Record<string, unknown>): Promise<KnoxGuardActionResult> {
   const transactionId = generateTransactionId();
 
@@ -250,7 +294,7 @@ async function postAction(path: string, payload: Record<string, unknown>): Promi
         statusCode,
         transactionId,
         rateLimited: true,
-        error: 'Knox Guard rate limit exceeded (429). Request will be retried.',
+        error: extractKnoxErrorMessage(error, 'Knox Guard rate limit exceeded (429). Request will be retried.'),
       };
     }
 
@@ -260,7 +304,7 @@ async function postAction(path: string, payload: Record<string, unknown>): Promi
       statusCode,
       transactionId,
       data: error.response?.data,
-      error: error.response?.data?.message || error.message || 'Knox Guard request failed',
+      error: extractKnoxErrorMessage(error, 'Knox Guard request failed'),
     };
   }
 }
@@ -311,7 +355,7 @@ export async function checkKnoxGuardAuthorization(): Promise<KnoxGuardActionResu
   } catch (error: any) {
     return {
       success: false, dryRun: false, statusCode: error.response?.status, transactionId,
-      error: error.response?.data?.message || error.message || 'Knox authorization check failed',
+      error: extractKnoxErrorMessage(error, 'Knox authorization check failed'),
     };
   }
 }

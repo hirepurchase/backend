@@ -19,6 +19,7 @@ import {
   retryKnoxUpload,
   listDevicesFromDevicesApi,
   deleteDevices,
+  resetKnoxDevice,
 } from '../controllers/knoxGuardUploadController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -147,6 +148,13 @@ router.delete(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   deleteDevices
+);
+
+router.post(
+  '/devices/reset',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  resetKnoxDevice
 );
 
 export default router;
