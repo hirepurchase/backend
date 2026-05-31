@@ -57,7 +57,6 @@ let warnedAboutPrivateKeyPathFallback = false;
 const KNOX_GUARD_PATHS = {
   checkAuthorization: (process.env.KNOX_GUARD_CHECK_AUTH_PATH || '/authorization').trim(),
   listDevices: (process.env.KNOX_GUARD_LIST_DEVICES_PATH || '/devices/list').trim(),
-  uploadDevices: (process.env.KNOX_GUARD_UPLOAD_DEVICES_PATH || '/devices/uploads').trim(),
   approveDevice: (process.env.KNOX_GUARD_APPROVE_DEVICE_PATH || '/devices/approve').trim(),
   lockDevice: (process.env.KNOX_GUARD_LOCK_DEVICE_PATH || '/devices/lock').trim(),
   unlockDevice: (process.env.KNOX_GUARD_UNLOCK_DEVICE_PATH || '/devices/unlock').trim(),
