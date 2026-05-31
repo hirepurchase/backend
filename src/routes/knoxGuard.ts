@@ -22,6 +22,7 @@ import {
   deleteDevices,
   resetKnoxDevice,
   removeManagedDevice,
+  patchKnoxUploadStatus,
 } from '../controllers/knoxGuardUploadController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -171,6 +172,13 @@ router.get(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
   getKnoxPortalDeviceStatus
+);
+
+router.patch(
+  '/upload/status/:serialNumber',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  patchKnoxUploadStatus
 );
 
 export default router;

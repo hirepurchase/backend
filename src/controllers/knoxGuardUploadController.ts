@@ -622,7 +622,7 @@ export async function getSamsungUploadStatus(req: AuthenticatedRequest, res: Res
     const result = await getKnoxGuardUploadStatus(uploadId);
 
     if (!result.success && !result.dryRun) {
-      res.status(result.statusCode ?? 500).json({ error: result.error, data: result.data });
+      res.status(result.statusCode === 401 || result.statusCode === 403 ? 502 : (result.statusCode ?? 500)).json({ error: result.error, data: result.data });
       return;
     }
 
@@ -646,7 +646,9 @@ export async function listDevicesFromDevicesApi(req: AuthenticatedRequest, res: 
   try {
     const result = await listDevicesFromApi();
     if (!result.success && !result.dryRun) {
-      res.status(result.statusCode ?? 500).json({ error: result.error, data: result.data });
+      // Never forward upstream 401/403 as-is — the client interceptor treats 401 as session expired
+      const statusCode = result.statusCode === 401 || result.statusCode === 403 ? 502 : (result.statusCode ?? 500);
+      res.status(statusCode).json({ error: result.error, data: result.data });
       return;
     }
     res.json(result.data);
@@ -695,7 +697,7 @@ export async function deleteDevices(req: AuthenticatedRequest, res: Response): P
         });
       }
 
-      res.status(result.statusCode ?? 500).json({ error: result.error, data: result.data });
+      res.status(result.statusCode === 401 || result.statusCode === 403 ? 502 : (result.statusCode ?? 500)).json({ error: result.error, data: result.data });
       return;
     }
 
@@ -880,5 +882,46 @@ export async function removeManagedDevice(req: AuthenticatedRequest, res: Respon
   } catch (error) {
     console.error('Remove managed device error:', error);
     res.status(500).json({ error: 'Failed to remove managed device' });
+  }
+}
+
+// PATCH /api/knox-guard/upload/status/:serialNumber
+// Manually set knoxUploadStatus on an inventory item — useful when a device was uploaded
+// outside the system or the local state is out of sync with the actual tenant.
+export async function patchKnoxUploadStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { serialNumber } = req.params;
+    const { knoxUploadStatus, knoxUploadId, knoxUploadError } = req.body as {
+      knoxUploadStatus?: string;
+      knoxUploadId?: string | null;
+      knoxUploadError?: string | null;
+    };
+
+    const validStatuses = ['PENDING', 'UPLOADED', 'FAILED', 'SKIPPED', 'DELETE_PENDING', 'DELETED'];
+    if (!knoxUploadStatus || !validStatuses.includes(knoxUploadStatus)) {
+      res.status(400).json({ error: `knoxUploadStatus must be one of: ${validStatuses.join(', ')}` });
+      return;
+    }
+
+    const item = await prisma.inventoryItem.findFirst({ where: { serialNumber } });
+    if (!item) {
+      res.status(404).json({ error: `No inventory item found with serial number ${serialNumber}` });
+      return;
+    }
+
+    const updated = await prisma.inventoryItem.update({
+      where: { id: item.id },
+      data: {
+        knoxUploadStatus,
+        ...(knoxUploadId !== undefined && { knoxUploadId }),
+        ...(knoxUploadError !== undefined && { knoxUploadError }),
+      },
+      select: { id: true, serialNumber: true, knoxUploadStatus: true, knoxUploadId: true, knoxUploadError: true },
+    });
+
+    res.json({ message: `Knox upload status updated for ${serialNumber}`, item: updated });
+  } catch (error) {
+    console.error('Patch Knox upload status error:', error);
+    res.status(500).json({ error: 'Failed to update Knox upload status' });
   }
 }
