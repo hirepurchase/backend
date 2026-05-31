@@ -5,6 +5,7 @@ import {
   evaluateKnoxGuardContractDevice,
   getKnoxGuardContractDevice,
   getKnoxGuardHealth,
+  getKnoxPortalDeviceStatus,
   handleKnoxGuardWebhook,
   listKnoxGuardCommands,
   listKnoxGuardDevices,
@@ -163,6 +164,13 @@ router.delete(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   removeManagedDevice
+);
+
+router.get(
+  '/devices/portal-status/:serialNumber',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  getKnoxPortalDeviceStatus
 );
 
 export default router;

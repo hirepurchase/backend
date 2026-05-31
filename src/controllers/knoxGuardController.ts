@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { createAuditLog } from '../services/auditService';
 import { runDeviceControlSchedulerManually } from '../services/deviceControlScheduler';
+import { lookupKnoxGuardDevice } from '../services/knoxGuardService';
 import {
   enrollManagedDeviceForContract,
   evaluateManagedDeviceForContract,
@@ -326,5 +327,50 @@ export async function handleKnoxGuardWebhook(req: Request, res: Response): Promi
   } catch (error: any) {
     console.error('Knox Guard webhook error:', error);
     res.status(500).json({ error: error.message || 'Failed to reconcile Knox webhook' });
+  }
+}
+
+// GET /api/knox-guard/devices/portal-status/:serialNumber
+// Looks up a device on the Knox portal by serial number / IMEI and returns its live status.
+export async function getKnoxPortalDeviceStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { serialNumber } = req.params;
+    if (!serialNumber) {
+      res.status(400).json({ error: 'serialNumber is required' });
+      return;
+    }
+
+    const result = await lookupKnoxGuardDevice({ deviceUid: serialNumber });
+
+    if (!result.success) {
+      res.status(result.statusCode ?? 502).json({
+        found: false,
+        error: result.error || 'Knox portal lookup failed',
+      });
+      return;
+    }
+
+    const deviceList = (result.data as any)?.deviceList;
+    const device = Array.isArray(deviceList) ? deviceList[0] ?? null : null;
+
+    res.json({
+      found: Boolean(device),
+      dryRun: result.dryRun ?? false,
+      device: device
+        ? {
+            objectId: device.objectId ?? null,
+            deviceUid: device.deviceUid ?? null,
+            status: device.status ?? null,
+            isOfflineLocked: device.isOfflineLocked ?? null,
+            isOfflineLockApplied: device.isOfflineLockApplied ?? null,
+            agentVersion: device.agentVersion ?? null,
+            firmwareVersion: device.firmwareVersion ?? null,
+            imeiNumber: device.imeiNumber ?? null,
+          }
+        : null,
+    });
+  } catch (error: any) {
+    console.error('Knox portal status lookup error:', error);
+    res.status(500).json({ error: 'Failed to look up device on Knox portal' });
   }
 }

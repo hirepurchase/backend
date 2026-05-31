@@ -459,7 +459,7 @@ function buildDevicesApiClient() {
     baseURL: DEVICES_API_BASE_URL,
     timeout: KNOX_GUARD_TIMEOUT_MS,
     headers: {
-      'x-vtkdp-key': DEVICES_API_KEY,
+      'Authorization': `Bearer ${DEVICES_API_KEY}`,
       'Content-Type': 'application/json',
     },
     httpsAgent: KNOX_HTTPS_AGENT,
