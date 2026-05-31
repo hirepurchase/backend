@@ -3,7 +3,6 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { getKnoxGuardUploadStatus, lookupKnoxGuardDevice, uploadKnoxGuardDevices } from '../services/knoxGuardService';
 import { requestManagedDeviceLock, requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
-import { runDeviceControlSchedulerManually } from '../services/deviceControlScheduler';
 import { AuthenticatedRequest } from '../types';
 
 const KNOX_UPLOAD_POLL_ATTEMPTS = 5;
@@ -793,7 +792,10 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
 
     const item = await prisma.inventoryItem.findUnique({
       where: { id },
-      include: { managedDevice: { select: { id: true, contractId: true, enrollmentStatus: true, isActive: true } } },
+      include: {
+        managedDevice: { select: { id: true, contractId: true, enrollmentStatus: true, isActive: true } },
+        contract: { select: { id: true } },
+      },
     });
 
     if (!item) {
@@ -801,19 +803,12 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
       return;
     }
 
-    const enrolledDevice = item.managedDevice;
-    const isKnoxEnrolled = enrolledDevice?.isActive &&
-      ['ACTIVE', 'APPROVED', 'APPROVAL_QUEUED'].includes(enrolledDevice.enrollmentStatus ?? '');
-
-    if (isKnoxEnrolled && enrolledDevice) {
-      // Route through Knox Guard — this sends a real command to the device
-      if (lockStatus === 'LOCKED') {
-        await requestManagedDeviceLock(enrolledDevice.contractId);
-      } else {
-        await requestManagedDeviceUnlock(enrolledDevice.contractId);
-      }
-      // Fire the command processor immediately
-      runDeviceControlSchedulerManually().catch(() => {});
+    // Route through Knox if the item has a contract — auto-enroll handles unenrolled devices
+    const contractId = item.managedDevice?.contractId ?? (item as any).contract?.id ?? null;
+    if (contractId) {
+      const result = lockStatus === 'LOCKED'
+        ? await requestManagedDeviceLock(contractId)
+        : await requestManagedDeviceUnlock(contractId);
 
       await createAuditLog({
         userId: req.user!.id,
@@ -821,17 +816,24 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
         entity: 'InventoryItem',
         entityId: id,
         oldValues: { lockStatus: item.lockStatus },
-        newValues: { lockStatus, via: 'knox_guard' },
+        newValues: { lockStatus, via: 'knox_guard', success: result.success, dryRun: result.dryRun },
         ipAddress: req.ip,
         userAgent: req.headers['user-agent'],
       });
 
+      if (!result.success && !result.dryRun) {
+        res.status(502).json({ error: result.error || `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} failed` });
+        return;
+      }
+
       res.json({
         id: item.id,
         serialNumber: item.serialNumber,
-        lockStatus: item.lockStatus, // DB value unchanged until Knox webhook confirms
-        knoxCommandQueued: true,
-        message: `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} command queued and processing.`,
+        lockStatus: result.actualState === 'LOCKED' ? 'LOCKED' : result.actualState === 'UNLOCKED' ? 'UNLOCKED' : item.lockStatus,
+        dryRun: result.dryRun,
+        message: result.dryRun
+          ? `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} simulated (dry-run)`
+          : `Device ${lockStatus === 'LOCKED' ? 'locked' : 'unlocked'} successfully via Knox Guard`,
       });
       return;
     }

@@ -1627,9 +1627,36 @@ export async function requestManagedDeviceApprove(contractId: string) {
 }
 
 export async function requestManagedDeviceLock(contractId: string, message?: string) {
-  const contract = await getContractWithDevice(contractId);
-  if (!contract || !contract.managedDevice) {
-    throw new Error('Managed device not found for contract');
+  let contract = await getContractWithDevice(contractId);
+  if (!contract) {
+    throw new Error('Contract not found');
+  }
+
+  if (!contract.managedDevice) {
+    const enrollDefaults = await getDeviceControlEnrollmentDefaults();
+    await enrollManagedDeviceForContract(contractId, {
+      metadata: {
+        customerExperience: {
+          disclosureAccepted: true,
+          disclosureVersion: enrollDefaults.disclosureVersion,
+          disclosureSummary: enrollDefaults.disclosureSummary,
+          supportPhone: enrollDefaults.supportPhone,
+          supportMessage: enrollDefaults.supportMessage,
+          warningMessage: enrollDefaults.warningMessage,
+          paymentAppPackage: enrollDefaults.paymentAppPackage,
+          paymentAppLabel: enrollDefaults.paymentAppLabel,
+          paymentUssd: enrollDefaults.paymentUssd,
+          refreshActionLabel: enrollDefaults.refreshActionLabel,
+          allowCustomerAppOnLockScreen: enrollDefaults.allowCustomerAppOnLockScreen,
+          allowSupportOnLockScreen: enrollDefaults.allowSupportOnLockScreen,
+          allowPaymentUssdOnLockScreen: enrollDefaults.allowPaymentUssdOnLockScreen,
+        },
+      },
+    });
+    contract = await getContractWithDevice(contractId);
+    if (!contract?.managedDevice) {
+      throw new Error('Auto-enroll succeeded but managed device record could not be loaded');
+    }
   }
 
   const lockDefaults = await getDeviceControlEnrollmentDefaults();
