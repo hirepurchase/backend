@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import {
+  checkPortalActiveDevices,
   enrollKnoxGuardContractDevice,
   approveKnoxGuardContractDevice,
   evaluateKnoxGuardContractDevice,
@@ -137,6 +138,13 @@ router.get(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
   getSamsungUploadStatus
+);
+
+router.get(
+  '/devices/portal-check',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  checkPortalActiveDevices
 );
 
 router.get(

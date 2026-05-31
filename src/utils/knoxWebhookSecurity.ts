@@ -84,7 +84,7 @@ function getTraceId(req: Request): string | null {
   return traceId ? traceId.trim() || null : null;
 }
 
-function getCandidatePayloadBuffers(req: Request): Buffer[] {
+function getCandidatePayloadBuffers(req: Request & { rawBody?: Buffer }): Buffer[] {
   const buffers: Buffer[] = [];
 
   if (req.rawBody?.length) {
@@ -101,7 +101,7 @@ function getCandidatePayloadBuffers(req: Request): Buffer[] {
   return buffers;
 }
 
-function verifySamsungSignature(req: Request): KnoxWebhookValidationResult {
+function verifySamsungSignature(req: Request & { rawBody?: Buffer }): KnoxWebhookValidationResult {
   const signatureHeader = req.header('x-wsm-signature');
   const traceId = getTraceId(req);
 
@@ -189,7 +189,7 @@ export function getKnoxWebhookSecuritySummary(): KnoxWebhookSecuritySummary {
   };
 }
 
-export function validateKnoxWebhookRequest(req: Request): KnoxWebhookValidationResult {
+export function validateKnoxWebhookRequest(req: Request & { rawBody?: Buffer }): KnoxWebhookValidationResult {
   const signatureHeader = req.header('x-wsm-signature');
   const traceId = getTraceId(req);
 

@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import { createAuditLog } from '../services/auditService';
-import { runDeviceControlSchedulerManually } from '../services/deviceControlScheduler';
 import { lookupKnoxGuardDevice } from '../services/knoxGuardService';
 import {
+  checkKnoxPortalActiveDevices,
   enrollManagedDeviceForContract,
   evaluateManagedDeviceForContract,
   getDeviceControlEnrollmentDefaults,
@@ -108,11 +108,12 @@ export async function enrollKnoxGuardContractDevice(req: AuthenticatedRequest, r
       userAgent: req.headers['user-agent'],
     });
 
-    // Immediately try to process the APPROVE_DEVICE command — don't wait for cron
-    runDeviceControlSchedulerManually().catch(() => {});
-
     res.status(201).json({
-      message: 'Managed device enrolled and approval queued successfully',
+      message: result.dryRun
+        ? 'Managed device enrolled and approval simulated (dry-run mode)'
+        : result.success
+          ? 'Managed device enrolled and approved successfully'
+          : 'Managed device enrolled; approval failed — retry via the approve endpoint',
       result,
     });
   } catch (error: any) {
@@ -136,10 +137,6 @@ export async function evaluateKnoxGuardContractDevice(req: AuthenticatedRequest,
       userAgent: req.headers['user-agent'],
     });
 
-    if (result.queuedCommand) {
-      runDeviceControlSchedulerManually().catch(() => {});
-    }
-
     res.json({
       message: 'Managed device evaluated successfully',
       result,
@@ -153,25 +150,31 @@ export async function evaluateKnoxGuardContractDevice(req: AuthenticatedRequest,
 export async function approveKnoxGuardContractDevice(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { contractId } = req.params;
-    const command = await requestManagedDeviceApprove(contractId);
+    const result = await requestManagedDeviceApprove(contractId);
 
     await createAuditLog({
       userId: getAdminUserId(req),
       action: 'APPROVE_KNOX_GUARD_DEVICE',
-      entity: 'ManagedDeviceCommand',
-      entityId: command.id,
-      newValues: { contractId, type: command.type },
+      entity: 'ManagedDevice',
+      entityId: contractId,
+      newValues: { contractId, success: result.success, dryRun: result.dryRun, transactionId: result.transactionId },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
 
-    // Fire the command processor immediately — no need to wait for cron
-    runDeviceControlSchedulerManually().catch(() => {});
+    if (!result.success && !result.dryRun) {
+      res.status(502).json({ error: result.error || 'Knox Guard approval failed' });
+      return;
+    }
 
-    res.json({ message: 'Approval command queued and processing started.', command });
+    res.json({
+      message: result.dryRun ? 'Approval simulated (dry-run mode)' : 'Device approved successfully',
+      transactionId: result.transactionId,
+      dryRun: result.dryRun,
+    });
   } catch (error: any) {
     console.error('Approve Knox Guard device error:', error);
-    res.status(400).json({ error: error.message || 'Failed to queue approval command' });
+    res.status(400).json({ error: error.message || 'Failed to approve device' });
   }
 }
 
@@ -179,30 +182,38 @@ export async function lockKnoxGuardContractDevice(req: AuthenticatedRequest, res
   try {
     const { contractId } = req.params;
     const { message } = req.body || {};
-    const command = await requestManagedDeviceLock(contractId, message);
+    const result = await requestManagedDeviceLock(contractId, message);
 
     await createAuditLog({
       userId: getAdminUserId(req),
       action: 'LOCK_KNOX_GUARD_DEVICE',
-      entity: 'ManagedDeviceCommand',
-      entityId: command.id,
+      entity: 'ManagedDevice',
+      entityId: contractId,
       newValues: {
         contractId,
-        type: command.type,
+        success: result.success,
+        dryRun: result.dryRun,
+        actualState: result.actualState,
+        transactionId: result.transactionId,
       },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
 
-    runDeviceControlSchedulerManually().catch(() => {});
+    if (!result.success && !result.dryRun) {
+      res.status(502).json({ error: result.error || 'Knox Guard lock failed' });
+      return;
+    }
 
     res.json({
-      message: 'Lock command queued successfully',
-      command,
+      message: result.dryRun ? 'Lock simulated (dry-run mode)' : 'Device locked successfully',
+      actualState: result.actualState,
+      transactionId: result.transactionId,
+      dryRun: result.dryRun,
     });
   } catch (error: any) {
     console.error('Lock Knox Guard device error:', error);
-    res.status(400).json({ error: error.message || 'Failed to queue lock command' });
+    res.status(400).json({ error: error.message || 'Failed to lock device' });
   }
 }
 
@@ -210,30 +221,38 @@ export async function unlockKnoxGuardContractDevice(req: AuthenticatedRequest, r
   try {
     const { contractId } = req.params;
     const { reason } = req.body || {};
-    const command = await requestManagedDeviceUnlock(contractId, reason);
+    const result = await requestManagedDeviceUnlock(contractId, reason);
 
     await createAuditLog({
       userId: getAdminUserId(req),
       action: 'UNLOCK_KNOX_GUARD_DEVICE',
-      entity: 'ManagedDeviceCommand',
-      entityId: command.id,
+      entity: 'ManagedDevice',
+      entityId: contractId,
       newValues: {
         contractId,
-        type: command.type,
+        success: result.success,
+        dryRun: result.dryRun,
+        actualState: result.actualState,
+        transactionId: result.transactionId,
       },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
 
-    runDeviceControlSchedulerManually().catch(() => {});
+    if (!result.success && !result.dryRun) {
+      res.status(502).json({ error: result.error || 'Knox Guard unlock failed' });
+      return;
+    }
 
     res.json({
-      message: 'Unlock command queued successfully',
-      command,
+      message: result.dryRun ? 'Unlock simulated (dry-run mode)' : 'Device unlocked successfully',
+      actualState: result.actualState,
+      transactionId: result.transactionId,
+      dryRun: result.dryRun,
     });
   } catch (error: any) {
     console.error('Unlock Knox Guard device error:', error);
-    res.status(400).json({ error: error.message || 'Failed to queue unlock command' });
+    res.status(400).json({ error: error.message || 'Failed to unlock device' });
   }
 }
 
@@ -327,6 +346,17 @@ export async function handleKnoxGuardWebhook(req: Request, res: Response): Promi
   } catch (error: any) {
     console.error('Knox Guard webhook error:', error);
     res.status(500).json({ error: error.message || 'Failed to reconcile Knox webhook' });
+  }
+}
+
+// GET /api/knox-guard/devices/portal-check
+export async function checkPortalActiveDevices(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const result = await checkKnoxPortalActiveDevices();
+    res.json(result);
+  } catch (error) {
+    console.error('Knox portal active device check error:', error);
+    res.status(500).json({ error: 'Failed to check Knox portal for active devices' });
   }
 }
 

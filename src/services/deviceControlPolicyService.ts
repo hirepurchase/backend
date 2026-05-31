@@ -1062,22 +1062,23 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
     `Contract: ${contract.contractNumber}`,
   ].join(' | ').slice(0, 1000);
 
-  // Queue APPROVE_DEVICE immediately.
-  // If Samsung still reports the device as 'Accepted', the command processor
-  // will reschedule approval until the Knox Guard app connects on the phone.
-  const command = await queueManagedDeviceCommand(managedDevice.id, 'APPROVE_DEVICE', {
-    approveId: managedDevice.approveId,
+  const result = await approveKnoxGuardDevice({
+    objectId: managedDevice.knoxObjectId || undefined,
     deviceUid: managedDevice.deviceUid,
+    approveId: managedDevice.approveId,
     approveComment,
   });
 
   await prismaAny.managedDevice.update({
     where: { id: managedDevice.id },
     data: {
-      // ACCEPTED = uploaded to Devices API, waiting for Knox Guard app on device to phone home
-      enrollmentStatus: 'APPROVAL_QUEUED',
+      enrollmentStatus: result.success || result.dryRun ? 'APPROVED' : 'APPROVAL_QUEUED',
       desiredState: 'UNLOCKED',
       lastEvaluatedAt: new Date(),
+      lastSyncedAt: new Date(),
+      lastKnoxAction: 'APPROVE_DEVICE',
+      lastTransactionId: result.transactionId || null,
+      lastError: result.success || result.dryRun ? null : (result.error || 'Approval failed'),
     },
   });
 
@@ -1085,8 +1086,105 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
     managedDeviceId: managedDevice.id,
     approveId: managedDevice.approveId,
     deviceUid: managedDevice.deviceUid,
-    command,
+    success: result.success,
+    dryRun: result.dryRun,
+    transactionId: result.transactionId,
+    error: result.error,
   };
+}
+
+export async function checkKnoxPortalActiveDevices() {
+  const devices = await prismaAny.managedDevice.findMany({
+    where: { isActive: true },
+    select: {
+      id: true,
+      deviceUid: true,
+      approveId: true,
+      knoxObjectId: true,
+      actualState: true,
+      enrollmentStatus: true,
+      knoxStatus: true,
+      contract: { select: { id: true, contractNumber: true } },
+      customer: { select: { id_uuid: true, firstName: true, lastName: true } },
+    },
+  });
+
+  const results = await Promise.all(
+    devices.map(async (device: any) => {
+      try {
+        const lookup = await lookupKnoxGuardDevice({
+          objectId: device.knoxObjectId || undefined,
+          deviceUid: device.deviceUid,
+          approveId: device.approveId,
+        });
+
+        if (!lookup.success) {
+          return {
+            managedDeviceId: device.id,
+            deviceUid: device.deviceUid,
+            contractNumber: device.contract?.contractNumber ?? null,
+            customer: device.customer ? `${device.customer.firstName} ${device.customer.lastName}` : null,
+            localState: device.actualState,
+            localEnrollmentStatus: device.enrollmentStatus,
+            portalFound: false,
+            portalStatus: null,
+            portalObjectId: null,
+            dryRun: lookup.dryRun,
+            error: lookup.error || 'Lookup failed',
+          };
+        }
+
+        const deviceList = (lookup.data as any)?.deviceList;
+        const portalDevice = Array.isArray(deviceList)
+          ? deviceList.find((d: any) =>
+              d?.deviceUid === device.deviceUid ||
+              d?.imei === device.deviceUid ||
+              d?.serialNumber === device.deviceUid ||
+              (device.knoxObjectId && d?.objectId === device.knoxObjectId)
+            ) ?? deviceList[0] ?? null
+          : null;
+
+        return {
+          managedDeviceId: device.id,
+          deviceUid: device.deviceUid,
+          contractNumber: device.contract?.contractNumber ?? null,
+          customer: device.customer ? `${device.customer.firstName} ${device.customer.lastName}` : null,
+          localState: device.actualState,
+          localEnrollmentStatus: device.enrollmentStatus,
+          portalFound: Boolean(portalDevice),
+          portalStatus: portalDevice?.status ?? null,
+          portalObjectId: portalDevice?.objectId ?? null,
+          portalModel: portalDevice?.model ?? null,
+          dryRun: lookup.dryRun,
+          error: null,
+        };
+      } catch (err: any) {
+        return {
+          managedDeviceId: device.id,
+          deviceUid: device.deviceUid,
+          contractNumber: device.contract?.contractNumber ?? null,
+          customer: device.customer ? `${device.customer.firstName} ${device.customer.lastName}` : null,
+          localState: device.actualState,
+          localEnrollmentStatus: device.enrollmentStatus,
+          portalFound: false,
+          portalStatus: null,
+          portalObjectId: null,
+          dryRun: false,
+          error: err?.message || 'Lookup error',
+        };
+      }
+    })
+  );
+
+  const summary = {
+    total: results.length,
+    foundOnPortal: results.filter((r) => r.portalFound).length,
+    notFoundOnPortal: results.filter((r) => !r.portalFound && !r.error).length,
+    lookupErrors: results.filter((r) => Boolean(r.error)).length,
+    dryRun: results.some((r) => r.dryRun),
+  };
+
+  return { summary, devices: results };
 }
 
 export async function getManagedDeviceHealthSummary() {
@@ -1388,38 +1486,78 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     && !['UNLOCKED', 'PENDING'].includes(actualState);
 
   const desiredState: ManagedDeviceState = shouldLock ? 'LOCKED' : 'UNLOCKED';
-  let queuedCommand = null;
+  const identifier = getManagedDeviceIdentifier(contract.managedDevice);
+  let actionResult: Awaited<ReturnType<typeof lockKnoxGuardDevice>> | null = null;
+  let actionType: string | null = null;
+  let nextActualState: ManagedDeviceState = actualState;
 
   if (needsLockCommand) {
-    queuedCommand = await queueManagedDeviceCommand(
-      contract.managedDevice.id,
-      'LOCK_DEVICE',
-      buildLockCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults)
-    );
+    const lockPayload = buildLockCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
+    actionResult = await lockKnoxGuardDevice({
+      ...identifier,
+      message: lockPayload.message,
+      tel: lockPayload.tel,
+      warningMessage: lockPayload.warningMessage,
+      blockIncomingCalls: lockPayload.blockIncomingCalls,
+      allowIncomingNumbers: lockPayload.allowIncomingNumbers,
+    });
+    actionType = 'LOCK_DEVICE';
+    if (actionResult.success || actionResult.dryRun) nextActualState = 'LOCKED';
   } else if (shouldBlink && contract.managedDevice.desiredState !== 'LOCKED') {
-    queuedCommand = await queueManagedDeviceCommand(
-      contract.managedDevice.id,
-      'BLINK_DEVICE',
-      buildBlinkCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults)
-    );
+    const blinkPayload = buildBlinkCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
+    actionResult = await blinkKnoxGuardDevice({
+      ...identifier,
+      message: blinkPayload.message,
+      tel: blinkPayload.tel,
+      interval: blinkPayload.interval,
+      timeLimitEnable: blinkPayload.timeLimitEnable,
+    });
+    actionType = 'BLINK_DEVICE';
   } else if (needsUnlockCommand) {
-    queuedCommand = await queueManagedDeviceCommand(contract.managedDevice.id, 'UNLOCK_DEVICE', {
+    actionResult = await unlockKnoxGuardDevice({
+      ...identifier,
       message: 'Your payment has been received. Your device has been unlocked.',
     });
+    actionType = 'UNLOCK_DEVICE';
+    if (actionResult.success || actionResult.dryRun) nextActualState = 'UNLOCKED';
   } else if (!shouldLock && contract.managedDevice.actualState === 'UNKNOWN' && !contract.managedDevice.lastSyncedAt) {
-    queuedCommand = await queueManagedDeviceCommand(contract.managedDevice.id, 'SYNC_DEVICE', {
-      reason: 'Initial sync requested by policy evaluation.',
-    });
+    actionResult = await lookupKnoxGuardDevice(identifier);
+    actionType = 'SYNC_DEVICE';
+  }
+
+  const deviceUpdate: Record<string, unknown> = {
+    desiredState,
+    lastEvaluatedAt: new Date(),
+    lastError: actionResult && !actionResult.success && !actionResult.dryRun ? (actionResult.error || 'Knox action failed') : null,
+  };
+
+  if (actionResult) {
+    deviceUpdate.lastSyncedAt = new Date();
+    deviceUpdate.lastKnoxAction = actionType;
+    deviceUpdate.lastTransactionId = actionResult.transactionId || null;
+  }
+
+  if (actionType === 'LOCK_DEVICE' && (actionResult?.success || actionResult?.dryRun)) {
+    deviceUpdate.actualState = 'LOCKED';
+    deviceUpdate.enrollmentStatus = 'ACTIVE';
+    deviceUpdate.lastLockedAt = new Date();
+  } else if (actionType === 'UNLOCK_DEVICE' && (actionResult?.success || actionResult?.dryRun)) {
+    deviceUpdate.actualState = 'UNLOCKED';
+    deviceUpdate.enrollmentStatus = 'ACTIVE';
+    deviceUpdate.lastUnlockedAt = new Date();
   }
 
   const updatedDevice = await prismaAny.managedDevice.update({
     where: { id: contract.managedDevice.id },
-    data: {
-      desiredState,
-      lastEvaluatedAt: new Date(),
-      lastError: null,
-    },
+    data: deviceUpdate,
   });
+
+  if (contract.managedDevice.inventoryItemId && (actionType === 'LOCK_DEVICE' || actionType === 'UNLOCK_DEVICE') && (actionResult?.success || actionResult?.dryRun)) {
+    await prismaAny.inventoryItem.update({
+      where: { id: contract.managedDevice.inventoryItemId },
+      data: { lockStatus: actionType === 'LOCK_DEVICE' ? 'LOCKED' : 'UNLOCKED' },
+    });
+  }
 
   return {
     contractId: contract.id,
@@ -1427,7 +1565,10 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     metrics,
     desiredState,
     actualState: updatedDevice.actualState,
-    queuedCommand,
+    actionType,
+    actionSuccess: actionResult?.success ?? null,
+    actionDryRun: actionResult?.dryRun ?? null,
+    actionError: actionResult?.error ?? null,
   };
 }
 
@@ -1458,22 +1599,31 @@ export async function requestManagedDeviceApprove(contractId: string) {
     `Contract: ${contract.contractNumber}`,
   ].join(' | ').slice(0, 1000);
 
-  const command = await queueManagedDeviceCommand(contract.managedDevice.id, 'APPROVE_DEVICE', {
-    approveId: contract.managedDevice.approveId,
+  const result = await approveKnoxGuardDevice({
+    objectId: contract.managedDevice.knoxObjectId || undefined,
     deviceUid: contract.managedDevice.deviceUid,
+    approveId: contract.managedDevice.approveId,
     approveComment,
   });
 
   await prismaAny.managedDevice.update({
     where: { id: contract.managedDevice.id },
     data: {
-      enrollmentStatus: 'APPROVAL_QUEUED',
+      enrollmentStatus: result.success || result.dryRun ? 'APPROVED' : 'APPROVAL_QUEUED',
       lastEvaluatedAt: new Date(),
-      lastError: null,
+      lastSyncedAt: new Date(),
+      lastKnoxAction: 'APPROVE_DEVICE',
+      lastTransactionId: result.transactionId || null,
+      lastError: result.success || result.dryRun ? null : (result.error || 'Approval failed'),
     },
   });
 
-  return command;
+  return {
+    success: result.success,
+    dryRun: result.dryRun,
+    transactionId: result.transactionId,
+    error: result.error,
+  };
 }
 
 export async function requestManagedDeviceLock(contractId: string, message?: string) {
@@ -1485,20 +1635,51 @@ export async function requestManagedDeviceLock(contractId: string, message?: str
   const lockDefaults = await getDeviceControlEnrollmentDefaults();
   const metrics = calculateOverdueMetrics(contract, (await getKnoxSettings()).blockOnUnpaidPenalties);
   const lockPayload = buildLockCommandPayload(contract, metrics, lockDefaults);
-  const command = await queueManagedDeviceCommand(contract.managedDevice.id, 'LOCK_DEVICE', {
-    ...lockPayload,
+  const identifier = getManagedDeviceIdentifier(contract.managedDevice);
+
+  const result = await lockKnoxGuardDevice({
+    ...identifier,
     message: message || lockPayload.message,
+    tel: lockPayload.tel,
+    warningMessage: lockPayload.warningMessage,
+    blockIncomingCalls: lockPayload.blockIncomingCalls,
+    allowIncomingNumbers: lockPayload.allowIncomingNumbers,
   });
 
-  await prismaAny.managedDevice.update({
-    where: { id: contract.managedDevice.id },
-    data: {
-      desiredState: 'LOCKED',
-      lastEvaluatedAt: new Date(),
-    },
+  const nextState: ManagedDeviceState = result.dryRun || result.success ? 'LOCKED' : contract.managedDevice.actualState as ManagedDeviceState || 'UNKNOWN';
+
+  await prisma.$transaction(async (tx) => {
+    const txAny = tx as any;
+    await txAny.managedDevice.update({
+      where: { id: contract.managedDevice.id },
+      data: {
+        desiredState: 'LOCKED',
+        actualState: nextState,
+        enrollmentStatus: 'ACTIVE',
+        lastLockedAt: result.success || result.dryRun ? new Date() : undefined,
+        lastEvaluatedAt: new Date(),
+        lastSyncedAt: new Date(),
+        lastKnoxAction: 'LOCK_DEVICE',
+        lastTransactionId: result.transactionId || null,
+        lastError: result.success || result.dryRun ? null : (result.error || 'Lock failed'),
+      },
+    });
+
+    if (contract.managedDevice.inventoryItemId && (result.success || result.dryRun)) {
+      await txAny.inventoryItem.update({
+        where: { id: contract.managedDevice.inventoryItemId },
+        data: { lockStatus: 'LOCKED' },
+      });
+    }
   });
 
-  return command;
+  return {
+    success: result.success,
+    dryRun: result.dryRun,
+    transactionId: result.transactionId,
+    actualState: nextState,
+    error: result.error,
+  };
 }
 
 export async function requestManagedDeviceUnlock(contractId: string, reason?: string) {
@@ -1507,20 +1688,48 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
     throw new Error('Managed device not found for contract');
   }
 
-  const command = await queueManagedDeviceCommand(contract.managedDevice.id, 'UNLOCK_DEVICE', {
-    message: reason || 'Manual unlock requested by administrator.',
-    reason: reason || 'Manual unlock requested by administrator.',
+  const identifier = getManagedDeviceIdentifier(contract.managedDevice);
+  const unlockMessage = reason || 'Manual unlock requested by administrator.';
+
+  const result = await unlockKnoxGuardDevice({
+    ...identifier,
+    message: unlockMessage,
   });
 
-  await prismaAny.managedDevice.update({
-    where: { id: contract.managedDevice.id },
-    data: {
-      desiredState: 'UNLOCKED',
-      lastEvaluatedAt: new Date(),
-    },
+  const nextState: ManagedDeviceState = result.dryRun || result.success ? 'UNLOCKED' : contract.managedDevice.actualState as ManagedDeviceState || 'UNKNOWN';
+
+  await prisma.$transaction(async (tx) => {
+    const txAny = tx as any;
+    await txAny.managedDevice.update({
+      where: { id: contract.managedDevice.id },
+      data: {
+        desiredState: 'UNLOCKED',
+        actualState: nextState,
+        enrollmentStatus: 'ACTIVE',
+        lastUnlockedAt: result.success || result.dryRun ? new Date() : undefined,
+        lastEvaluatedAt: new Date(),
+        lastSyncedAt: new Date(),
+        lastKnoxAction: 'UNLOCK_DEVICE',
+        lastTransactionId: result.transactionId || null,
+        lastError: result.success || result.dryRun ? null : (result.error || 'Unlock failed'),
+      },
+    });
+
+    if (contract.managedDevice.inventoryItemId && (result.success || result.dryRun)) {
+      await txAny.inventoryItem.update({
+        where: { id: contract.managedDevice.inventoryItemId },
+        data: { lockStatus: 'UNLOCKED' },
+      });
+    }
   });
 
-  return command;
+  return {
+    success: result.success,
+    dryRun: result.dryRun,
+    transactionId: result.transactionId,
+    actualState: nextState,
+    error: result.error,
+  };
 }
 
 export async function unenrollManagedDeviceForContract(

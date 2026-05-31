@@ -18,7 +18,7 @@ import { activityTracker } from './middleware/activityTracker';
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-function captureRawBody(req: express.Request, _res: express.Response, buf: Buffer): void {
+function captureRawBody(req: express.Request & { rawBody?: Buffer }, _res: express.Response, buf: Buffer): void {
   if (buf?.length) {
     req.rawBody = Buffer.from(buf);
   }
