@@ -436,7 +436,7 @@ function buildLockMessage(
   maxDaysOverdue: number,
   customerExperience: DeviceControlCustomerExperience
 ): string {
-  return `Your phone has been restricted because your payment is overdue. Amount due: GHS ${overdueAmount.toFixed(2)}. Please pay now using the AIDOO TECH App, USSD, or call 0530505547 for assistance.`.trim();
+  return `Your phone has been restricted because your payment is overdue. Amount due: GHS ${overdueAmount.toFixed(2)}. Please pay now using the AIDOO TECH App, USSD, or call 0530505547.`.trim();
 }
 
 function parseJsonSafely(value: string | null | undefined): Record<string, unknown> | null {
