@@ -282,12 +282,12 @@ model HubtelPreapproval {
 
 model ManagedDevice {
   id               String                @id @default(uuid())
-  contractId       String                @unique
-  contract         HirePurchaseContract  @relation(fields: [contractId], references: [id])
+  contractId       String?               @unique
+  contract         HirePurchaseContract? @relation(fields: [contractId], references: [id])
   inventoryItemId  String?               @unique
   inventoryItem    InventoryItem?        @relation(fields: [inventoryItemId], references: [id])
-  customerId_uuid  String                @db.Uuid
-  customer         Customer              @relation(fields: [customerId_uuid], references: [id_uuid])
+  customerId_uuid  String?               @db.Uuid
+  customer         Customer?             @relation(fields: [customerId_uuid], references: [id_uuid])
   provider         String                @default("KNOX_GUARD")
   deviceUid        String
   deviceUidType    String                @default("SERIAL_NUMBER") // IMEI, SERIAL_NUMBER

@@ -2,7 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendContractConfirmation, sendContractSubmittedForApprovalNotification } from '../services/notificationService';
-import { unenrollManagedDeviceForContract, safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
+import { unenrollManagedDeviceForContract, safelyEvaluateManagedDeviceForContract, enrollManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
@@ -395,6 +395,13 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
         endDate: completeContract.endDate,
       }).catch(error => {
         console.error('Failed to send contract confirmation:', error);
+      });
+    }
+
+    // Auto-enroll into Knox Guard for contracts that are immediately ACTIVE
+    if (!requiresApproval && completeContract) {
+      enrollManagedDeviceForContract(completeContract.id, {}).catch((err) => {
+        console.error(`Knox Guard auto-enroll failed for contract ${completeContract.contractNumber}:`, err);
       });
     }
 

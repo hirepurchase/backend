@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import {
   checkPortalActiveDevices,
+  enrollDeviceManual,
+  linkDeviceToContract,
   enrollKnoxGuardContractDevice,
   approveKnoxGuardContractDevice,
   evaluateKnoxGuardContractDevice,
@@ -19,6 +21,7 @@ import {
   getKnoxUploadStatuses,
   getSamsungUploadStatus,
   retryKnoxUpload,
+  uploadDevicesDirect,
   listDevicesFromDevicesApi,
   deleteDevices,
   resetKnoxDevice,
@@ -145,6 +148,27 @@ router.get(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
   checkPortalActiveDevices
+);
+
+router.post(
+  '/devices/enroll-manual',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  enrollDeviceManual
+);
+
+router.patch(
+  '/devices/:managedDeviceId/link-contract',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  linkDeviceToContract
+);
+
+router.post(
+  '/devices/upload-direct',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  uploadDevicesDirect
 );
 
 router.get(

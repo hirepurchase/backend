@@ -4,6 +4,8 @@ import { lookupKnoxGuardDevice } from '../services/knoxGuardService';
 import {
   checkKnoxPortalActiveDevices,
   enrollManagedDeviceForContract,
+  enrollManagedDeviceManual,
+  linkManagedDeviceToContract,
   evaluateManagedDeviceForContract,
   getDeviceControlEnrollmentDefaults,
   getManagedDeviceByContract,
@@ -346,6 +348,79 @@ export async function handleKnoxGuardWebhook(req: Request, res: Response): Promi
   } catch (error: any) {
     console.error('Knox Guard webhook error:', error);
     res.status(500).json({ error: error.message || 'Failed to reconcile Knox webhook' });
+  }
+}
+
+// POST /api/knox-guard/devices/enroll-manual
+// Body: { deviceUid, deviceUidType?, approveId?, note? }
+export async function enrollDeviceManual(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { deviceUid, deviceUidType, approveId, note } = req.body as {
+      deviceUid?: string;
+      deviceUidType?: string;
+      approveId?: string;
+      note?: string;
+    };
+
+    if (!deviceUid) {
+      res.status(400).json({ error: 'deviceUid is required' });
+      return;
+    }
+
+    const result = await enrollManagedDeviceManual({ deviceUid, deviceUidType, approveId, note });
+
+    await createAuditLog({
+      userId: getAdminUserId(req),
+      action: 'ENROLL_KNOX_GUARD_DEVICE_MANUAL',
+      entity: 'ManagedDevice',
+      entityId: result.managedDeviceId,
+      newValues: { deviceUid, approveId: result.approveId, success: result.success, dryRun: result.dryRun },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.status(201).json({
+      message: result.dryRun
+        ? 'Manual enrollment simulated (dry-run)'
+        : result.success
+          ? 'Device enrolled manually and approved successfully'
+          : 'Device enrolled manually; approval pending Knox Guard app connection',
+      result,
+    });
+  } catch (error: any) {
+    console.error('Manual Knox Guard enroll error:', error);
+    res.status(400).json({ error: error.message || 'Failed to enroll device manually' });
+  }
+}
+
+// PATCH /api/knox-guard/devices/:managedDeviceId/link-contract
+// Body: { contractId }
+export async function linkDeviceToContract(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { managedDeviceId } = req.params;
+    const { contractId } = req.body as { contractId?: string };
+
+    if (!contractId) {
+      res.status(400).json({ error: 'contractId is required' });
+      return;
+    }
+
+    const updated = await linkManagedDeviceToContract(managedDeviceId, contractId);
+
+    await createAuditLog({
+      userId: getAdminUserId(req),
+      action: 'LINK_KNOX_DEVICE_TO_CONTRACT',
+      entity: 'ManagedDevice',
+      entityId: managedDeviceId,
+      newValues: { contractId },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({ message: 'Device linked to contract successfully', managedDevice: updated });
+  } catch (error: any) {
+    console.error('Link Knox device to contract error:', error);
+    res.status(400).json({ error: error.message || 'Failed to link device to contract' });
   }
 }
 

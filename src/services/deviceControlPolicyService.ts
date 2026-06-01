@@ -436,15 +436,8 @@ function buildLockMessage(
   maxDaysOverdue: number,
   customerExperience: DeviceControlCustomerExperience
 ): string {
-  const supportPhoneSuffix = customerExperience.supportPhone ? ` Support: ${customerExperience.supportPhone}.` : '';
-  return [
-    customerExperience.warningMessage,
-    `Your AIDOO TECH phone is restricted because contract ${contract.contractNumber} is overdue.`,
-    `Overdue amount: GHS ${overdueAmount.toFixed(2)}.`,
-    `Maximum days overdue: ${maxDaysOverdue}.`,
-    customerExperience.supportMessage,
-    supportPhoneSuffix,
-  ].join(' ').trim();
+  const supportPhone = customerExperience.supportPhone || '';
+  return `Your phone has been restricted because your payment is overdue. Amount due: GHS ${overdueAmount.toFixed(2)}. Please pay now using the AIDOO TECH App, USSD, or call ${supportPhone} for assistance.`.trim();
 }
 
 function parseJsonSafely(value: string | null | undefined): Record<string, unknown> | null {
@@ -818,7 +811,7 @@ function buildLockCommandPayload(contract: any, metrics: { overdueAmount: number
 
   return {
     message: buildLockMessage(contract, metrics.overdueAmount, metrics.maxDaysOverdue, customerExperience),
-    tel: customerPhone || customerExperience.supportPhone || undefined,
+    tel: customerExperience.supportPhone || undefined,
     warningMessage: customerExperience.warningMessage,
     blockIncomingCalls: BLOCK_INCOMING_CALLS_ON_LOCK,
     allowIncomingNumbers: ALLOW_INCOMING_NUMBERS.length > 0 ? ALLOW_INCOMING_NUMBERS : undefined,
@@ -847,7 +840,7 @@ function buildBlinkCommandPayload(contract: any, metrics: { overdueAmount: numbe
 
   return {
     message,
-    tel: customerPhone || customerExperience.supportPhone || undefined,
+    tel: customerExperience.supportPhone || undefined,
     interval: BLINK_INTERVAL_SECONDS,
     timeLimitEnable: false,
   };
@@ -1091,6 +1084,129 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
     transactionId: result.transactionId,
     error: result.error,
   };
+}
+
+export async function enrollManagedDeviceManual(input: {
+  deviceUid: string;
+  deviceUidType?: string;
+  approveId?: string;
+  note?: string;
+}) {
+  const { deviceUid, deviceUidType = 'SERIAL_NUMBER', approveId, note } = input;
+
+  if (!deviceUid) {
+    throw new Error('deviceUid (IMEI or serial number) is required');
+  }
+
+  // Use provided approveId or generate one from the deviceUid
+  const resolvedApproveId = approveId || `MANUAL-${deviceUid}`;
+
+  // Check for existing managed device with this deviceUid or approveId
+  const existing = await prismaAny.managedDevice.findFirst({
+    where: { OR: [{ deviceUid }, { approveId: resolvedApproveId }] },
+  });
+  if (existing) {
+    throw new Error(`A managed device already exists for ${deviceUid}`);
+  }
+
+  const defaults = await getDeviceControlEnrollmentDefaults();
+
+  const metadata = {
+    customerExperience: {
+      disclosureAccepted: true,
+      disclosureAcceptedAt: new Date().toISOString(),
+      disclosureVersion: defaults.disclosureVersion,
+      disclosureSummary: defaults.disclosureSummary,
+      supportPhone: defaults.supportPhone,
+      supportMessage: defaults.supportMessage,
+      warningMessage: defaults.warningMessage,
+      paymentAppPackage: defaults.paymentAppPackage,
+      paymentAppLabel: defaults.paymentAppLabel,
+      paymentUssd: defaults.paymentUssd,
+      refreshActionLabel: defaults.refreshActionLabel,
+      allowCustomerAppOnLockScreen: defaults.allowCustomerAppOnLockScreen,
+      allowSupportOnLockScreen: defaults.allowSupportOnLockScreen,
+      allowPaymentUssdOnLockScreen: defaults.allowPaymentUssdOnLockScreen,
+    },
+    enrolledFrom: 'manual',
+    enrolledAt: new Date().toISOString(),
+    note: note || null,
+  };
+
+  const managedDevice = await prismaAny.managedDevice.create({
+    data: {
+      deviceUid,
+      deviceUidType,
+      approveId: resolvedApproveId,
+      contractId: null,
+      customerId_uuid: null,
+      inventoryItemId: null,
+      enrollmentStatus: 'APPROVAL_QUEUED',
+      desiredState: 'UNLOCKED',
+      isActive: true,
+      metadata: JSON.stringify(metadata),
+    },
+  });
+
+  // Attempt Knox Guard approval immediately
+  const result = await approveKnoxGuardDevice({
+    deviceUid: managedDevice.deviceUid,
+    approveId: managedDevice.approveId,
+  });
+
+  await prismaAny.managedDevice.update({
+    where: { id: managedDevice.id },
+    data: {
+      enrollmentStatus: result.success || result.dryRun ? 'APPROVED' : 'APPROVAL_QUEUED',
+      lastSyncedAt: new Date(),
+      lastKnoxAction: 'APPROVE_DEVICE',
+      lastTransactionId: result.transactionId || null,
+      lastError: result.success || result.dryRun ? null : (result.error || 'Approval failed'),
+    },
+  });
+
+  return {
+    managedDeviceId: managedDevice.id,
+    deviceUid: managedDevice.deviceUid,
+    approveId: managedDevice.approveId,
+    success: result.success,
+    dryRun: result.dryRun,
+    transactionId: result.transactionId,
+    error: result.error,
+  };
+}
+
+export async function linkManagedDeviceToContract(managedDeviceId: string, contractId: string) {
+  const contract = await prismaAny.hirePurchaseContract.findUnique({
+    where: { id: contractId },
+    include: {
+      customer: { select: { id_uuid: true } },
+      inventoryItem: { select: { id: true, serialNumber: true } },
+    },
+  });
+
+  if (!contract) {
+    throw new Error('Contract not found');
+  }
+
+  // Check contract doesn't already have a managed device
+  const existing = await prismaAny.managedDevice.findUnique({
+    where: { contractId },
+  });
+  if (existing && existing.id !== managedDeviceId) {
+    throw new Error('Contract already has a different managed device enrolled');
+  }
+
+  const updated = await prismaAny.managedDevice.update({
+    where: { id: managedDeviceId },
+    data: {
+      contractId,
+      customerId_uuid: contract.customer?.id_uuid ?? null,
+      inventoryItemId: contract.inventoryItem?.id ?? null,
+    },
+  });
+
+  return updated;
 }
 
 export async function checkKnoxPortalActiveDevices() {
@@ -1500,6 +1616,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
       warningMessage: lockPayload.warningMessage,
       blockIncomingCalls: lockPayload.blockIncomingCalls,
       allowIncomingNumbers: lockPayload.allowIncomingNumbers,
+      lockScreen: lockPayload.lockScreen,
     });
     actionType = 'LOCK_DEVICE';
     if (actionResult.success || actionResult.dryRun) nextActualState = 'LOCKED';
@@ -1671,6 +1788,7 @@ export async function requestManagedDeviceLock(contractId: string, message?: str
     warningMessage: lockPayload.warningMessage,
     blockIncomingCalls: lockPayload.blockIncomingCalls,
     allowIncomingNumbers: lockPayload.allowIncomingNumbers,
+    lockScreen: lockPayload.lockScreen,
   });
 
   const nextState: ManagedDeviceState = result.dryRun || result.success ? 'LOCKED' : contract.managedDevice.actualState as ManagedDeviceState || 'UNKNOWN';
@@ -1959,6 +2077,7 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
             warningMessage: normalizeOptionalString(payload.warningMessage, null) || undefined,
             blockIncomingCalls: Boolean(payload.blockIncomingCalls ?? BLOCK_INCOMING_CALLS_ON_LOCK),
             allowIncomingNumbers: Array.isArray(payload.allowIncomingNumbers) ? payload.allowIncomingNumbers as string[] : undefined,
+            lockScreen: isRecord(payload.lockScreen) ? payload.lockScreen as any : undefined,
           });
           break;
         case 'UNLOCK_DEVICE':

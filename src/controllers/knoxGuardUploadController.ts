@@ -658,6 +658,67 @@ export async function listDevicesFromDevicesApi(req: AuthenticatedRequest, res: 
   }
 }
 
+// POST /api/knox-guard/devices/upload-direct
+// Body: { imeis: string[] }
+// Uploads IMEIs directly to the Devices API without requiring an inventory/contract record.
+export async function uploadDevicesDirect(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { imeis } = req.body as { imeis?: string[] };
+
+    if (!Array.isArray(imeis) || imeis.length === 0) {
+      res.status(400).json({ error: 'imeis must be a non-empty array of IMEI strings' });
+      return;
+    }
+
+    const invalid = imeis.filter((imei) => !/^\d{14,16}$/.test(imei));
+    if (invalid.length > 0) {
+      res.status(400).json({ error: `Invalid IMEIs: ${invalid.join(', ')}` });
+      return;
+    }
+
+    const result = await uploadKnoxGuardDevices(imeis);
+    const transactionId = (result.data as any)?.transaction_id ?? null;
+
+    if (!result.success && !result.dryRun) {
+      res.status(result.statusCode === 401 || result.statusCode === 403 ? 502 : (result.statusCode ?? 500))
+        .json({ error: result.error ?? 'Upload failed' });
+      return;
+    }
+
+    // Poll up to 10s for completion
+    let failedDevices: any[] = [];
+    if (!result.dryRun && transactionId) {
+      for (let i = 0; i < 5; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const poll = await getKnoxGuardUploadStatus(transactionId);
+        const data = poll.data as any;
+        if (data?.status === 'Complete') {
+          if (Array.isArray(data?.devices) && data.devices.length > 0) {
+            failedDevices = data.devices;
+          }
+          break;
+        }
+      }
+    }
+
+    res.json({
+      message: result.dryRun
+        ? `Dry-run: ${imeis.length} device(s) simulated`
+        : failedDevices.length > 0
+          ? `${imeis.length - failedDevices.length} uploaded, ${failedDevices.length} failed`
+          : `${imeis.length} device(s) uploaded successfully`,
+      transactionId,
+      dryRun: result.dryRun,
+      uploaded: result.dryRun ? 0 : imeis.length - failedDevices.length,
+      failed: result.dryRun ? 0 : failedDevices.length,
+      failedDevices,
+    });
+  } catch (error) {
+    console.error('Direct upload error:', error);
+    res.status(500).json({ error: 'Failed to upload devices' });
+  }
+}
+
 // DELETE /api/knox-guard/devices/delete
 // Body: { imeis: string[] }
 // Asynchronously removes devices from the tenant; returns transactionId for polling
