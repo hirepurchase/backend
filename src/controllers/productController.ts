@@ -969,6 +969,9 @@ export async function getAllInventoryItems(req: AuthenticatedRequest, res: Respo
               createdBy: { select: { id: true, firstName: true, lastName: true } },
             },
           },
+          managedDevice: {
+            select: { id: true, isActive: true, enrollmentStatus: true, actualState: true },
+          },
         },
         orderBy: { createdAt: 'desc' },
         skip: (Number(page) - 1) * Number(limit),
