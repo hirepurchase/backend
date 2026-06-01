@@ -21,6 +21,7 @@ import {
   getKnoxUploadStatuses,
   getSamsungUploadStatus,
   retryKnoxUpload,
+  syncUploadStatusFromPortal,
   uploadDevicesDirect,
   listDevicesFromDevicesApi,
   deleteDevices,
@@ -127,6 +128,13 @@ router.get(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
   getKnoxUploadStatuses
+);
+
+router.post(
+  '/upload/sync',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  syncUploadStatusFromPortal
 );
 
 router.post(

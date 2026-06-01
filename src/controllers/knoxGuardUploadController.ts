@@ -640,6 +640,103 @@ export async function getSamsungUploadStatus(req: AuthenticatedRequest, res: Res
   }
 }
 
+// POST /api/knox-guard/upload/sync
+// Cross-checks devices visible on the Knox portal against the local DB.
+// - Marks inventory items as UPLOADED if the IMEI is visible on portal but not marked uploaded locally
+// - Marks managed devices as ACTIVE if the device is enrolled/approved on portal
+export async function syncUploadStatusFromPortal(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const portalResult = await listDevicesFromApi();
+
+    if (!portalResult.success && !portalResult.dryRun) {
+      res.status(502).json({ error: portalResult.error || 'Failed to fetch devices from portal' });
+      return;
+    }
+
+    const portalDevices: any[] = (portalResult.data as any) ?? [];
+    if (!Array.isArray(portalDevices) || portalDevices.length === 0) {
+      res.json({ message: 'No devices found on portal', marked: 0, managed: 0, dryRun: portalResult.dryRun });
+      return;
+    }
+
+    const portalImeis = new Set(portalDevices.map((d: any) => String(d.imei || d.deviceUid || '').trim()).filter(Boolean));
+
+    // Find inventory items whose IMEI is on the portal but not marked UPLOADED locally
+    const itemsToMark = await prisma.inventoryItem.findMany({
+      where: {
+        serialNumber: { in: Array.from(portalImeis) },
+        OR: [
+          { knoxUploadStatus: null },
+          { knoxUploadStatus: 'FAILED' },
+        ],
+      },
+      select: { id: true, serialNumber: true },
+    });
+
+    let marked = 0;
+    if (itemsToMark.length > 0) {
+      await prisma.inventoryItem.updateMany({
+        where: { id: { in: itemsToMark.map((i) => i.id) } },
+        data: {
+          knoxUploadStatus: 'UPLOADED',
+          knoxUploadError: null,
+        },
+      });
+      marked = itemsToMark.length;
+    }
+
+    // Find managed devices whose portal status is Enrolled/Approved/Locked/Unlocked
+    // but local enrollmentStatus is still PENDING or APPROVAL_QUEUED
+    const activePortalStatuses = new Set(
+      portalDevices
+        .filter((d: any) => ['Enrolled', 'Approved', 'Locked', 'Unlocked', 'LOCKED', 'UNLOCKED'].includes(d.status))
+        .map((d: any) => String(d.imei || d.deviceUid || '').trim())
+        .filter(Boolean)
+    );
+
+    const managedToActivate = await prisma.managedDevice.findMany({
+      where: {
+        deviceUid: { in: Array.from(activePortalStatuses) },
+        enrollmentStatus: { in: ['PENDING', 'APPROVAL_QUEUED'] },
+      },
+      select: { id: true, deviceUid: true },
+    });
+
+    let managed = 0;
+    for (const device of managedToActivate) {
+      const portalDevice = portalDevices.find((d: any) =>
+        String(d.imei || d.deviceUid || '').trim() === device.deviceUid
+      );
+      const portalStatus = portalDevice?.status || null;
+      const knoxObjectId = normalizeDeviceIdentifier(portalDevice?.id || portalDevice?.objectId);
+
+      await prisma.managedDevice.update({
+        where: { id: device.id },
+        data: {
+          enrollmentStatus: 'ACTIVE',
+          actualState: ['Locked', 'LOCKED'].includes(portalStatus) ? 'LOCKED' : 'UNLOCKED',
+          knoxStatus: portalStatus,
+          ...(knoxObjectId ? { knoxObjectId } : {}),
+          lastSyncedAt: new Date(),
+          lastError: null,
+        },
+      });
+      managed++;
+    }
+
+    res.json({
+      message: `Sync complete — ${marked} item(s) marked UPLOADED, ${managed} managed device(s) activated`,
+      marked,
+      managed,
+      portalTotal: portalDevices.length,
+      dryRun: portalResult.dryRun,
+    });
+  } catch (error) {
+    console.error('Knox upload sync error:', error);
+    res.status(500).json({ error: 'Failed to sync upload status from portal' });
+  }
+}
+
 // GET /api/knox-guard/devices/list-api
 // Lists all devices from the Devices API (not the local DB)
 export async function listDevicesFromDevicesApi(req: AuthenticatedRequest, res: Response): Promise<void> {
