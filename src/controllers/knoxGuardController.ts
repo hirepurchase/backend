@@ -40,7 +40,8 @@ export async function listKnoxGuardDevices(req: AuthenticatedRequest, res: Respo
     const page = Math.min(Math.max(parseInt(String(req.query.page || '1'), 10) || 1, 1), 100000);
     const limit = Math.min(Math.max(parseInt(String(req.query.limit || '10'), 10) || 10, 1), 100);
     const q = String(req.query.q || '').trim();
-    const result = await listManagedDevices({ page, limit, q });
+    const enrollmentStatus = String(req.query.enrollmentStatus || '').trim() || undefined;
+    const result = await listManagedDevices({ page, limit, q, enrollmentStatus });
     res.json(result);
   } catch (error) {
     console.error('List Knox Guard devices error:', error);

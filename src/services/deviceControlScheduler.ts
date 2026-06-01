@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { processPendingManagedDeviceCommands, resetStuckProcessingCommands } from './deviceControlPolicyService';
+import { syncManagedDevicesFromKnoxPortal } from '../controllers/knoxGuardUploadController';
 
 const DEVICE_CONTROL_CRON = process.env.KNOX_GUARD_COMMAND_CRON || '*/5 * * * *';
 const DEVICE_CONTROL_BATCH_SIZE = Number(process.env.KNOX_GUARD_COMMAND_BATCH_SIZE || '10');
@@ -34,6 +35,12 @@ export function startDeviceControlScheduler() {
         console.log(`📊 Processed: ${result.processed}`);
         console.log(`✅ Succeeded: ${result.succeeded}`);
         console.log(`❌ Failed: ${result.failed}`);
+
+        // Sync managed device states from Knox Guard portal
+        const synced = await syncManagedDevicesFromKnoxPortal();
+        if (synced > 0) {
+          console.log(`🔄 Knox portal sync: ${synced} device(s) state updated`);
+        }
 
         if (result.processed === 0) {
           console.log('ℹ️  No Knox Guard commands eligible for processing at this time');

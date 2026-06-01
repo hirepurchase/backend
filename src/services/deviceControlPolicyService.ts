@@ -1303,13 +1303,18 @@ export async function getManagedDeviceHealthSummary() {
   };
 }
 
-export async function listManagedDevices(options: { page?: number; limit?: number; q?: string } = {}) {
+export async function listManagedDevices(options: { page?: number; limit?: number; q?: string; enrollmentStatus?: string } = {}) {
   const page = Math.max(1, Number(options.page) || 1);
   const limit = Math.min(Math.max(1, Number(options.limit) || 10), 100);
   const q = String(options.q || '').trim();
+  const enrollmentStatus = options.enrollmentStatus || null;
+
+  const baseWhere: Record<string, unknown> = { isActive: true };
+  if (enrollmentStatus) baseWhere.enrollmentStatus = enrollmentStatus;
 
   const where = q
     ? {
+        ...baseWhere,
         OR: [
           { deviceUid: { contains: q, mode: 'insensitive' } },
           { approveId: { contains: q, mode: 'insensitive' } },
@@ -1320,7 +1325,7 @@ export async function listManagedDevices(options: { page?: number; limit?: numbe
           { inventoryItem: { is: { serialNumber: { contains: q, mode: 'insensitive' } } } },
         ],
       }
-    : {};
+    : baseWhere;
 
   const [devices, total] = await Promise.all([
     prismaAny.managedDevice.findMany({

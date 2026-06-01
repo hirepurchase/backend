@@ -11,6 +11,89 @@ import { AuthenticatedRequest } from '../types';
 
 const MAX_RETRIES = 5;
 
+// Knox Guard portal status → local state mapping
+function resolveStateFromPortalStatus(status: string | null): { enrollmentStatus: string; actualState: string } | null {
+  if (!status) return null;
+  const s = status.toLowerCase();
+  if (s === 'enrolled' || s === 'approved') return { enrollmentStatus: 'ACTIVE', actualState: 'UNLOCKED' };
+  if (s === 'locked') return { enrollmentStatus: 'ACTIVE', actualState: 'LOCKED' };
+  if (s === 'unlocked') return { enrollmentStatus: 'ACTIVE', actualState: 'UNLOCKED' };
+  // Accepted = Knox Guard app not yet connected — downgrade to APPROVAL_QUEUED
+  if (s === 'accepted') return { enrollmentStatus: 'APPROVAL_QUEUED', actualState: 'UNKNOWN' };
+  return null;
+}
+
+export async function syncManagedDevicesFromKnoxPortal(): Promise<number> {
+  const allManagedDevices = await (prisma as any).managedDevice.findMany({
+    where: { isActive: true },
+    select: { id: true, deviceUid: true, approveId: true, knoxObjectId: true, enrollmentStatus: true, actualState: true },
+  });
+
+  let synced = 0;
+  for (const device of allManagedDevices) {
+    try {
+      const lookup = await lookupKnoxGuardDevice({
+        objectId: device.knoxObjectId || undefined,
+        deviceUid: device.deviceUid,
+        approveId: device.approveId,
+      });
+
+      if (!lookup.success || lookup.dryRun) continue;
+
+      const deviceList = (lookup.data as any)?.deviceList;
+      const portalDevice = Array.isArray(deviceList)
+        ? deviceList.find((d: any) =>
+            d?.deviceUid === device.deviceUid ||
+            d?.imei === device.deviceUid ||
+            (device.knoxObjectId && d?.objectId === device.knoxObjectId)
+          ) ?? deviceList[0] ?? null
+        : null;
+
+      // Device not found on portal — if locally ACTIVE, downgrade to APPROVAL_QUEUED
+      if (!portalDevice) {
+        if (device.enrollmentStatus === 'ACTIVE') {
+          await (prisma as any).managedDevice.update({
+            where: { id: device.id },
+            data: {
+              enrollmentStatus: 'APPROVAL_QUEUED',
+              actualState: 'UNKNOWN',
+              lastSyncedAt: new Date(),
+              lastError: 'Device not found on Knox Guard portal',
+            },
+          });
+          synced++;
+        }
+        continue;
+      }
+
+      const portalStatus: string | null = portalDevice.status || null;
+      const resolved = resolveStateFromPortalStatus(portalStatus);
+      if (!resolved) continue;
+
+      // Only update if state has changed
+      const stateChanged = resolved.enrollmentStatus !== device.enrollmentStatus || resolved.actualState !== device.actualState;
+      if (!stateChanged) continue;
+
+      const knoxObjectId = normalizeDeviceIdentifier(portalDevice.objectId);
+      await (prisma as any).managedDevice.update({
+        where: { id: device.id },
+        data: {
+          enrollmentStatus: resolved.enrollmentStatus,
+          actualState: resolved.actualState,
+          knoxStatus: portalStatus,
+          ...(knoxObjectId ? { knoxObjectId } : {}),
+          lastSyncedAt: new Date(),
+          lastError: null,
+        },
+      });
+      synced++;
+    } catch (err) {
+      console.error(`Portal sync failed for device ${device.deviceUid}:`, err);
+    }
+  }
+  return synced;
+}
+
 function normalizeDeviceIdentifier(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null;
@@ -685,44 +768,8 @@ export async function syncUploadStatusFromPortal(req: AuthenticatedRequest, res:
       marked = itemsToMark.length;
     }
 
-    // Find managed devices whose portal status is Enrolled/Approved/Locked/Unlocked
-    // but local enrollmentStatus is still PENDING or APPROVAL_QUEUED
-    const activePortalStatuses = new Set(
-      portalDevices
-        .filter((d: any) => ['Enrolled', 'Approved', 'Locked', 'Unlocked', 'LOCKED', 'UNLOCKED'].includes(d.status))
-        .map((d: any) => String(d.imei || d.deviceUid || '').trim())
-        .filter(Boolean)
-    );
-
-    const managedToActivate = await prisma.managedDevice.findMany({
-      where: {
-        deviceUid: { in: Array.from(activePortalStatuses) },
-        enrollmentStatus: { in: ['PENDING', 'APPROVAL_QUEUED'] },
-      },
-      select: { id: true, deviceUid: true },
-    });
-
-    let managed = 0;
-    for (const device of managedToActivate) {
-      const portalDevice = portalDevices.find((d: any) =>
-        String(d.imei || d.deviceUid || '').trim() === device.deviceUid
-      );
-      const portalStatus = portalDevice?.status || null;
-      const knoxObjectId = normalizeDeviceIdentifier(portalDevice?.id || portalDevice?.objectId);
-
-      await prisma.managedDevice.update({
-        where: { id: device.id },
-        data: {
-          enrollmentStatus: 'ACTIVE',
-          actualState: ['Locked', 'LOCKED'].includes(portalStatus) ? 'LOCKED' : 'UNLOCKED',
-          knoxStatus: portalStatus,
-          ...(knoxObjectId ? { knoxObjectId } : {}),
-          lastSyncedAt: new Date(),
-          lastError: null,
-        },
-      });
-      managed++;
-    }
+    // Sync managed device states from Knox Guard portal
+    const managed = await syncManagedDevicesFromKnoxPortal();
 
     res.json({
       message: `Sync complete — ${marked} item(s) marked UPLOADED, ${managed} managed device(s) activated`,
