@@ -385,17 +385,6 @@ export async function lockKnoxGuardDevice(payload: DeviceIdentifier & {
   blockIncomingCalls?: boolean;
   allowIncomingNumbers?: string[];
   warningMessage?: string;
-  lockScreen?: {
-    supportPhone?: string | null;
-    supportMessage?: string | null;
-    paymentAppPackage?: string | null;
-    paymentAppLabel?: string | null;
-    paymentUssd?: string | null;
-    refreshActionLabel?: string | null;
-    allowCustomerAppOnLockScreen?: boolean;
-    allowSupportOnLockScreen?: boolean;
-    allowPaymentUssdOnLockScreen?: boolean;
-  } | null;
 }): Promise<KnoxGuardActionResult> {
   return postAction(KNOX_GUARD_PATHS.lockDevice, {
     ...normalizeIdentifier(payload),
@@ -405,7 +394,6 @@ export async function lockKnoxGuardDevice(payload: DeviceIdentifier & {
     ...(payload.blockIncomingCalls !== undefined ? { blockIncomingCalls: payload.blockIncomingCalls } : {}),
     ...(payload.allowIncomingNumbers?.length ? { allowIncomingNumbers: payload.allowIncomingNumbers } : {}),
     ...(payload.warningMessage ? { warningMessage: payload.warningMessage } : {}),
-    ...(payload.lockScreen ? { lockScreen: payload.lockScreen } : {}),
   });
 }
 

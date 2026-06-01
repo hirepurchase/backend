@@ -815,28 +815,14 @@ function buildLockCommandPayload(contract: any, metrics: { overdueAmount: number
     warningMessage: customerExperience.warningMessage,
     blockIncomingCalls: BLOCK_INCOMING_CALLS_ON_LOCK,
     allowIncomingNumbers: ALLOW_INCOMING_NUMBERS.length > 0 ? ALLOW_INCOMING_NUMBERS : undefined,
-    lockScreen: {
-      supportPhone: customerExperience.supportPhone,
-      supportMessage: customerExperience.supportMessage,
-      paymentAppPackage: customerExperience.paymentAppPackage,
-      paymentAppLabel: customerExperience.paymentAppLabel,
-      paymentUssd: customerExperience.paymentUssd,
-      refreshActionLabel: customerExperience.refreshActionLabel,
-      allowCustomerAppOnLockScreen: customerExperience.allowCustomerAppOnLockScreen,
-      allowSupportOnLockScreen: customerExperience.allowSupportOnLockScreen,
-      allowPaymentUssdOnLockScreen: customerExperience.allowPaymentUssdOnLockScreen,
-    },
   };
 }
 
 function buildBlinkCommandPayload(contract: any, metrics: { overdueAmount: number; maxDaysOverdue: number }, defaults: DeviceControlEnrollmentDefaults) {
   const customerExperience = extractCustomerExperience(parseJsonSafely(contract.managedDevice?.metadata), defaults);
   const customerPhone = contract.customer?.phone || null;
-  const message = [
-    customerExperience.warningMessage,
-    `Contract ${contract.contractNumber} overdue by GHS ${metrics.overdueAmount.toFixed(2)}.`,
-    customerExperience.supportMessage,
-  ].join(' ').slice(0, 200);
+  const ussd = customerExperience.paymentUssd ? ` ${customerExperience.paymentUssd}` : '';
+  const message = `Your account is overdue. Please make payment now to avoid or remove device restriction. Amount overdue by GHS ${metrics.overdueAmount.toFixed(2)}. Use the AIDOO TECH app, payment USSD${ussd}. Thank You`.slice(0, 200);
 
   return {
     message,
@@ -1616,7 +1602,6 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
       warningMessage: lockPayload.warningMessage,
       blockIncomingCalls: lockPayload.blockIncomingCalls,
       allowIncomingNumbers: lockPayload.allowIncomingNumbers,
-      lockScreen: lockPayload.lockScreen,
     });
     actionType = 'LOCK_DEVICE';
     if (actionResult.success || actionResult.dryRun) nextActualState = 'LOCKED';
@@ -1788,7 +1773,6 @@ export async function requestManagedDeviceLock(contractId: string, message?: str
     warningMessage: lockPayload.warningMessage,
     blockIncomingCalls: lockPayload.blockIncomingCalls,
     allowIncomingNumbers: lockPayload.allowIncomingNumbers,
-    lockScreen: lockPayload.lockScreen,
   });
 
   const nextState: ManagedDeviceState = result.dryRun || result.success ? 'LOCKED' : contract.managedDevice.actualState as ManagedDeviceState || 'UNKNOWN';
@@ -2077,7 +2061,6 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
             warningMessage: normalizeOptionalString(payload.warningMessage, null) || undefined,
             blockIncomingCalls: Boolean(payload.blockIncomingCalls ?? BLOCK_INCOMING_CALLS_ON_LOCK),
             allowIncomingNumbers: Array.isArray(payload.allowIncomingNumbers) ? payload.allowIncomingNumbers as string[] : undefined,
-            lockScreen: isRecord(payload.lockScreen) ? payload.lockScreen as any : undefined,
           });
           break;
         case 'UNLOCK_DEVICE':
