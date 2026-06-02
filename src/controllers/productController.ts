@@ -2,7 +2,12 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { getKnoxGuardUploadStatus, lookupKnoxGuardDevice, uploadKnoxGuardDevices } from '../services/knoxGuardService';
-import { requestManagedDeviceLock, requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
+import {
+  requestManagedDeviceLock,
+  requestManagedDeviceUnlock,
+  requestStandaloneInventoryDeviceLock,
+  requestStandaloneInventoryDeviceUnlock,
+} from '../services/deviceControlPolicyService';
 import { AuthenticatedRequest } from '../types';
 
 const KNOX_UPLOAD_POLL_ATTEMPTS = 5;
@@ -805,7 +810,10 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
 
     // Route through Knox if the item has a contract or an active managed device
     const contractId = item.managedDevice?.contractId ?? (item as any).contract?.id ?? null;
-    const hasManagedDevice = item.managedDevice?.isActive && ['ACTIVE', 'APPROVED', 'APPROVAL_QUEUED'].includes(item.managedDevice?.enrollmentStatus ?? '');
+    const shouldUseStandaloneKnox = !contractId && (
+      Boolean(item.managedDevice)
+      || Boolean(item.knoxUploadStatus)
+    );
 
     if (contractId) {
       const result = lockStatus === 'LOCKED'
@@ -832,6 +840,9 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
         id: item.id,
         serialNumber: item.serialNumber,
         lockStatus: result.actualState === 'LOCKED' ? 'LOCKED' : result.actualState === 'UNLOCKED' ? 'UNLOCKED' : item.lockStatus,
+        via: 'knox_guard',
+        knoxActionAttempted: true,
+        knoxCommandQueued: false,
         dryRun: result.dryRun,
         message: result.dryRun
           ? `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} simulated (dry-run)`
@@ -840,81 +851,53 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
       return;
     }
 
-    // Active managed device with no contract — lock/unlock directly via Knox Guard identifiers
-    if (hasManagedDevice && item.managedDevice) {
-      const managedDeviceRecord = await prisma.managedDevice.findUnique({
-        where: { id: item.managedDevice.id },
-        select: { deviceUid: true, approveId: true, knoxObjectId: true, enrollmentStatus: true },
+    // Standalone inventory device path — use Knox even without a contract when the item
+    // already has Knox state or has been uploaded to the Knox tenant.
+    if (shouldUseStandaloneKnox) {
+      const result = lockStatus === 'LOCKED'
+        ? await requestStandaloneInventoryDeviceLock(id)
+        : await requestStandaloneInventoryDeviceUnlock(id);
+
+      await createAuditLog({
+        userId: req.user!.id,
+        action: lockStatus === 'LOCKED' ? 'KNOX_LOCK_FROM_INVENTORY' : 'KNOX_UNLOCK_FROM_INVENTORY',
+        entity: 'InventoryItem',
+        entityId: id,
+        oldValues: { lockStatus: item.lockStatus },
+        newValues: {
+          lockStatus,
+          via: 'knox_guard_standalone',
+          success: result.success,
+          dryRun: result.dryRun,
+          autoEnrolled: result.autoEnrolled,
+          managedDeviceId: result.managedDeviceId,
+        },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'],
       });
 
-      if (managedDeviceRecord) {
-        const { lockKnoxGuardDevice, unlockKnoxGuardDevice, approveKnoxGuardDevice } = await import('../services/knoxGuardService');
-        // Use only objectId when available — Samsung rejects mixed identifier params
-        const identifier = managedDeviceRecord.knoxObjectId
-          ? { objectId: managedDeviceRecord.knoxObjectId }
-          : { deviceUid: managedDeviceRecord.deviceUid, approveId: managedDeviceRecord.approveId || undefined };
-
-        // Auto-approve if not yet approved — required before Samsung accepts lock/unlock
-        if (lockStatus === 'LOCKED' && managedDeviceRecord.enrollmentStatus !== 'ACTIVE') {
-          const approveResult = await approveKnoxGuardDevice(identifier);
-          if (approveResult.success) {
-            await (prisma as any).managedDevice.update({
-              where: { id: item.managedDevice.id },
-              data: { enrollmentStatus: 'APPROVED', lastKnoxAction: 'APPROVE_DEVICE', lastTransactionId: approveResult.transactionId || null },
-            });
-          }
-        }
-
-        const result = lockStatus === 'LOCKED'
-          ? await lockKnoxGuardDevice({
-              ...identifier,
-              message: 'This Phone is locked Awaiting Contract, Contact AidooTech Manager.',
-              tel: '0530505547',
-            })
-          : await unlockKnoxGuardDevice({ ...identifier });
-
-        if (result.success || result.dryRun) {
-          await prisma.inventoryItem.update({ where: { id }, data: { lockStatus } });
-          await (prisma as any).managedDevice.update({
-            where: { id: item.managedDevice.id },
-            data: {
-              actualState: lockStatus === 'LOCKED' ? 'LOCKED' : 'UNLOCKED',
-              desiredState: lockStatus === 'LOCKED' ? 'LOCKED' : 'UNLOCKED',
-              lastSyncedAt: new Date(),
-              lastKnoxAction: lockStatus === 'LOCKED' ? 'LOCK_DEVICE' : 'UNLOCK_DEVICE',
-              lastTransactionId: result.transactionId || null,
-              lastError: null,
-            },
-          });
-        }
-
-        await createAuditLog({
-          userId: req.user!.id,
-          action: lockStatus === 'LOCKED' ? 'KNOX_LOCK_FROM_INVENTORY' : 'KNOX_UNLOCK_FROM_INVENTORY',
-          entity: 'InventoryItem',
-          entityId: id,
-          oldValues: { lockStatus: item.lockStatus },
-          newValues: { lockStatus, via: 'knox_guard_direct', success: result.success },
-          ipAddress: req.ip,
-          userAgent: req.headers['user-agent'],
-        });
-
-        if (!result.success && !result.dryRun) {
-          res.status(502).json({ error: result.error || `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} failed` });
-          return;
-        }
-
-        res.json({
-          id: item.id,
-          serialNumber: item.serialNumber,
-          lockStatus,
-          dryRun: result.dryRun,
-          message: result.dryRun
-            ? `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} simulated (dry-run)`
-            : `Device ${lockStatus === 'LOCKED' ? 'locked' : 'unlocked'} successfully via Knox Guard`,
-        });
+      if (!result.success && !result.dryRun) {
+        res.status(502).json({ error: result.error || `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} failed` });
         return;
       }
+
+      res.json({
+        id: item.id,
+        serialNumber: item.serialNumber,
+        lockStatus: result.actualState === 'LOCKED' ? 'LOCKED' : result.actualState === 'UNLOCKED' ? 'UNLOCKED' : item.lockStatus,
+        via: 'knox_guard_standalone',
+        knoxActionAttempted: true,
+        knoxCommandQueued: false,
+        dryRun: result.dryRun,
+        autoEnrolled: result.autoEnrolled,
+        managedDeviceId: result.managedDeviceId,
+        message: result.dryRun
+          ? `Knox Guard ${lockStatus === 'LOCKED' ? 'lock' : 'unlock'} simulated (dry-run)`
+          : result.autoEnrolled
+            ? `Device ${lockStatus === 'LOCKED' ? 'locked' : 'unlocked'} successfully via Knox Guard after standalone enrollment`
+            : `Device ${lockStatus === 'LOCKED' ? 'locked' : 'unlocked'} successfully via Knox Guard`,
+      });
+      return;
     }
 
     // No Knox device — just update the local DB flag
@@ -935,7 +918,16 @@ export async function updateInventoryLockStatus(req: AuthenticatedRequest, res: 
       userAgent: req.headers['user-agent'],
     });
 
-    res.json({ id: updated.id, serialNumber: updated.serialNumber, lockStatus: updated.lockStatus, knoxCommandQueued: false });
+    res.json({
+      id: updated.id,
+      serialNumber: updated.serialNumber,
+      lockStatus: updated.lockStatus,
+      via: 'local',
+      knoxActionAttempted: false,
+      knoxCommandQueued: false,
+      dryRun: false,
+      message: `Device marked as ${lockStatus === 'LOCKED' ? 'locked' : 'unlocked'} locally`,
+    });
   } catch (error) {
     console.error('Update inventory lock status error:', error);
     res.status(500).json({ error: 'Failed to update lock status' });

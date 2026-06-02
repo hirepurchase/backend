@@ -197,6 +197,10 @@ function buildApproveId(contractNumber: string): string {
   return contractNumber;
 }
 
+function buildStandaloneInventoryApproveId(serialNumber: string): string {
+  return `INV-${serialNumber}`;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -831,6 +835,16 @@ function buildBlinkCommandPayload(contract: any, metrics: { overdueAmount: numbe
   };
 }
 
+function buildStandaloneInventoryLockPayload(defaults: DeviceControlEnrollmentDefaults) {
+  return {
+    message: 'This phone has been restricted because it is not yet linked to an active hire purchase contract. Please contact AIDOO TECH support to continue.',
+    tel: defaults.supportPhone || '0530505547',
+    warningMessage: defaults.warningMessage,
+    blockIncomingCalls: BLOCK_INCOMING_CALLS_ON_LOCK,
+    allowIncomingNumbers: ALLOW_INCOMING_NUMBERS.length > 0 ? ALLOW_INCOMING_NUMBERS : undefined,
+  };
+}
+
 function makeIdempotencyKey(deviceId: string, type: ManagedDeviceCommandType): string {
   return `${deviceId}:${type}:${new Date().toISOString()}`;
 }
@@ -1164,6 +1178,231 @@ export async function enrollManagedDeviceManual(input: {
     dryRun: result.dryRun,
     transactionId: result.transactionId,
     error: result.error,
+  };
+}
+
+async function ensureStandaloneManagedDeviceForInventoryItem(inventoryItemId: string) {
+  const inventoryItem = await prismaAny.inventoryItem.findUnique({
+    where: { id: inventoryItemId },
+    include: {
+      managedDevice: true,
+    },
+  });
+
+  if (!inventoryItem) {
+    throw new Error('Inventory item not found');
+  }
+
+  if (inventoryItem.contractId) {
+    throw new Error('Inventory item already belongs to a contract');
+  }
+
+  if (!inventoryItem.serialNumber) {
+    throw new Error('Inventory item has no serial number or IMEI');
+  }
+
+  let managedDevice = inventoryItem.managedDevice
+    || await prismaAny.managedDevice.findFirst({
+      where: {
+        deviceUid: inventoryItem.serialNumber,
+      },
+      orderBy: {
+        updatedAt: 'desc',
+      },
+    });
+
+  if (managedDevice) {
+    if (managedDevice.contractId) {
+      throw new Error('This Knox-managed device is already linked to a contract');
+    }
+
+    if (managedDevice.inventoryItemId !== inventoryItem.id || !managedDevice.isActive) {
+      managedDevice = await prismaAny.managedDevice.update({
+        where: { id: managedDevice.id },
+        data: {
+          inventoryItemId: inventoryItem.id,
+          isActive: true,
+          lastError: null,
+        },
+      });
+    }
+
+    return {
+      inventoryItem,
+      managedDevice,
+      autoEnrolled: false,
+    };
+  }
+
+  const knoxConfig = getKnoxGuardConfigurationSummary();
+  if (!knoxConfig.dryRun && inventoryItem.knoxUploadStatus !== 'UPLOADED') {
+    throw new Error('Upload this device to Knox before using standalone inventory locking.');
+  }
+
+  const enrollResult = await enrollManagedDeviceManual({
+    deviceUid: inventoryItem.serialNumber,
+    deviceUidType: 'SERIAL_NUMBER',
+    approveId: buildStandaloneInventoryApproveId(inventoryItem.serialNumber),
+    note: 'Auto-enrolled from inventory standalone device control.',
+  });
+
+  managedDevice = await prismaAny.managedDevice.findUnique({
+    where: { id: enrollResult.managedDeviceId },
+  });
+
+  if (!managedDevice) {
+    throw new Error('Standalone Knox enrollment succeeded but the managed device record could not be loaded');
+  }
+
+  return {
+    inventoryItem,
+    managedDevice,
+    autoEnrolled: true,
+  };
+}
+
+export async function requestStandaloneInventoryDeviceLock(inventoryItemId: string, message?: string) {
+  const defaults = await getDeviceControlEnrollmentDefaults();
+  const {
+    managedDevice: existingManagedDevice,
+    autoEnrolled,
+  } = await ensureStandaloneManagedDeviceForInventoryItem(inventoryItemId);
+
+  let managedDevice = existingManagedDevice;
+  const enrollmentStatus = resolveEnrollmentState(managedDevice.enrollmentStatus) || 'PENDING';
+  let approveResult: Awaited<ReturnType<typeof approveKnoxGuardDevice>> | null = null;
+
+  if (enrollmentStatus !== 'ACTIVE') {
+    approveResult = await approveKnoxGuardDevice({
+      ...getManagedDeviceIdentifier(managedDevice),
+      approveComment: `Standalone inventory device ${managedDevice.deviceUid}`,
+    });
+
+    managedDevice = await prismaAny.managedDevice.update({
+      where: { id: managedDevice.id },
+      data: {
+        enrollmentStatus: approveResult.success || approveResult.dryRun ? 'APPROVED' : 'APPROVAL_QUEUED',
+        lastSyncedAt: new Date(),
+        lastKnoxAction: 'APPROVE_DEVICE',
+        lastTransactionId: approveResult.transactionId || null,
+        lastError: approveResult.success || approveResult.dryRun ? null : (approveResult.error || 'Approval failed'),
+      },
+    });
+  }
+
+  const lockPayload = buildStandaloneInventoryLockPayload(defaults);
+  const result = await lockKnoxGuardDevice({
+    ...getManagedDeviceIdentifier(managedDevice),
+    message: message || lockPayload.message,
+    tel: lockPayload.tel,
+    warningMessage: lockPayload.warningMessage,
+    blockIncomingCalls: lockPayload.blockIncomingCalls,
+    allowIncomingNumbers: lockPayload.allowIncomingNumbers,
+  });
+
+  const nextState: ManagedDeviceState = result.dryRun || result.success
+    ? 'LOCKED'
+    : resolveManagedState(managedDevice.actualState) || 'UNKNOWN';
+
+  await prisma.$transaction(async (tx) => {
+    const txAny = tx as any;
+
+    await txAny.managedDevice.update({
+      where: { id: managedDevice.id },
+      data: {
+        desiredState: 'LOCKED',
+        actualState: nextState,
+        enrollmentStatus: result.success || result.dryRun
+          ? 'ACTIVE'
+          : approveResult?.success || approveResult?.dryRun
+            ? 'APPROVED'
+            : managedDevice.enrollmentStatus,
+        lastLockedAt: result.success || result.dryRun ? new Date() : undefined,
+        lastEvaluatedAt: new Date(),
+        lastSyncedAt: new Date(),
+        lastKnoxAction: 'LOCK_DEVICE',
+        lastTransactionId: result.transactionId || null,
+        lastError: result.success || result.dryRun ? null : (result.error || 'Lock failed'),
+      },
+    });
+
+    if (result.success || result.dryRun) {
+      await txAny.inventoryItem.update({
+        where: { id: inventoryItemId },
+        data: { lockStatus: 'LOCKED' },
+      });
+    }
+  });
+
+  return {
+    success: result.success,
+    dryRun: result.dryRun,
+    transactionId: result.transactionId,
+    actualState: nextState,
+    error: result.error,
+    autoEnrolled,
+    managedDeviceId: managedDevice.id,
+  };
+}
+
+export async function requestStandaloneInventoryDeviceUnlock(inventoryItemId: string, reason?: string) {
+  const {
+    managedDevice,
+    autoEnrolled,
+  } = await ensureStandaloneManagedDeviceForInventoryItem(inventoryItemId);
+
+  const unlockMessage = reason || 'Standalone inventory device unlocked by administrator.';
+
+  let result = await unlockKnoxGuardDevice({
+    ...getManagedDeviceIdentifier(managedDevice),
+    message: unlockMessage,
+  });
+  for (let attempt = 2; attempt <= 3 && !result.success && !result.dryRun; attempt++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    result = await unlockKnoxGuardDevice({
+      ...getManagedDeviceIdentifier(managedDevice),
+      message: unlockMessage,
+    });
+  }
+
+  const nextState: ManagedDeviceState = result.dryRun || result.success
+    ? 'UNLOCKED'
+    : resolveManagedState(managedDevice.actualState) || 'UNKNOWN';
+
+  await prisma.$transaction(async (tx) => {
+    const txAny = tx as any;
+
+    await txAny.managedDevice.update({
+      where: { id: managedDevice.id },
+      data: {
+        desiredState: 'UNLOCKED',
+        actualState: nextState,
+        enrollmentStatus: result.success || result.dryRun ? 'ACTIVE' : managedDevice.enrollmentStatus,
+        lastUnlockedAt: result.success || result.dryRun ? new Date() : undefined,
+        lastEvaluatedAt: new Date(),
+        lastSyncedAt: new Date(),
+        lastKnoxAction: 'UNLOCK_DEVICE',
+        lastTransactionId: result.transactionId || null,
+        lastError: result.success || result.dryRun ? null : (result.error || 'Unlock failed'),
+      },
+    });
+
+    if (result.success || result.dryRun) {
+      await txAny.inventoryItem.update({
+        where: { id: inventoryItemId },
+        data: { lockStatus: 'UNLOCKED' },
+      });
+    }
+  });
+
+  return {
+    success: result.success,
+    dryRun: result.dryRun,
+    transactionId: result.transactionId,
+    actualState: nextState,
+    error: result.error,
+    autoEnrolled,
+    managedDeviceId: managedDevice.id,
   };
 }
 
