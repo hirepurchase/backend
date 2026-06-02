@@ -768,12 +768,35 @@ export async function syncUploadStatusFromPortal(req: AuthenticatedRequest, res:
       marked = itemsToMark.length;
     }
 
+    // Auto-enroll devices on portal that have a contract but no ManagedDevice record
+    let enrolled = 0;
+    const inventoryWithContracts = await prisma.inventoryItem.findMany({
+      where: {
+        serialNumber: { in: Array.from(portalImeis) },
+        contractId: { not: null },
+        managedDevice: null,
+      },
+      select: { contractId: true, serialNumber: true },
+    });
+
+    for (const item of inventoryWithContracts) {
+      if (!item.contractId) continue;
+      try {
+        const { enrollManagedDeviceForContract } = await import('../services/deviceControlPolicyService');
+        await enrollManagedDeviceForContract(item.contractId, {});
+        enrolled++;
+      } catch (err: any) {
+        console.error(`Auto-enroll failed for ${item.serialNumber}:`, err?.message);
+      }
+    }
+
     // Sync managed device states from Knox Guard portal
     const managed = await syncManagedDevicesFromKnoxPortal();
 
     res.json({
-      message: `Sync complete — ${marked} item(s) marked UPLOADED, ${managed} managed device(s) activated`,
+      message: `Sync complete — ${marked} item(s) marked UPLOADED, ${enrolled} device(s) enrolled, ${managed} device(s) activated`,
       marked,
+      enrolled,
       managed,
       portalTotal: portalDevices.length,
       dryRun: portalResult.dryRun,

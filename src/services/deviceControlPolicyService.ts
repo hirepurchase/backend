@@ -1118,6 +1118,12 @@ export async function enrollManagedDeviceManual(input: {
     note: note || null,
   };
 
+  // Auto-link inventory item if one exists with this serial number
+  const linkedInventoryItem = await prismaAny.inventoryItem.findFirst({
+    where: { serialNumber: deviceUid },
+    select: { id: true },
+  });
+
   const managedDevice = await prismaAny.managedDevice.create({
     data: {
       deviceUid,
@@ -1125,7 +1131,7 @@ export async function enrollManagedDeviceManual(input: {
       approveId: resolvedApproveId,
       contractId: null,
       customerId_uuid: null,
-      inventoryItemId: null,
+      inventoryItemId: linkedInventoryItem?.id || null,
       enrollmentStatus: 'APPROVAL_QUEUED',
       desiredState: 'UNLOCKED',
       isActive: true,
@@ -1584,10 +1590,12 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const shouldLock = isOverdueEnoughToLock;
   const shouldBlink = BLINK_BEFORE_LOCK_ENABLED && isOverdueEnoughToBlink && !isOverdueEnoughToLock;
   const shouldUnlock = deviceIsLockedOrPending && metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
+  // Also unlock if admin explicitly set desiredState=UNLOCKED but device is still locked
+  const pendingAdminUnlock = contract.managedDevice.desiredState === 'UNLOCKED' && actualState === 'LOCKED';
   const needsLockCommand = shouldLock
     && deviceCanAcceptControlCommand
     && !['LOCKED', 'PENDING'].includes(actualState);
-  const needsUnlockCommand = shouldUnlock
+  const needsUnlockCommand = (shouldUnlock || pendingAdminUnlock)
     && deviceCanAcceptControlCommand
     && !['UNLOCKED', 'PENDING'].includes(actualState);
 
@@ -1824,10 +1832,12 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
   const identifier = getManagedDeviceIdentifier(contract.managedDevice);
   const unlockMessage = reason || 'Manual unlock requested by administrator.';
 
-  const result = await unlockKnoxGuardDevice({
-    ...identifier,
-    message: unlockMessage,
-  });
+  // Retry up to 3 times with 3s delay between attempts
+  let result = await unlockKnoxGuardDevice({ ...identifier, message: unlockMessage });
+  for (let attempt = 2; attempt <= 3 && !result.success && !result.dryRun; attempt++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    result = await unlockKnoxGuardDevice({ ...identifier, message: unlockMessage });
+  }
 
   const nextState: ManagedDeviceState = result.dryRun || result.success ? 'UNLOCKED' : contract.managedDevice.actualState as ManagedDeviceState || 'UNKNOWN';
 
@@ -1836,7 +1846,7 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
     await txAny.managedDevice.update({
       where: { id: contract.managedDevice.id },
       data: {
-        desiredState: 'UNLOCKED',
+        desiredState: 'UNLOCKED', // always set — cron will retry if Knox rejected
         actualState: nextState,
         enrollmentStatus: 'ACTIVE',
         lastUnlockedAt: result.success || result.dryRun ? new Date() : undefined,
@@ -1844,7 +1854,7 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
         lastSyncedAt: new Date(),
         lastKnoxAction: 'UNLOCK_DEVICE',
         lastTransactionId: result.transactionId || null,
-        lastError: result.success || result.dryRun ? null : (result.error || 'Unlock failed'),
+        lastError: result.success || result.dryRun ? null : (result.error || 'Unlock failed — will retry on next cron cycle'),
       },
     });
 
