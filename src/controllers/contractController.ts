@@ -2,7 +2,13 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendContractConfirmation, sendContractSubmittedForApprovalNotification } from '../services/notificationService';
-import { unenrollManagedDeviceForContract, safelyEvaluateManagedDeviceForContract, enrollManagedDeviceForContract } from '../services/deviceControlPolicyService';
+import {
+  unenrollManagedDeviceForContract,
+  safelyEvaluateManagedDeviceForContract,
+  enrollManagedDeviceForContract,
+  linkManagedDeviceToContract,
+  requestManagedDeviceUnlock,
+} from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
@@ -26,6 +32,173 @@ function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCre
   }
 
   return hasPermission(permissions, PERMISSIONS.VIEW_OWN_CONTRACTS) && contractCreatedById === adminUser?.id;
+}
+
+type ContractCreateDeviceUnlockStatus = 'skipped' | 'succeeded' | 'pending';
+
+interface ContractCreateDeviceUnlockResult {
+  requested: boolean;
+  attempted: boolean;
+  status: ContractCreateDeviceUnlockStatus;
+  message: string;
+  dryRun?: boolean;
+  transactionId?: string | null;
+  via?: 'existing_contract_device' | 'linked_standalone_device' | 'auto_enrolled_contract_device' | 'awaiting_approval_enrollment';
+}
+
+function isTruthyFormValue(value: unknown): boolean {
+  return value === true || value === 'true' || value === '1' || value === 1;
+}
+
+async function handleContractCreateDeviceUnlock(options: {
+  contractId: string;
+  inventoryItemId: string;
+  contractStatus: string;
+  unlockRequested: boolean;
+  inventoryWasLocked: boolean;
+}): Promise<{
+  deviceUnlock: ContractCreateDeviceUnlockResult;
+  enrollmentHandled: boolean;
+  skipAutoEnroll: boolean;
+}> {
+  const {
+    contractId,
+    inventoryItemId,
+    contractStatus,
+    unlockRequested,
+    inventoryWasLocked,
+  } = options;
+
+  if (!unlockRequested) {
+    return {
+      deviceUnlock: {
+        requested: false,
+        attempted: false,
+        status: 'skipped',
+        message: 'Unlock not requested during contract creation.',
+      },
+      enrollmentHandled: false,
+      skipAutoEnroll: false,
+    };
+  }
+
+  if (!inventoryWasLocked) {
+    return {
+      deviceUnlock: {
+        requested: true,
+        attempted: false,
+        status: 'skipped',
+        message: 'Unlock skipped because the device was not locked when the contract was created.',
+      },
+      enrollmentHandled: false,
+      skipAutoEnroll: false,
+    };
+  }
+
+  let enrollmentHandled = false;
+  let skipAutoEnroll = false;
+  let via: ContractCreateDeviceUnlockResult['via'] = 'existing_contract_device';
+
+  try {
+    const standaloneManagedDevice = await prisma.managedDevice.findUnique({
+      where: { inventoryItemId },
+      select: { id: true, contractId: true },
+    });
+
+    if (standaloneManagedDevice?.id && !standaloneManagedDevice.contractId) {
+      try {
+        await linkManagedDeviceToContract(standaloneManagedDevice.id, contractId);
+        via = 'linked_standalone_device';
+      } catch (linkError) {
+        console.error(`Failed to link standalone managed device to contract ${contractId}:`, linkError);
+      }
+    }
+
+    const contractManagedDevice = await prisma.managedDevice.findUnique({
+      where: { contractId },
+      select: { id: true },
+    });
+
+    if (!contractManagedDevice) {
+      if (contractStatus !== 'ACTIVE') {
+        return {
+          deviceUnlock: {
+            requested: true,
+            attempted: false,
+            status: 'pending',
+            message: 'Contract created. Unlock will wait until the device is enrolled after approval.',
+            via: 'awaiting_approval_enrollment',
+          },
+          enrollmentHandled,
+          skipAutoEnroll,
+        };
+      }
+
+      await enrollManagedDeviceForContract(contractId, {});
+      enrollmentHandled = true;
+      skipAutoEnroll = true;
+      via = 'auto_enrolled_contract_device';
+    } else {
+      skipAutoEnroll = true;
+    }
+
+    const result = await requestManagedDeviceUnlock(contractId, 'Device unlocked on contract creation.');
+    if (result.success || result.dryRun) {
+      return {
+        deviceUnlock: {
+          requested: true,
+          attempted: true,
+          status: 'succeeded',
+          message: result.dryRun
+            ? 'Device unlock simulated during contract creation.'
+            : 'Device unlocked during contract creation.',
+          dryRun: result.dryRun,
+          transactionId: result.transactionId || null,
+          via,
+        },
+        enrollmentHandled,
+        skipAutoEnroll,
+      };
+    }
+
+    await safelyEvaluateManagedDeviceForContract(contractId);
+
+    return {
+      deviceUnlock: {
+        requested: true,
+        attempted: true,
+        status: 'pending',
+        message: 'Unlock requested during contract creation and will continue retrying.',
+        dryRun: result.dryRun,
+        transactionId: result.transactionId || null,
+        via,
+      },
+      enrollmentHandled,
+      skipAutoEnroll,
+    };
+  } catch (error: any) {
+    console.error(`Contract-create Knox unlock failed for contract ${contractId}:`, error);
+
+    if (error?.message !== 'Managed device not found for contract') {
+      await safelyEvaluateManagedDeviceForContract(contractId);
+    }
+
+    return {
+      deviceUnlock: {
+        requested: true,
+        attempted: error?.message !== 'Managed device not found for contract',
+        status: 'pending',
+        message: contractStatus !== 'ACTIVE' && error?.message === 'Managed device not found for contract'
+          ? 'Contract created. Unlock will wait until the device is enrolled after approval.'
+          : 'Contract created. Unlock is pending while Knox finishes syncing the device.',
+        via: contractStatus !== 'ACTIVE' && error?.message === 'Managed device not found for contract'
+          ? 'awaiting_approval_enrollment'
+          : via,
+      },
+      enrollmentHandled,
+      skipAutoEnroll,
+    };
+  }
 }
 
 export async function createContractPreflight(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -82,6 +255,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       mobileMoneyNetwork,
       mobileMoneyNumber,
       lockStatus,
+      unlockOnContract,
       registeredUnder,
     } = req.body;
 
@@ -155,6 +329,10 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       res.status(400).json({ error: 'Inventory item is not available' });
       return;
     }
+
+    const inventoryWasLocked = inventoryItem.lockStatus === 'LOCKED';
+    const unlockRequested = isTruthyFormValue(unlockOnContract);
+    const shouldUnlockLockedDeviceOnCreate = unlockRequested && inventoryWasLocked;
 
     const guardrails = await evaluateContractSubmissionGuardrails({
       customerId,
@@ -274,7 +452,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
         data: {
           status: requiresApproval ? 'RESERVED' : 'SOLD',
           contractId: newContract.id,
-          lockStatus: lockStatus || undefined,
+          lockStatus: shouldUnlockLockedDeviceOnCreate ? undefined : lockStatus || undefined,
           registeredUnder: registeredUnder || undefined,
         },
       });
@@ -398,8 +576,30 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       });
     }
 
+    let deviceUnlock: ContractCreateDeviceUnlockResult = {
+      requested: unlockRequested,
+      attempted: false,
+      status: 'skipped',
+      message: 'Unlock not requested during contract creation.',
+    };
+    let enrollmentHandledDuringUnlock = false;
+    let skipAutoEnroll = false;
+
+    if (completeContract) {
+      const unlockResult = await handleContractCreateDeviceUnlock({
+        contractId: completeContract.id,
+        inventoryItemId,
+        contractStatus: completeContract.status,
+        unlockRequested,
+        inventoryWasLocked,
+      });
+      deviceUnlock = unlockResult.deviceUnlock;
+      enrollmentHandledDuringUnlock = unlockResult.enrollmentHandled;
+      skipAutoEnroll = unlockResult.skipAutoEnroll;
+    }
+
     // Auto-enroll into Knox Guard for contracts that are immediately ACTIVE
-    if (!requiresApproval && completeContract) {
+    if (!requiresApproval && completeContract && !enrollmentHandledDuringUnlock && !skipAutoEnroll) {
       enrollManagedDeviceForContract(completeContract.id, {}).catch((err) => {
         console.error(`Knox Guard auto-enroll failed for contract ${completeContract.contractNumber}:`, err);
       });
@@ -408,6 +608,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     res.status(201).json({
       ...completeContract,
       guardrails: requiresApproval ? guardrails : undefined,
+      deviceUnlock,
     });
   } catch (error: any) {
     console.error('Create contract error:', error);
