@@ -424,8 +424,9 @@ async function syncManagedDevicesAfterDeletion(serialNumbers: string[], transact
 // GET /api/knox-guard/upload/status
 export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { status, page = 1, limit = 50, includePortal, q } = req.query;
+    const { status, page = 1, limit = 50, includePortal, q, withoutContract } = req.query;
     const includePortalData = String(includePortal || '').toLowerCase() === 'true';
+    const withoutContractOnly = String(withoutContract || '').toLowerCase() === 'true';
     const normalizedQuery = String(q || '').trim();
     const pageNumber = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNumber = Math.min(Math.max(1, parseInt(String(limit), 10) || 50), 100);
@@ -434,6 +435,7 @@ export async function getKnoxUploadStatuses(req: AuthenticatedRequest, res: Resp
       knoxUploadStatus: { not: null },
     };
     if (status) where.knoxUploadStatus = status;
+    if (withoutContractOnly) where.contractId = null;
     if (normalizedQuery) {
       where.OR = [
         { serialNumber: { contains: normalizedQuery, mode: 'insensitive' } },
