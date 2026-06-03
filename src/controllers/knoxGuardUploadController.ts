@@ -12,21 +12,34 @@ import { AuthenticatedRequest } from '../types';
 const MAX_RETRIES = 5;
 
 // Knox Guard portal status → local state mapping
-function resolveStateFromPortalStatus(status: string | null): { enrollmentStatus: string; actualState: string } | null {
-  if (!status) return null;
-  const s = status.toLowerCase();
-  if (s === 'enrolled' || s === 'approved') return { enrollmentStatus: 'ACTIVE', actualState: 'UNLOCKED' };
-  if (s === 'locked') return { enrollmentStatus: 'ACTIVE', actualState: 'LOCKED' };
-  if (s === 'unlocked') return { enrollmentStatus: 'ACTIVE', actualState: 'UNLOCKED' };
-  // Accepted = Knox Guard app not yet connected — downgrade to APPROVAL_QUEUED
-  if (s === 'accepted') return { enrollmentStatus: 'APPROVAL_QUEUED', actualState: 'UNKNOWN' };
-  return null;
+function resolveStateFromPortalStatus(
+  status: string | null
+): { enrollmentStatus: string; actualState: string; lastError: string | null } | null {
+  const derived = deriveManagedDeviceSyncFromPortalStatus(normalizeKnoxPortalStatus(status));
+  if (!derived.enrollmentStatus || !derived.actualState) {
+    return null;
+  }
+
+  return {
+    enrollmentStatus: derived.enrollmentStatus,
+    actualState: derived.actualState,
+    lastError: derived.lastError,
+  };
 }
 
 export async function syncManagedDevicesFromKnoxPortal(): Promise<number> {
   const allManagedDevices = await (prisma as any).managedDevice.findMany({
     where: { isActive: true },
-    select: { id: true, deviceUid: true, approveId: true, knoxObjectId: true, enrollmentStatus: true, actualState: true },
+    select: {
+      id: true,
+      deviceUid: true,
+      approveId: true,
+      knoxObjectId: true,
+      enrollmentStatus: true,
+      actualState: true,
+      knoxStatus: true,
+      lastError: true,
+    },
   });
 
   let synced = 0;
@@ -71,7 +84,10 @@ export async function syncManagedDevicesFromKnoxPortal(): Promise<number> {
       if (!resolved) continue;
 
       // Only update if state has changed
-      const stateChanged = resolved.enrollmentStatus !== device.enrollmentStatus || resolved.actualState !== device.actualState;
+      const stateChanged = resolved.enrollmentStatus !== device.enrollmentStatus
+        || resolved.actualState !== device.actualState
+        || portalStatus !== device.knoxStatus
+        || resolved.lastError !== device.lastError;
       if (!stateChanged) continue;
 
       const knoxObjectId = normalizeDeviceIdentifier(portalDevice.objectId);
@@ -83,7 +99,7 @@ export async function syncManagedDevicesFromKnoxPortal(): Promise<number> {
           knoxStatus: portalStatus,
           ...(knoxObjectId ? { knoxObjectId } : {}),
           lastSyncedAt: new Date(),
-          lastError: null,
+          lastError: resolved.lastError,
         },
       });
       synced++;
@@ -186,6 +202,14 @@ function deriveManagedDeviceSyncFromPortalStatus(status: string | null) {
       actualState: 'PENDING',
       enrollmentStatus: 'APPROVAL_QUEUED',
       lastError: 'Device uploaded to Knox and waiting for the Knox Guard app to connect.',
+    };
+  }
+
+  if (normalized === 'ENROLLED') {
+    return {
+      actualState: 'UNLOCKED',
+      enrollmentStatus: 'ACTIVE',
+      lastError: null,
     };
   }
 
