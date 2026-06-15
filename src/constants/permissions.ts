@@ -35,6 +35,10 @@ export const PERMISSIONS = {
   VIEW_AUDIT_LOGS: 'VIEW_AUDIT_LOGS',
   APPROVE_CONTRACT: 'APPROVE_CONTRACT',
   VIEW_CONTRACT_APPROVALS: 'VIEW_CONTRACT_APPROVALS',
+  VIEW_AGENT_COMMISSIONS: 'VIEW_AGENT_COMMISSIONS',
+  MANAGE_COMMISSION_SETTINGS: 'MANAGE_COMMISSION_SETTINGS',
+  MANAGE_AGENT_LEDGER: 'MANAGE_AGENT_LEDGER',
+  PAY_AGENT_DEPOSIT: 'PAY_AGENT_DEPOSIT',
 } as const;
 
 export type PermissionName = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -93,6 +97,10 @@ export const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
   { name: PERMISSIONS.VIEW_AUDIT_LOGS, description: 'View system audit trail', category: 'Administration', scope: 'all' },
   { name: PERMISSIONS.APPROVE_CONTRACT, description: 'Approve or request revision for contracts pending approval', category: 'Contracts', scope: 'action' },
   { name: PERMISSIONS.VIEW_CONTRACT_APPROVALS, description: 'View contracts pending approval', category: 'Contracts', scope: 'all' },
+  { name: PERMISSIONS.VIEW_AGENT_COMMISSIONS, description: 'View own commission and deposit ledger', category: 'Payments', scope: 'own' },
+  { name: PERMISSIONS.MANAGE_COMMISSION_SETTINGS, description: 'Configure agent commission settings', category: 'Administration', scope: 'action' },
+  { name: PERMISSIONS.MANAGE_AGENT_LEDGER, description: 'View all agents deposit and commission ledgers', category: 'Payments', scope: 'all' },
+  { name: PERMISSIONS.PAY_AGENT_DEPOSIT, description: 'Remit agent deposit collection to company via mobile money', category: 'Payments', scope: 'action' },
 ];
 
 export const CUSTOMER_ACCESS_PERMISSIONS = [

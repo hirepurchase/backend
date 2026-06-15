@@ -48,6 +48,8 @@ model AdminUser {
   contractsApproved     HirePurchaseContract[] @relation("ContractApprovedBy")
   contractsWrittenOff   HirePurchaseContract[] @relation("ContractWrittenOffBy")
   auditLogs             AuditLog[]
+  agentLedgerEntries    AgentDepositLedger[]   @relation("AgentLedger")
+  assignedInventory     InventoryItem[]        @relation("AgentAssignedInventory")
   createdAt             DateTime              @default(now())
   updatedAt             DateTime              @updatedAt
 }
@@ -67,6 +69,8 @@ model Customer {
   nationalId          String?
   dateOfBirth         DateTime?
   photoUrl            String?               // Customer passport photo
+  guarantorName       String?
+  guarantorPhone      String?
   isActivated         Boolean               @default(false)
   activatedAt         DateTime?
   createdById         String
@@ -100,9 +104,23 @@ model Product {
   categoryId      String
   category        ProductCategory  @relation(fields: [categoryId], references: [id])
   inventoryItems  InventoryItem[]
+  pricings        ProductPricing[]
   isActive        Boolean          @default(true)
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
+}
+
+model ProductPricing {
+  id                String   @id @default(uuid())
+  productId         String
+  product           Product  @relation(fields: [productId], references: [id])
+  installmentMonths Int      // 3, 4, or 6
+  basePrice         Float
+  depositAmount     Float
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([productId, installmentMonths])
 }
 
 model InventoryItem {
@@ -113,6 +131,8 @@ model InventoryItem {
   status            String                @default("AVAILABLE") // AVAILABLE, SOLD, RESERVED
   lockStatus        String?               @default("UNLOCKED") // LOCKED, UNLOCKED
   registeredUnder   String?               // Name registered under (optional)
+  assignedAgentId   String?               // Agent exclusively allowed to create contracts with this device
+  assignedAgent     AdminUser?            @relation("AgentAssignedInventory", fields: [assignedAgentId], references: [id])
   contractId        String?               @unique
   contract          HirePurchaseContract? @relation(fields: [contractId], references: [id])
   managedDevice     ManagedDevice?
@@ -166,6 +186,7 @@ model HirePurchaseContract {
   installments        InstallmentSchedule[]
   payments            PaymentTransaction[]
   penalties           Penalty[]
+  agentLedger         AgentDepositLedger?
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
@@ -441,4 +462,56 @@ model PasswordResetOtp {
 
   @@index([phone, expiresAt])
   @@index([customerId_uuid])
+}
+
+// ============= AGENT COMMISSION & DEPOSIT SYSTEM =============
+
+model CommissionSettings {
+  id            String   @id @default(uuid())
+  fixedAmount   Float
+  effectiveDate DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model AgentDepositLedger {
+  id                 String               @id @default(uuid())
+  contractId         String               @unique
+  contract           HirePurchaseContract @relation(fields: [contractId], references: [id])
+  agentId            String
+  agent              AdminUser            @relation("AgentLedger", fields: [agentId], references: [id])
+  contractNumber     String
+  customerName       String
+  depositAmount      Float
+  commissionAmount   Float
+  amountDueCompany   Float
+  amountPaid         Float                @default(0)
+  outstandingBalance Float
+  status             String               @default("PENDING") // PENDING | PAID | CANCELLED
+  payments           AgentDepositPayment[]
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+
+  @@index([agentId, status])
+  @@index([agentId, createdAt])
+}
+
+model AgentDepositPayment {
+  id            String             @id @default(uuid())
+  ledgerEntryId String
+  ledgerEntry   AgentDepositLedger @relation(fields: [ledgerEntryId], references: [id])
+  agentId       String
+  transactionRef String            @unique
+  amount        Float
+  phoneNumber   String
+  network       String
+  hubtelRef     String?
+  status        String             @default("PENDING") // PENDING | SUCCESS | FAILED
+  failureReason String?
+  paidAt        DateTime?
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+
+  @@index([agentId, status])
+  @@index([ledgerEntryId, createdAt])
 }

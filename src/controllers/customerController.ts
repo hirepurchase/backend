@@ -22,10 +22,20 @@ function canViewAnyCustomer(adminUser: AdminUserPayload | undefined, customerCre
 // Create customer (Admin only)
 export async function createCustomer(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { firstName, lastName, phone, email, address, nationalId, dateOfBirth } = req.body;
+    const { firstName, lastName, phone, email, address, nationalId, dateOfBirth, guarantorName, guarantorPhone } = req.body;
 
     if (!firstName || !lastName || !phone) {
       res.status(400).json({ error: 'First name, last name, and phone are required' });
+      return;
+    }
+
+    if (!nationalId || !nationalId.trim()) {
+      res.status(400).json({ error: 'National ID is required' });
+      return;
+    }
+
+    if (!req.file) {
+      res.status(400).json({ error: 'Customer photo is required' });
       return;
     }
 
@@ -92,6 +102,8 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
         nationalId,
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
         photoUrl,
+        guarantorName: guarantorName ? String(guarantorName).trim() : null,
+        guarantorPhone: guarantorPhone ? String(guarantorPhone).trim() : null,
         createdById: req.user!.id,
       },
     });
@@ -130,6 +142,8 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
       nationalId: customer.nationalId,
       dateOfBirth: customer.dateOfBirth,
       photoUrl: customer.photoUrl,
+      guarantorName: customer.guarantorName,
+      guarantorPhone: customer.guarantorPhone,
       isActivated: customer.isActivated,
       createdAt: customer.createdAt,
     });
@@ -332,7 +346,7 @@ export async function getCustomerByMembershipId(req: AuthenticatedRequest, res: 
 export async function updateCustomer(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { id } = req.params;
-    const { firstName, lastName, phone, address, nationalId, dateOfBirth } = req.body;
+    const { firstName, lastName, phone, address, nationalId, dateOfBirth, guarantorName, guarantorPhone } = req.body;
 
     const existingCustomer = await prisma.customer.findUnique({ where: { id } });
 
@@ -362,6 +376,8 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
     if (address !== undefined) updateData.address = address;
     if (nationalId !== undefined) updateData.nationalId = nationalId;
     if (dateOfBirth !== undefined) updateData.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : null;
+    if (guarantorName !== undefined) updateData.guarantorName = guarantorName ? String(guarantorName).trim() : null;
+    if (guarantorPhone !== undefined) updateData.guarantorPhone = guarantorPhone ? String(guarantorPhone).trim() : null;
 
     // Handle photo upload if file is provided
     if (req.file) {

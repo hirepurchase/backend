@@ -1139,6 +1139,140 @@ export async function removeManagedDevice(req: AuthenticatedRequest, res: Respon
   }
 }
 
+// POST /api/knox-guard/devices/delete-all
+// Lists every device registered in the Knox tenant (via the Devices API) and removes them all.
+// Intended for license migration: Knox requires all devices removed before swapping licenses.
+// Also resets local Knox upload state so devices can be re-uploaded under the new license.
+export async function deleteAllDevices(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    // Step 1 — fetch the full device list from the Knox tenant
+    const listResult = await listDevicesFromApi();
+
+    if (!listResult.success && !listResult.dryRun) {
+      const statusCode = listResult.statusCode === 401 || listResult.statusCode === 403 ? 502 : (listResult.statusCode ?? 500);
+      res.status(statusCode).json({ error: listResult.error || 'Failed to list devices from Knox tenant' });
+      return;
+    }
+
+    if (listResult.dryRun) {
+      res.json({
+        message: 'Dry-run: delete-all simulated — no devices were removed',
+        dryRun: true,
+        total: 0,
+        deleted: 0,
+        failed: 0,
+        batches: [],
+      });
+      return;
+    }
+
+    const portalDevices: any[] = Array.isArray(listResult.data) ? listResult.data : [];
+    if (portalDevices.length === 0) {
+      res.json({
+        message: 'Knox tenant has no devices — nothing to delete',
+        dryRun: false,
+        total: 0,
+        deleted: 0,
+        failed: 0,
+        batches: [],
+      });
+      return;
+    }
+
+    // Step 2 — collect IMEIs; Knox Devices API requires 14–16 digit strings
+    const allImeis: string[] = portalDevices
+      .map((d: any) => String(d.imei || d.deviceUid || '').trim())
+      .filter((imei) => /^\d{14,16}$/.test(imei));
+
+    if (allImeis.length === 0) {
+      res.json({
+        message: 'Knox returned devices but none had a valid IMEI — nothing deleted',
+        dryRun: false,
+        total: portalDevices.length,
+        deleted: 0,
+        failed: 0,
+        batches: [],
+      });
+      return;
+    }
+
+    // Step 3 — delete in batches of 100 (Devices API limit)
+    const BATCH_SIZE = 100;
+    const batches: Array<{ imeis: string[]; transactionId: string | null; status: string; failed: number }> = [];
+    let totalDeleted = 0;
+    let totalFailed = 0;
+
+    for (let i = 0; i < allImeis.length; i += BATCH_SIZE) {
+      const batch = allImeis.slice(i, i + BATCH_SIZE);
+      const deleteResult = await deleteDevicesFromApi(batch);
+      const data = deleteResult.data as any;
+      const transactionId: string | null = data?.transactionId ?? data?.transaction_id ?? null;
+
+      let batchStatus = 'DELETE_PENDING';
+      let failedCount = 0;
+      let failedIds = new Set<string>();
+
+      if (deleteResult.success && transactionId) {
+        // Poll up to 10s for completion
+        for (let poll = 0; poll < 5; poll++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const pollResult = await getKnoxGuardUploadStatus(transactionId);
+          const pollData = pollResult.data as any;
+          if (pollData?.status === 'Complete') {
+            failedIds = collectFailedDeviceIdentifiers(pollData?.devices);
+            failedCount = failedIds.size;
+            batchStatus = 'DELETED';
+            break;
+          }
+        }
+      } else if (!deleteResult.success) {
+        batchStatus = 'FAILED';
+        failedCount = batch.length;
+      }
+
+      totalDeleted += batch.length - failedCount;
+      totalFailed += failedCount;
+      batches.push({ imeis: batch, transactionId, status: batchStatus, failed: failedCount });
+
+      // Step 4 — update local DB for this batch
+      const succeeded = batchStatus === 'DELETED'
+        ? batch.filter((imei) => !failedIds.has(imei))
+        : batchStatus === 'DELETE_PENDING'
+          ? batch
+          : [];
+
+      if (succeeded.length > 0) {
+        await prisma.inventoryItem.updateMany({
+          where: { serialNumber: { in: succeeded } },
+          data: { knoxUploadStatus: batchStatus === 'DELETED' ? 'DELETED' : 'DELETE_PENDING', knoxUploadError: null, knoxUploadId: transactionId },
+        });
+        await syncManagedDevicesAfterDeletion(succeeded, transactionId);
+      }
+
+      if (failedIds.size > 0) {
+        await prisma.inventoryItem.updateMany({
+          where: { serialNumber: { in: Array.from(failedIds) } },
+          data: { knoxUploadStatus: 'UPLOADED', knoxUploadError: 'Delete failed for this device in Knox', knoxUploadId: transactionId },
+        });
+      }
+    }
+
+    res.json({
+      message: totalFailed > 0
+        ? `Removed ${totalDeleted} of ${allImeis.length} device(s) from Knox; ${totalFailed} failed`
+        : `All ${totalDeleted} device(s) removed from Knox tenant`,
+      dryRun: false,
+      total: allImeis.length,
+      deleted: totalDeleted,
+      failed: totalFailed,
+      batches: batches.map((b) => ({ transactionId: b.transactionId, count: b.imeis.length, status: b.status, failed: b.failed })),
+    });
+  } catch (error) {
+    console.error('Delete-all Knox devices error:', error);
+    res.status(500).json({ error: 'Failed to delete all devices from Knox tenant' });
+  }
+}
+
 // PATCH /api/knox-guard/upload/status/:serialNumber
 // Manually set knoxUploadStatus on an inventory item — useful when a device was uploaded
 // outside the system or the local state is out of sync with the actual tenant.

@@ -25,6 +25,7 @@ import {
   uploadDevicesDirect,
   listDevicesFromDevicesApi,
   deleteDevices,
+  deleteAllDevices,
   resetKnoxDevice,
   removeManagedDevice,
   patchKnoxUploadStatus,
@@ -191,6 +192,13 @@ router.delete(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   deleteDevices
+);
+
+router.post(
+  '/devices/delete-all',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  deleteAllDevices
 );
 
 router.post(

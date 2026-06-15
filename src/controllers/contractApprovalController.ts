@@ -13,6 +13,7 @@ import {
   sendContractRevisionRequestedNotification,
 } from '../services/notificationService';
 import { enrollManagedDeviceForContract } from '../services/deviceControlPolicyService';
+import { createAgentDepositLedgerEntry } from './agentDepositController';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import { calculateInstallmentSchedule, calculateEndDate } from '../utils/helpers';
 
@@ -587,9 +588,19 @@ export async function approveContract(req: AuthenticatedRequest, res: Response):
       console.error('Failed to send customer contract confirmation after approval:', error);
     });
 
-    // Auto-enroll into Knox Guard now that contract is ACTIVE
-    enrollManagedDeviceForContract(updated.id, {}).catch((err) => {
+    // Auto-enroll into Knox Guard now that contract is ACTIVE.
+    // If the device was locked before the contract was created, keep it locked until
+    // the agent has remitted the deposit amount — the callback will unlock it once paid.
+    const deviceWasPreLocked = contract.inventoryItem?.lockStatus === 'LOCKED';
+    enrollManagedDeviceForContract(updated.id, {
+      desiredState: deviceWasPreLocked ? 'LOCKED' : 'UNLOCKED',
+    }).catch((err) => {
       console.error(`Knox Guard auto-enroll failed for contract ${updated.contractNumber}:`, err);
+    });
+
+    // Create agent deposit ledger entry
+    createAgentDepositLedgerEntry(updated.id).catch((err) => {
+      console.error(`Agent deposit ledger creation failed for contract ${updated.contractNumber}:`, err);
     });
 
     res.json({ message: 'Contract approved successfully', contract: updated });

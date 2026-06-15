@@ -8,7 +8,7 @@ import {
   requestStandaloneInventoryDeviceLock,
   requestStandaloneInventoryDeviceUnlock,
 } from '../services/deviceControlPolicyService';
-import { AuthenticatedRequest } from '../types';
+import { AuthenticatedRequest, AdminUserPayload } from '../types';
 
 const KNOX_UPLOAD_POLL_ATTEMPTS = 5;
 const KNOX_UPLOAD_POLL_DELAY_MS = 2000;
@@ -291,7 +291,7 @@ export async function deleteCategory(req: AuthenticatedRequest, res: Response): 
 // Create product
 export async function createProduct(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { name, description, basePrice, categoryId } = req.body;
+    const { name, description, basePrice, categoryId, pricings } = req.body;
 
     if (!name || !basePrice || !categoryId) {
       res.status(400).json({ error: 'Name, base price, and category are required' });
@@ -304,23 +304,46 @@ export async function createProduct(req: AuthenticatedRequest, res: Response): P
       return;
     }
 
-    const product = await prisma.product.create({
-      data: {
-        name,
-        description,
-        basePrice: Number(basePrice),
-        categoryId,
-      },
-      include: {
-        category: true,
-      },
+    const product = await prisma.$transaction(async (tx) => {
+      const created = await tx.product.create({
+        data: {
+          name,
+          description,
+          basePrice: Number(basePrice),
+          categoryId,
+        },
+        include: {
+          category: true,
+          pricings: true,
+        },
+      });
+
+      if (pricings && Array.isArray(pricings)) {
+        for (const p of pricings) {
+          if (p.basePrice !== '' && p.depositAmount !== '') {
+            await tx.productPricing.create({
+              data: {
+                productId: created.id,
+                installmentMonths: Number(p.installmentMonths),
+                basePrice: Number(p.basePrice),
+                depositAmount: Number(p.depositAmount),
+              },
+            });
+          }
+        }
+      }
+
+      return tx.product.findUnique({
+        where: { id: created.id },
+        include: { category: true, pricings: true },
+      });
     });
 
     await createAuditLog({
       userId: req.user!.id,
       action: 'CREATE_PRODUCT',
       entity: 'Product',
-      entityId: product.id,
+      entityId: product!.id,
       newValues: { name, basePrice, categoryId },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
@@ -355,6 +378,7 @@ export async function getAllProducts(req: AuthenticatedRequest, res: Response): 
         where,
         include: {
           category: true,
+          pricings: { orderBy: { installmentMonths: 'asc' } },
           _count: {
             select: { inventoryItems: true },
           },
@@ -408,6 +432,7 @@ export async function getProductById(req: AuthenticatedRequest, res: Response): 
       where: { id },
       include: {
         category: true,
+        pricings: { orderBy: { installmentMonths: 'asc' } },
         inventoryItems: {
           orderBy: { createdAt: 'desc' },
         },
@@ -441,7 +466,7 @@ export async function getProductById(req: AuthenticatedRequest, res: Response): 
 export async function updateProduct(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { id } = req.params;
-    const { name, description, basePrice, categoryId, isActive } = req.body;
+    const { name, description, basePrice, categoryId, isActive, pricings } = req.body;
 
     const existingProduct = await prisma.product.findUnique({ where: { id } });
 
@@ -457,10 +482,37 @@ export async function updateProduct(req: AuthenticatedRequest, res: Response): P
     if (categoryId) updateData.categoryId = categoryId;
     if (isActive !== undefined) updateData.isActive = isActive;
 
-    const updatedProduct = await prisma.product.update({
-      where: { id },
-      data: updateData,
-      include: { category: true },
+    const updatedProduct = await prisma.$transaction(async (tx) => {
+      const product = await tx.product.update({
+        where: { id },
+        data: updateData,
+        include: { category: true, pricings: { orderBy: { installmentMonths: 'asc' } } },
+      });
+
+      if (pricings && Array.isArray(pricings)) {
+        for (const p of pricings) {
+          if (p.basePrice !== '' && p.depositAmount !== '') {
+            await tx.productPricing.upsert({
+              where: { productId_installmentMonths: { productId: id, installmentMonths: Number(p.installmentMonths) } },
+              create: {
+                productId: id,
+                installmentMonths: Number(p.installmentMonths),
+                basePrice: Number(p.basePrice),
+                depositAmount: Number(p.depositAmount),
+              },
+              update: {
+                basePrice: Number(p.basePrice),
+                depositAmount: Number(p.depositAmount),
+              },
+            });
+          }
+        }
+      }
+
+      return tx.product.findUnique({
+        where: { id },
+        include: { category: true, pricings: { orderBy: { installmentMonths: 'asc' } } },
+      });
     });
 
     await createAuditLog({
@@ -490,7 +542,7 @@ export async function updateProduct(req: AuthenticatedRequest, res: Response): P
 // Add inventory item
 export async function addInventoryItem(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { productId, serialNumber, lockStatus, registeredUnder } = req.body;
+    const { productId, serialNumber, lockStatus, registeredUnder, assignedAgentId } = req.body;
 
     if (!productId || !serialNumber) {
       res.status(400).json({ error: 'Product ID and serial number are required' });
@@ -513,6 +565,22 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
       return;
     }
 
+    // Validate assignedAgentId if provided
+    if (assignedAgentId) {
+      const agent = await prisma.adminUser.findUnique({
+        where: { id: assignedAgentId },
+        include: { role: { select: { name: true } } },
+      });
+      if (!agent) {
+        res.status(400).json({ error: 'Assigned agent not found' });
+        return;
+      }
+      if (agent.role.name !== 'AGENT') {
+        res.status(400).json({ error: 'Assigned user must have the AGENT role' });
+        return;
+      }
+    }
+
     const inventoryItem = await prisma.inventoryItem.create({
       data: {
         productId,
@@ -520,9 +588,11 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
         status: 'AVAILABLE',
         lockStatus: lockStatus || 'UNLOCKED',
         registeredUnder: registeredUnder || null,
+        assignedAgentId: assignedAgentId || null,
       },
       include: {
         product: true,
+        assignedAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
       },
     });
 
@@ -531,7 +601,7 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
       action: 'ADD_INVENTORY_ITEM',
       entity: 'InventoryItem',
       entityId: inventoryItem.id,
-      newValues: { productId, serialNumber, lockStatus, registeredUnder },
+      newValues: { productId, serialNumber, lockStatus, registeredUnder, assignedAgentId: assignedAgentId || null },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
@@ -720,7 +790,7 @@ export async function addBulkInventoryItems(req: AuthenticatedRequest, res: Resp
 export async function updateInventoryItem(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { id } = req.params;
-    const { productId, lockStatus, registeredUnder } = req.body;
+    const { productId, lockStatus, registeredUnder, assignedAgentId } = req.body;
 
     const existingItem = await prisma.inventoryItem.findUnique({
       where: { id },
@@ -746,12 +816,37 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
       }
     }
 
+    // Validate assignedAgentId if being changed
+    if (assignedAgentId !== undefined && assignedAgentId !== null && assignedAgentId !== '') {
+      const agent = await prisma.adminUser.findUnique({
+        where: { id: assignedAgentId },
+        include: { role: { select: { name: true } } },
+      });
+      if (!agent) {
+        res.status(400).json({ error: 'Assigned agent not found' });
+        return;
+      }
+      if (agent.role.name !== 'AGENT') {
+        res.status(400).json({ error: 'Assigned user must have the AGENT role' });
+        return;
+      }
+    }
+
+    // Resolve the new assignedAgentId: explicit null/empty string clears it, undefined keeps existing
+    const newAssignedAgentId =
+      assignedAgentId === null || assignedAgentId === ''
+        ? null
+        : assignedAgentId !== undefined
+          ? assignedAgentId
+          : existingItem.assignedAgentId;
+
     const updatedItem = await prisma.inventoryItem.update({
       where: { id },
       data: {
         productId: productId !== undefined ? productId : existingItem.productId,
         lockStatus: lockStatus !== undefined ? lockStatus : existingItem.lockStatus,
         registeredUnder: registeredUnder !== undefined ? registeredUnder : existingItem.registeredUnder,
+        assignedAgentId: newAssignedAgentId,
       },
       include: {
         product: {
@@ -759,6 +854,7 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
             category: true,
           },
         },
+        assignedAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
       },
     });
 
@@ -770,9 +866,10 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
       oldValues: {
         productId: existingItem.productId,
         lockStatus: existingItem.lockStatus,
-        registeredUnder: existingItem.registeredUnder
+        registeredUnder: existingItem.registeredUnder,
+        assignedAgentId: existingItem.assignedAgentId,
       },
-      newValues: { productId, lockStatus, registeredUnder },
+      newValues: { productId, lockStatus, registeredUnder, assignedAgentId: newAssignedAgentId },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
@@ -991,14 +1088,26 @@ export async function deleteInventoryItem(req: AuthenticatedRequest, res: Respon
 export async function getAvailableInventory(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { productId } = req.params;
+    const caller = req.user as AdminUserPayload;
+    const isAgent = caller.role === 'AGENT';
+
+    const where: Record<string, unknown> = { productId, status: 'AVAILABLE' };
+
+    // Agents only see items assigned specifically to them, or items with no assignment
+    if (isAgent) {
+      where.OR = [{ assignedAgentId: caller.id }, { assignedAgentId: null }];
+    }
 
     const items = await prisma.inventoryItem.findMany({
-      where: {
-        productId,
-        status: 'AVAILABLE',
-      },
+      where,
       include: {
-        product: true,
+        product: {
+          include: {
+            category: true,
+            pricings: { orderBy: { installmentMonths: 'asc' } },
+          },
+        },
+        assignedAgent: { select: { id: true, firstName: true, lastName: true } },
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -1013,16 +1122,37 @@ export async function getAvailableInventory(req: AuthenticatedRequest, res: Resp
 // Get all inventory items
 export async function getAllInventoryItems(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { page = 1, limit = 50, productId, status, search } = req.query;
+    const { page = 1, limit = 50, productId, status, search, lockStatus, knoxUploadStatus } = req.query;
+    const caller = req.user as AdminUserPayload;
+    const isAgent = caller.role === 'AGENT';
 
     const where: Record<string, unknown> = {};
 
     if (productId) where.productId = productId;
     if (status) where.status = status;
+    if (lockStatus) where.lockStatus = lockStatus;
+
+    // Agents only see inventory assigned to them or unassigned — same rule as getAvailableInventory
+    if (isAgent) {
+      where.AND = [{ OR: [{ assignedAgentId: caller.id }, { assignedAgentId: null }] }];
+    }
+
+    if (knoxUploadStatus === 'NOT_UPLOADED') {
+      const existingAnd = (where.AND as any[]) || [];
+      where.AND = [...existingAnd, { OR: [{ knoxUploadStatus: null }, { knoxUploadStatus: 'FAILED' }] }];
+    } else if (knoxUploadStatus) {
+      where.knoxUploadStatus = knoxUploadStatus;
+    }
     if (search) {
-      where.OR = [
-        { serialNumber: { contains: search as string } },
-        { product: { name: { contains: search as string } } },
+      const existingAnd = (where.AND as any[]) || [];
+      where.AND = [
+        ...existingAnd,
+        {
+          OR: [
+            { serialNumber: { contains: search as string } },
+            { product: { name: { contains: search as string } } },
+          ],
+        },
       ];
     }
 
@@ -1031,7 +1161,10 @@ export async function getAllInventoryItems(req: AuthenticatedRequest, res: Respo
         where,
         include: {
           product: {
-            include: { category: true },
+            include: {
+              category: true,
+              pricings: { orderBy: { installmentMonths: 'asc' } },
+            },
           },
           contract: {
             select: {
@@ -1043,6 +1176,7 @@ export async function getAllInventoryItems(req: AuthenticatedRequest, res: Respo
           managedDevice: {
             select: { id: true, isActive: true, enrollmentStatus: true, actualState: true },
           },
+          assignedAgent: { select: { id: true, firstName: true, lastName: true, email: true } },
         },
         orderBy: { createdAt: 'desc' },
         skip: (Number(page) - 1) * Number(limit),

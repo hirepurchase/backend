@@ -64,6 +64,7 @@ interface EnrollmentInput {
   knoxObjectId?: string;
   knoxTenantDomain?: string;
   metadata?: Record<string, unknown>;
+  desiredState?: 'LOCKED' | 'UNLOCKED';
   actor?: {
     adminUserId?: string;
   };
@@ -1065,7 +1066,7 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
     where: { id: managedDevice.id },
     data: {
       enrollmentStatus: result.success || result.dryRun ? 'APPROVED' : 'APPROVAL_QUEUED',
-      desiredState: 'UNLOCKED',
+      desiredState: input.desiredState ?? 'UNLOCKED',
       lastEvaluatedAt: new Date(),
       lastSyncedAt: new Date(),
       lastKnoxAction: 'APPROVE_DEVICE',

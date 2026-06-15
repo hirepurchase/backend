@@ -7,7 +7,7 @@ import { AuthenticatedRequest, AdminUserPayload } from '../types';
 // Get all admin users
 export async function getAllAdminUsers(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { page = 1, limit = 20, search, roleId, isActive } = req.query;
+    const { page = 1, limit = 20, search, roleId, roleName, isActive } = req.query;
 
     const where: Record<string, unknown> = {};
 
@@ -20,6 +20,7 @@ export async function getAllAdminUsers(req: AuthenticatedRequest, res: Response)
     }
 
     if (roleId) where.roleId = roleId;
+    if (roleName) where.role = { name: roleName };
     if (isActive !== undefined) where.isActive = isActive === 'true';
 
     const [users, total] = await Promise.all([

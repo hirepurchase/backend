@@ -330,9 +330,19 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       return;
     }
 
+    const creatorRole = (req.user as any)?.role as string;
+
+    // Enforce agent assignment: admins can use any device; only the assigned agent is restricted
+    if (creatorRole === 'AGENT' && inventoryItem.assignedAgentId && inventoryItem.assignedAgentId !== req.user!.id) {
+      res.status(403).json({ error: 'This device is assigned to a different agent and cannot be used for this contract.' });
+      return;
+    }
+
     const inventoryWasLocked = inventoryItem.lockStatus === 'LOCKED';
     const unlockRequested = isTruthyFormValue(unlockOnContract);
-    const shouldUnlockLockedDeviceOnCreate = unlockRequested && inventoryWasLocked;
+    // Agents cannot unlock a pre-locked device at contract creation — the device stays locked
+    // until the agent has remitted the deposit amount to the company.
+    const shouldUnlockLockedDeviceOnCreate = unlockRequested && inventoryWasLocked && creatorRole !== 'AGENT';
 
     const guardrails = await evaluateContractSubmissionGuardrails({
       customerId,
@@ -353,6 +363,14 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       return;
     }
 
+    // Grace period is always 7 days — fixed business rule
+    const fixedGracePeriodDays = 7;
+
+    // Start date is always today + 7 days — fixed business rule
+    const defaultStartDate = new Date();
+    defaultStartDate.setDate(defaultStartDate.getDate() + 7);
+    const contractStartDate = startDate ? new Date(startDate) : defaultStartDate;
+
     // Calculate finance amount and installment amount
     const financeAmount = Number(totalPrice) - Number(depositAmount);
     const installmentAmount = Math.ceil((financeAmount / totalInstallments) * 100) / 100;
@@ -364,8 +382,6 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       contractNumber = generateContractNumber();
       exists = await prisma.hirePurchaseContract.findUnique({ where: { contractNumber } });
     }
-
-    const contractStartDate = startDate ? new Date(startDate) : new Date();
     const contractEndDate = calculateEndDate(
       contractStartDate,
       paymentFrequency as PaymentFrequency,
@@ -404,7 +420,6 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     const hashedPhonePassword = shouldSetPassword ? await bcrypt.hash(normalizedPhone, 12) : null;
 
     // Agents create contracts that require approval before going ACTIVE
-    const creatorRole = (req.user as any)?.role as string;
     const requiresApproval = creatorRole === 'AGENT';
     const initialStatus = requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE';
 
@@ -421,7 +436,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
           installmentAmount,
           paymentFrequency,
           totalInstallments: Number(totalInstallments),
-          gracePeriodDays: Number(gracePeriodDays),
+          gracePeriodDays: fixedGracePeriodDays,
           penaltyPercentage: Number(penaltyPercentage),
           startDate: contractStartDate,
           endDate: contractEndDate,
@@ -604,6 +619,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
         console.error(`Knox Guard auto-enroll failed for contract ${completeContract.contractNumber}:`, err);
       });
     }
+
 
     res.status(201).json({
       ...completeContract,
@@ -1176,6 +1192,17 @@ export async function cancelContract(req: AuthenticatedRequest, res: Response): 
           },
         });
       }
+
+      // Cancel any outstanding agent deposit ledger entry for this contract
+      await tx.agentDepositLedger.updateMany({
+        where: { contractId: id, status: 'PENDING' },
+        data: { status: 'CANCELLED' },
+      });
+    });
+
+    // Unenroll device from Knox Guard (non-blocking — same pattern as write-off)
+    unenrollManagedDeviceForContract(id, `Contract cancelled: ${reason?.trim() || 'No reason provided'}`).catch((knoxError) => {
+      console.error(`Knox Guard unenrollment failed for cancelled contract ${id}:`, knoxError);
     });
 
     await createAuditLog({
@@ -1183,7 +1210,8 @@ export async function cancelContract(req: AuthenticatedRequest, res: Response): 
       action: 'CANCEL_CONTRACT',
       entity: 'HirePurchaseContract',
       entityId: id,
-      newValues: { status: 'CANCELLED', reason },
+      oldValues: { status: contract.status },
+      newValues: { status: 'CANCELLED', reason: reason || null },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });

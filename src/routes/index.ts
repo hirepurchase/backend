@@ -14,6 +14,8 @@ import paymentRetryRoutes from './paymentRetry';
 import hubtelTestRoutes from './hubtelTest';
 import knoxGuardRoutes from './knoxGuard';
 import smsRoutes from './sms';
+import commissionSettingsRoutes from './commissionSettings';
+import agentDepositRoutes from './agentDeposits';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
 
@@ -35,6 +37,8 @@ router.use('/notifications', notificationRoutes);
 router.use('/import', importRoutes);
 router.use('/sms', smsRoutes);
 router.use('/knox-guard', knoxGuardRoutes);
+router.use('/commission-settings', commissionSettingsRoutes);
+router.use('/agent-deposits', agentDepositRoutes);
 
 // Health check
 router.get('/health', (req, res) => {
