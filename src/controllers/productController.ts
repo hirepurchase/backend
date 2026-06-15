@@ -1093,9 +1093,9 @@ export async function getAvailableInventory(req: AuthenticatedRequest, res: Resp
 
     const where: Record<string, unknown> = { productId, status: 'AVAILABLE' };
 
-    // Agents only see items assigned specifically to them, or items with no assignment
+    // Agents only see items explicitly assigned to them — unassigned items are admin-only
     if (isAgent) {
-      where.OR = [{ assignedAgentId: caller.id }, { assignedAgentId: null }];
+      where.assignedAgentId = caller.id;
     }
 
     const items = await prisma.inventoryItem.findMany({
@@ -1132,9 +1132,9 @@ export async function getAllInventoryItems(req: AuthenticatedRequest, res: Respo
     if (status) where.status = status;
     if (lockStatus) where.lockStatus = lockStatus;
 
-    // Agents only see inventory assigned to them or unassigned — same rule as getAvailableInventory
+    // Agents only see inventory explicitly assigned to them — unassigned items are admin-only
     if (isAgent) {
-      where.AND = [{ OR: [{ assignedAgentId: caller.id }, { assignedAgentId: null }] }];
+      where.assignedAgentId = caller.id;
     }
 
     if (knoxUploadStatus === 'NOT_UPLOADED') {
