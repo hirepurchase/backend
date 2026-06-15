@@ -125,6 +125,8 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     PERMISSIONS.RECORD_PAYMENT,
     PERMISSIONS.VIEW_AGENT_COMMISSIONS,
     PERMISSIONS.PAY_AGENT_DEPOSIT,
+    PERMISSIONS.VIEW_DAILY_PAYMENTS,
+    PERMISSIONS.MANAGE_INVENTORY,
   ]);
 
   const agentPermissions = allPermissions
