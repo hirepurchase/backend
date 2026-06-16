@@ -31,6 +31,23 @@ const HUBTEL_PREAPPROVAL_CALLBACK_URL = appendWebhookToken(
   RAW_HUBTEL_PREAPPROVAL_CALLBACK_URL || derivePreapprovalCallbackUrl(RAW_HUBTEL_CALLBACK_URL)
 );
 
+// Derive agent-deposit callback URL from the base callback URL:
+// .../payments/hubtel/callback → .../agent-deposits/hubtel/callback
+function deriveAgentDepositCallbackUrl(callbackUrl: string): string {
+  if (!callbackUrl) return '';
+  try {
+    const parsed = new URL(callbackUrl);
+    parsed.pathname = parsed.pathname.replace(/\/payments\/hubtel\/callback\/?$/, '/agent-deposits/hubtel/callback');
+    return parsed.toString();
+  } catch {
+    return callbackUrl.replace(/\/payments\/hubtel\/callback\/?$/, '/agent-deposits/hubtel/callback');
+  }
+}
+
+export const HUBTEL_AGENT_DEPOSIT_CALLBACK_URL = appendWebhookToken(
+  deriveAgentDepositCallbackUrl(RAW_HUBTEL_CALLBACK_URL)
+);
+
 // API Endpoints
 const RECEIVE_MONEY_URL = `https://rmp.hubtel.com/merchantaccount/merchants/${HUBTEL_POS_SALES_ID}/receive/mobilemoney`;
 const TRANSACTION_STATUS_URL = `https://api-txnstatus.hubtel.com/transactions/${HUBTEL_POS_SALES_ID}/status`;
@@ -117,6 +134,7 @@ export async function initiateHubtelReceiveMoney(params: {
   network: string;
   description: string;
   transactionRef: string;
+  callbackUrl?: string;
 }): Promise<{ transactionId: string; status: string; message: string }> {
   try {
     console.log('=== HUBTEL SERVICE: initiateHubtelReceiveMoney START ===');
@@ -134,7 +152,7 @@ export async function initiateHubtelReceiveMoney(params: {
       CustomerEmail: params.customerEmail,
       Channel: channel,
       Amount: params.amount,
-      PrimaryCallbackUrl: HUBTEL_PAYMENT_CALLBACK_URL,
+      PrimaryCallbackUrl: params.callbackUrl || HUBTEL_PAYMENT_CALLBACK_URL,
       Description: params.description,
       ClientReference: params.transactionRef,
     };

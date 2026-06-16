@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import prisma from '../config/database';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
-import { initiateHubtelReceiveMoney, formatPhoneForHubtel } from '../services/hubtelService';
+import { initiateHubtelReceiveMoney, formatPhoneForHubtel, HUBTEL_AGENT_DEPOSIT_CALLBACK_URL } from '../services/hubtelService';
 import { generateTransactionRef } from '../utils/helpers';
 import { requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
 
@@ -246,6 +246,7 @@ export async function payDeposit(req: AuthenticatedRequest, res: Response): Prom
         network: network.toUpperCase(),
         description: `Agent deposit remittance - Contract ${ledgerEntry.contractNumber}`,
         transactionRef,
+        callbackUrl: HUBTEL_AGENT_DEPOSIT_CALLBACK_URL,
       });
     } catch (hubtelError: any) {
       await prisma.agentDepositPayment.update({
