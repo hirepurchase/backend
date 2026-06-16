@@ -251,13 +251,21 @@ export async function getPendingApprovals(req: AuthenticatedRequest, res: Respon
             lastName: true,
             membershipId: true,
             phone: true,
+            email: true,
+            address: true,
+            nationalId: true,
+            dateOfBirth: true,
+            photoUrl: true,
+            guarantorName: true,
+            guarantorPhone: true,
           },
         },
         inventoryItem: {
           select: {
             serialNumber: true,
             productId: true,
-            product: { select: { name: true } },
+            lockStatus: true,
+            product: { select: { name: true, category: { select: { name: true } } } },
           },
         },
         createdBy: {
