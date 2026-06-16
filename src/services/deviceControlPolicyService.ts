@@ -1023,32 +1023,58 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
     input.actor
   );
 
-  const managedDevice = await prismaAny.managedDevice.upsert({
-    where: { contractId: contract.id },
-    update: {
-      inventoryItemId: contract.inventoryItem?.id || contract.managedDevice?.inventoryItemId || null,
-      customerId_uuid: contract.customerId_uuid,
-      deviceUid,
-      deviceUidType: input.deviceUidType || contract.managedDevice?.deviceUidType || 'SERIAL_NUMBER',
-      approveId,
-      knoxObjectId: input.knoxObjectId ?? contract.managedDevice?.knoxObjectId ?? null,
-      knoxTenantDomain: input.knoxTenantDomain ?? contract.managedDevice?.knoxTenantDomain ?? null,
-      metadata: JSON.stringify(metadata),
-      isActive: true,
-      lastError: null,
-    },
-    create: {
-      contractId: contract.id,
-      inventoryItemId: contract.inventoryItem?.id || null,
-      customerId_uuid: contract.customerId_uuid,
-      deviceUid,
-      deviceUidType: input.deviceUidType || 'SERIAL_NUMBER',
-      approveId,
-      knoxObjectId: input.knoxObjectId || null,
-      knoxTenantDomain: input.knoxTenantDomain || null,
-      metadata: JSON.stringify(metadata),
-    },
-  });
+  // If a standalone ManagedDevice already exists for the inventory item (contractId = null),
+  // claim it by setting contractId + contract fields rather than creating a duplicate row.
+  const standaloneExisting = contract.inventoryItem?.id
+    ? await prismaAny.managedDevice.findUnique({ where: { inventoryItemId: contract.inventoryItem.id } })
+    : null;
+  const standaloneIsOrphan = standaloneExisting && !standaloneExisting.contractId;
+
+  let managedDevice: any;
+  if (standaloneIsOrphan) {
+    managedDevice = await prismaAny.managedDevice.update({
+      where: { id: standaloneExisting.id },
+      data: {
+        contractId: contract.id,
+        customerId_uuid: contract.customerId_uuid,
+        deviceUid,
+        deviceUidType: input.deviceUidType || standaloneExisting.deviceUidType || 'SERIAL_NUMBER',
+        approveId: standaloneExisting.approveId, // keep existing approveId so Knox remains consistent
+        knoxObjectId: input.knoxObjectId ?? standaloneExisting.knoxObjectId ?? null,
+        knoxTenantDomain: input.knoxTenantDomain ?? standaloneExisting.knoxTenantDomain ?? null,
+        metadata: JSON.stringify(metadata),
+        isActive: true,
+        lastError: null,
+      },
+    });
+  } else {
+    managedDevice = await prismaAny.managedDevice.upsert({
+      where: { contractId: contract.id },
+      update: {
+        inventoryItemId: contract.inventoryItem?.id || contract.managedDevice?.inventoryItemId || null,
+        customerId_uuid: contract.customerId_uuid,
+        deviceUid,
+        deviceUidType: input.deviceUidType || contract.managedDevice?.deviceUidType || 'SERIAL_NUMBER',
+        approveId,
+        knoxObjectId: input.knoxObjectId ?? contract.managedDevice?.knoxObjectId ?? null,
+        knoxTenantDomain: input.knoxTenantDomain ?? contract.managedDevice?.knoxTenantDomain ?? null,
+        metadata: JSON.stringify(metadata),
+        isActive: true,
+        lastError: null,
+      },
+      create: {
+        contractId: contract.id,
+        inventoryItemId: contract.inventoryItem?.id || null,
+        customerId_uuid: contract.customerId_uuid,
+        deviceUid,
+        deviceUidType: input.deviceUidType || 'SERIAL_NUMBER',
+        approveId,
+        knoxObjectId: input.knoxObjectId || null,
+        knoxTenantDomain: input.knoxTenantDomain || null,
+        metadata: JSON.stringify(metadata),
+      },
+    });
+  }
 
   const approveComment = [
     `Customer: ${contract.customer.firstName} ${contract.customer.lastName}`,
