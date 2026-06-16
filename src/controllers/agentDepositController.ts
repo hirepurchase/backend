@@ -5,6 +5,29 @@ import { initiateHubtelReceiveMoney, formatPhoneForHubtel } from '../services/hu
 import { generateTransactionRef } from '../utils/helpers';
 import { requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
 
+// Unlock the device for a contract after agent deposit is fully paid.
+// If the contract has a Knox-enrolled managed device, uses requestManagedDeviceUnlock.
+// Otherwise directly clears the inventoryItem lockStatus so the phone shows as unlocked.
+async function unlockDeviceAfterDepositPaid(contractId: string, logPrefix: string): Promise<void> {
+  try {
+    await requestManagedDeviceUnlock(contractId, 'Agent deposit fully remitted — device unlocked.');
+  } catch (err: any) {
+    if (err?.message === 'Managed device not found for contract') {
+      // No Knox enrollment — update inventoryItem lockStatus directly
+      const inventoryItem = await prisma.inventoryItem.findFirst({ where: { contractId } });
+      if (inventoryItem) {
+        await prisma.inventoryItem.update({
+          where: { id: inventoryItem.id },
+          data: { lockStatus: 'UNLOCKED' },
+        });
+        console.log(`[${logPrefix}] No managed device — inventoryItem ${inventoryItem.id} lockStatus set to UNLOCKED for contract ${contractId}`);
+      }
+    } else {
+      console.error(`[${logPrefix}] Failed to unlock device for contract ${contractId}:`, err);
+    }
+  }
+}
+
 // Create an AgentDepositLedger entry for a contract that just became ACTIVE.
 // Called from contractController (direct ACTIVE) and contractApprovalController (approval flow).
 export async function createAgentDepositLedgerEntry(contractId: string): Promise<void> {
@@ -306,25 +329,8 @@ export async function handleAgentPaymentCallback(req: AuthenticatedRequest, res:
           });
 
           if (newStatus === 'PAID') {
-            // Check if the contract's device was kept locked pending deposit remittance
-            const contract = await prisma.hirePurchaseContract.findUnique({
-              where: { id: ledger.contractId },
-              include: {
-                managedDevice: { select: { id: true, desiredState: true } },
-                inventoryItem: { select: { lockStatus: true } },
-              },
-            });
-            const deviceIsKeptLocked =
-              contract?.managedDevice?.desiredState === 'LOCKED' &&
-              contract?.inventoryItem?.lockStatus === 'LOCKED';
-            if (deviceIsKeptLocked && contract?.id) {
-              // Non-blocking — unlock after the transaction commits
-              setImmediate(() => {
-                requestManagedDeviceUnlock(contract.id, 'Agent deposit fully remitted — device unlocked.').catch((err) => {
-                  console.error(`[AgentDeposit] Failed to unlock device after deposit paid for contract ${contract.id}:`, err);
-                });
-              });
-            }
+            const contractId = ledger.contractId;
+            setImmediate(() => { unlockDeviceAfterDepositPaid(contractId, 'AgentDeposit'); });
           }
         }
       }
@@ -415,25 +421,10 @@ export async function adminManualPay(req: AuthenticatedRequest, res: Response): 
       }
     });
 
-    // If fully paid, trigger device unlock if applicable (non-blocking)
+    // If fully paid, trigger device unlock (non-blocking)
     if (contractId) {
-      const contract = await prisma.hirePurchaseContract.findUnique({
-        where: { id: contractId },
-        include: {
-          managedDevice: { select: { id: true, desiredState: true } },
-          inventoryItem: { select: { lockStatus: true } },
-        },
-      });
-      const deviceIsKeptLocked =
-        contract?.managedDevice?.desiredState === 'LOCKED' &&
-        contract?.inventoryItem?.lockStatus === 'LOCKED';
-      if (deviceIsKeptLocked && contract?.id) {
-        setImmediate(() => {
-          requestManagedDeviceUnlock(contract.id, 'Agent deposit fully remitted (manual) — device unlocked.').catch((err) => {
-            console.error(`[AdminManualPay] Failed to unlock device for contract ${contract.id}:`, err);
-          });
-        });
-      }
+      const cid = contractId;
+      setImmediate(() => { unlockDeviceAfterDepositPaid(cid, 'AdminManualPay'); });
     }
 
     res.json({
