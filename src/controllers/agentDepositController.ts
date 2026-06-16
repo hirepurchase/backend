@@ -4,26 +4,58 @@ import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { initiateHubtelReceiveMoney, formatPhoneForHubtel, HUBTEL_AGENT_DEPOSIT_CALLBACK_URL } from '../services/hubtelService';
 import { generateTransactionRef } from '../utils/helpers';
 import { requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
+import { unlockKnoxGuardDevice } from '../services/knoxGuardService';
 
 // Unlock the device for a contract after agent deposit is fully paid.
-// If the contract has a Knox-enrolled managed device, uses requestManagedDeviceUnlock.
-// Otherwise directly clears the inventoryItem lockStatus so the phone shows as unlocked.
+// Priority order:
+//   1. ManagedDevice linked via contractId  → requestManagedDeviceUnlock (Knox + DB update)
+//   2. ManagedDevice linked via inventoryItemId only (standalone Knox enrollment) → Knox unlock directly
+//   3. No Knox enrollment at all → update inventoryItem lockStatus only
 async function unlockDeviceAfterDepositPaid(contractId: string, logPrefix: string): Promise<void> {
   try {
     await requestManagedDeviceUnlock(contractId, 'Agent deposit fully remitted — device unlocked.');
   } catch (err: any) {
-    if (err?.message === 'Managed device not found for contract') {
-      // No Knox enrollment — update inventoryItem lockStatus directly
-      const inventoryItem = await prisma.inventoryItem.findFirst({ where: { contractId } });
-      if (inventoryItem) {
-        await prisma.inventoryItem.update({
-          where: { id: inventoryItem.id },
-          data: { lockStatus: 'UNLOCKED' },
-        });
-        console.log(`[${logPrefix}] No managed device — inventoryItem ${inventoryItem.id} lockStatus set to UNLOCKED for contract ${contractId}`);
-      }
-    } else {
+    if (err?.message !== 'Managed device not found for contract') {
       console.error(`[${logPrefix}] Failed to unlock device for contract ${contractId}:`, err);
+      return;
+    }
+
+    // No ManagedDevice via contractId — check if inventory item has a standalone Knox device
+    const inventoryItem = await prisma.inventoryItem.findFirst({ where: { contractId } });
+    if (!inventoryItem) return;
+
+    const standaloneMd = await (prisma as any).managedDevice.findFirst({
+      where: { inventoryItemId: inventoryItem.id },
+    });
+
+    if (standaloneMd) {
+      // Standalone Knox-enrolled device — call Knox directly
+      const message = 'Agent deposit fully remitted — device unlocked.';
+      let result = await unlockKnoxGuardDevice({ deviceUid: standaloneMd.deviceUid, objectId: standaloneMd.knoxObjectId, message });
+      for (let attempt = 2; attempt <= 3 && !result.success && !result.dryRun; attempt++) {
+        await new Promise(r => setTimeout(r, 3000));
+        result = await unlockKnoxGuardDevice({ deviceUid: standaloneMd.deviceUid, objectId: standaloneMd.knoxObjectId, message });
+      }
+      const nextState = result.success || result.dryRun ? 'UNLOCKED' : standaloneMd.actualState;
+      await (prisma as any).managedDevice.update({
+        where: { id: standaloneMd.id },
+        data: {
+          desiredState: 'UNLOCKED',
+          actualState: nextState,
+          lastUnlockedAt: result.success || result.dryRun ? new Date() : undefined,
+          lastEvaluatedAt: new Date(),
+          lastSyncedAt: new Date(),
+          lastKnoxAction: 'UNLOCK_DEVICE',
+          lastTransactionId: result.transactionId || null,
+          lastError: result.success || result.dryRun ? null : (result.error || 'Unlock failed'),
+        },
+      });
+      await prisma.inventoryItem.update({ where: { id: inventoryItem.id }, data: { lockStatus: nextState } });
+      console.log(`[${logPrefix}] Standalone Knox unlock for contract ${contractId}: ${nextState} (txn: ${result.transactionId})`);
+    } else {
+      // No Knox device at all — just update the inventory lockStatus
+      await prisma.inventoryItem.update({ where: { id: inventoryItem.id }, data: { lockStatus: 'UNLOCKED' } });
+      console.log(`[${logPrefix}] No Knox device — inventoryItem ${inventoryItem.id} lockStatus set to UNLOCKED`);
     }
   }
 }
