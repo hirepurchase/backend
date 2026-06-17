@@ -591,6 +591,23 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       });
     }
 
+    // Always link an existing standalone ManagedDevice to the new contract immediately.
+    // This ensures the evaluate/auto-unlock cron can find the device even when
+    // unlockOnContract=false or the device was not locked at creation time.
+    if (completeContract) {
+      const standaloneMd = await prisma.managedDevice.findUnique({
+        where: { inventoryItemId },
+        select: { id: true, contractId: true, customerId_uuid: true },
+      });
+      if (standaloneMd && !standaloneMd.contractId) {
+        try {
+          await linkManagedDeviceToContract(standaloneMd.id, completeContract.id);
+        } catch (linkErr) {
+          console.error(`Failed to link standalone managed device to contract ${completeContract.contractNumber}:`, linkErr);
+        }
+      }
+    }
+
     let deviceUnlock: ContractCreateDeviceUnlockResult = {
       requested: unlockRequested,
       attempted: false,
