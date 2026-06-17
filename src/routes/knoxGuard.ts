@@ -15,6 +15,7 @@ import {
   lockKnoxGuardContractDevice,
   processKnoxGuardCommands,
   unlockKnoxGuardContractDevice,
+  verifyKnoxDeviceStatus,
 } from '../controllers/knoxGuardController';
 import { getKnoxGuardSettings, updateKnoxGuardSettings } from '../controllers/knoxGuardSettingsController';
 import {
@@ -220,6 +221,13 @@ router.get(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
   getKnoxPortalDeviceStatus
+);
+
+router.post(
+  '/devices/verify-status/:serialNumber',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  verifyKnoxDeviceStatus
 );
 
 router.patch(

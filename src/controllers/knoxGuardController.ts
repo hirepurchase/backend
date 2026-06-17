@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { createAuditLog } from '../services/auditService';
+import prisma from '../config/database';
 import { lookupKnoxGuardDevice } from '../services/knoxGuardService';
 import {
   checkKnoxPortalActiveDevices,
@@ -478,5 +479,115 @@ export async function getKnoxPortalDeviceStatus(req: AuthenticatedRequest, res: 
   } catch (error: any) {
     console.error('Knox portal status lookup error:', error);
     res.status(500).json({ error: 'Failed to look up device on Knox portal' });
+  }
+}
+
+// POST /api/knox-guard/devices/verify-status/:serialNumber
+// Fetches live Knox portal state for a device and syncs inventory + ManagedDevice records.
+export async function verifyKnoxDeviceStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { serialNumber } = req.params;
+    if (!serialNumber) {
+      res.status(400).json({ error: 'serialNumber is required' });
+      return;
+    }
+
+    const lookup = await lookupKnoxGuardDevice({ deviceUid: serialNumber });
+
+    if (!lookup.success) {
+      res.status(lookup.statusCode ?? 502).json({ error: lookup.error || 'Knox portal lookup failed' });
+      return;
+    }
+
+    const deviceList = (lookup.data as any)?.deviceList;
+    const portalDevice: Record<string, any> | null = Array.isArray(deviceList) ? (deviceList[0] ?? null) : null;
+
+    if (!portalDevice) {
+      // Device not found on Knox portal — mark inventory accordingly
+      const invItem = await prisma.inventoryItem.findFirst({ where: { serialNumber } });
+      if (invItem && invItem.knoxUploadStatus === 'UPLOADED') {
+        await prisma.inventoryItem.update({
+          where: { id: invItem.id },
+          data: { knoxUploadStatus: 'FAILED', knoxUploadError: 'Device not found on Knox portal during verification' },
+        });
+      }
+      res.json({ found: false, synced: false, message: 'Device not found on Knox portal' });
+      return;
+    }
+
+    const portalStatus: string = (portalDevice.status ?? '').trim();
+    const normalized = portalStatus.toUpperCase();
+
+    // Derive lock/enrollment state from portal status
+    let inventoryLockStatus: 'LOCKED' | 'UNLOCKED' | null = null;
+    let managedActualState: string | null = null;
+    let managedEnrollmentStatus: string | null = null;
+
+    if (normalized.includes('LOCK')) {
+      inventoryLockStatus = 'LOCKED';
+      managedActualState = 'LOCKED';
+      managedEnrollmentStatus = 'ACTIVE';
+    } else if (normalized.includes('UNLOCK') || normalized === 'ENROLLED') {
+      inventoryLockStatus = 'UNLOCKED';
+      managedActualState = 'UNLOCKED';
+      managedEnrollmentStatus = 'ACTIVE';
+    } else if (normalized.includes('APPROV')) {
+      inventoryLockStatus = 'UNLOCKED';
+      managedActualState = 'UNLOCKED';
+      managedEnrollmentStatus = 'APPROVED';
+    } else if (normalized === 'ACCEPTED') {
+      managedActualState = 'PENDING';
+      managedEnrollmentStatus = 'APPROVAL_QUEUED';
+    }
+
+    const knoxObjectId: string | null = portalDevice.objectId ?? null;
+
+    // Sync inventory item
+    const invItem = await prisma.inventoryItem.findFirst({ where: { serialNumber } });
+    if (invItem) {
+      await prisma.inventoryItem.update({
+        where: { id: invItem.id },
+        data: {
+          knoxUploadStatus: 'UPLOADED',
+          knoxUploadError: null,
+          ...(inventoryLockStatus ? { lockStatus: inventoryLockStatus } : {}),
+        },
+      });
+    }
+
+    // Sync ManagedDevice if one exists for this serial number
+    const managedDevice = await prisma.managedDevice.findFirst({
+      where: { deviceUid: serialNumber },
+    });
+
+    if (managedDevice) {
+      await prisma.managedDevice.update({
+        where: { id: managedDevice.id },
+        data: {
+          ...(managedActualState ? { actualState: managedActualState } : {}),
+          ...(managedEnrollmentStatus ? { enrollmentStatus: managedEnrollmentStatus } : {}),
+          ...(knoxObjectId ? { knoxObjectId } : {}),
+          isActive: true,
+          lastError: null,
+        },
+      });
+    }
+
+    res.json({
+      found: true,
+      synced: true,
+      portalStatus,
+      inventoryLockStatus,
+      managedActualState,
+      managedEnrollmentStatus,
+      knoxObjectId,
+      model: portalDevice.model ?? null,
+      androidVersion: portalDevice.androidVersion ?? null,
+      agentVersion: portalDevice.agentVersion ?? null,
+      serial: portalDevice.serial ?? null,
+    });
+  } catch (error: any) {
+    console.error('Verify Knox device status error:', error);
+    res.status(500).json({ error: 'Failed to verify Knox device status' });
   }
 }
