@@ -407,7 +407,7 @@ model RetrySettings {
 model KnoxGuardSettings {
   id                           String   @id @default(uuid())
   supportPhone                 String?
-  lockAfterOverdueDays         Int      @default(7)
+  lockAfterOverdueDays         Int      @default(1)
   blockOnUnpaidPenalties       Boolean  @default(false)
   maxCommandRetries            Int      @default(3)
   commandCron                  String   @default("*/5 * * * *")

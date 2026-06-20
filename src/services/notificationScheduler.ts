@@ -3,7 +3,7 @@ import prisma from '../config/database';
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { isOverdue, calculatePenalty } from '../utils/helpers';
-import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
+import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices } from './deviceControlPolicyService';
 
 // Mark past-due installments as OVERDUE and apply penalties
 export async function markOverdueInstallments(): Promise<{ updated: number; penalties: number }> {
@@ -236,6 +236,20 @@ export function initializeNotificationScheduler(): void {
     }
   });
 
+  // Proactively evaluate ALL active enrolled contracts at 8:30 AM (after overdue marking).
+  // Catches devices that should be locked but missed event-driven evaluate — e.g. device
+  // enrolled days after installment went overdue, or server restart mid-cycle.
+  cron.schedule('30 8 * * *', () => {
+    const enqueued = enqueueSingletonJob('knox-proactive-evaluate', async () => {
+      console.log('Knox Guard: running proactive evaluate for all active enrolled contracts...');
+      const result = await evaluateAllActiveContractsWithDevices();
+      console.log(`Knox Guard proactive evaluate: ${result.evaluated} evaluated, ${result.locked} locked, ${result.unlocked} unlocked, ${result.errors} errors`);
+    });
+    if (!enqueued) {
+      console.log('Skipping Knox proactive evaluate - previous job still running');
+    }
+  });
+
   // Run upcoming payment check every day at 9:00 AM
   cron.schedule('0 9 * * *', () => {
     const enqueued = enqueueSingletonJob('notifications-upcoming', async () => {
@@ -260,6 +274,7 @@ export function initializeNotificationScheduler(): void {
 
   console.log('Notification scheduler initialized');
   console.log('- Overdue installment marking: Daily at 8:00 AM');
+  console.log('- Knox proactive device evaluate: Daily at 8:30 AM');
   console.log('- Upcoming payments check: Daily at 9:00 AM');
   console.log('- Overdue payments check: Daily at 10:00 AM');
 }

@@ -363,8 +363,8 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       return;
     }
 
-    // Grace period is always 7 days — fixed business rule
-    const fixedGracePeriodDays = 7;
+    // Grace period is 0 — device locks the day after due date
+    const fixedGracePeriodDays = 0;
 
     // Start date is always today + 7 days — fixed business rule
     const defaultStartDate = new Date();

@@ -129,7 +129,7 @@ interface KnoxSettings {
 }
 
 const KNOX_SETTINGS_DEFAULTS: KnoxSettings = {
-  lockAfterOverdueDays: 7,
+  lockAfterOverdueDays: 1,
   blockOnUnpaidPenalties: false,
   maxCommandRetries: 3,
   supportPhone: null,
@@ -976,6 +976,43 @@ function calculateOverdueMetrics(contract: any, blockOnUnpaidPenalties: boolean)
   };
 }
 
+// Evaluate all active contracts that have an enrolled Knox device.
+// Called by the daily proactive cron to catch devices that should be locked/unlocked
+// but missed the event-driven evaluate (e.g. device enrolled days after going overdue).
+export async function evaluateAllActiveContractsWithDevices(): Promise<{ evaluated: number; locked: number; unlocked: number; errors: number }> {
+  const contracts = await prismaAny.hirePurchaseContract.findMany({
+    where: {
+      status: 'ACTIVE',
+      managedDevice: {
+        isActive: true,
+        enrollmentStatus: { in: ['APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'] },
+      },
+    },
+    select: { id: true, contractNumber: true },
+  });
+
+  let evaluated = 0;
+  let locked = 0;
+  let unlocked = 0;
+  let errors = 0;
+
+  for (const contract of contracts) {
+    try {
+      const result = await evaluateManagedDeviceForContract(contract.id);
+      evaluated++;
+      if (result.actionType === 'LOCK_DEVICE' && result.actionSuccess) locked++;
+      if (result.actionType === 'UNLOCK_DEVICE' && result.actionSuccess) unlocked++;
+    } catch (error: any) {
+      const msg = error?.message || '';
+      if (msg === 'Contract not found' || msg === 'Contract has no enrolled managed device') continue;
+      errors++;
+      console.error(`Knox proactive evaluate failed for contract ${contract.contractNumber}:`, error);
+    }
+  }
+
+  return { evaluated, locked, unlocked, errors };
+}
+
 export async function getDeviceControlPolicySummary() {
   const s = await getKnoxSettings();
   return {
@@ -1819,7 +1856,9 @@ export async function reconcileKnoxGuardWebhookEvent(
     }
   });
 
-  await safelyEvaluateManagedDeviceForContract(managedDevice.contractId);
+  if (managedDevice.contractId) {
+    await safelyEvaluateManagedDeviceForContract(managedDevice.contractId);
+  }
 
   return {
     acknowledged: true,
@@ -1851,7 +1890,9 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const isOverdueEnoughToLock = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
   const actualState = resolveManagedState(contract.managedDevice.actualState) || 'UNKNOWN';
   const enrollmentStatus = resolveEnrollmentState(contract.managedDevice.enrollmentStatus) || 'PENDING';
-  const deviceCanAcceptControlCommand = ['APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(enrollmentStatus);
+  // PENDING is treated the same as APPROVAL_QUEUED — Knox may reject but desiredState is recorded
+  // and the daily proactive evaluate will retry once enrollment progresses.
+  const deviceCanAcceptControlCommand = ['PENDING', 'APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(enrollmentStatus);
   const deviceIsLockedOrPending = ['LOCKED', 'PENDING'].includes(actualState);
   const shouldLock = isOverdueEnoughToLock;
   const shouldBlink = BLINK_BEFORE_LOCK_ENABLED && isOverdueEnoughToBlink && !isOverdueEnoughToLock;
@@ -1952,12 +1993,14 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   };
 }
 
-export async function safelyEvaluateManagedDeviceForContract(contractId: string): Promise<void> {
+export async function safelyEvaluateManagedDeviceForContract(contractId: string | null | undefined): Promise<void> {
+  if (!contractId) return;
   try {
     await evaluateManagedDeviceForContract(contractId);
   } catch (error: any) {
     const message = error?.message || 'Unknown Knox Guard evaluation error';
     if (
+      message === 'Contract not found' ||
       message === 'Contract has no enrolled managed device' ||
       message === 'Managed device not found for contract'
     ) {
@@ -2153,27 +2196,35 @@ export async function unenrollManagedDeviceForContract(
     return null;
   }
 
+  const message = reason || 'Contract completed — ownership transferred to customer.';
+
   const result = await completeKnoxGuardDevice({
     objectId: device.knoxObjectId || undefined,
     deviceUid: device.deviceUid,
     approveId: device.approveId,
-    message: reason || 'Contract completed — ownership transferred to customer.',
+    message,
   });
 
-  // Knox /devices/complete starts a 2-day window; mark COMPLETING until webhook confirms COMPLETE
+  // Knox /devices/complete starts a 2-day window; mark COMPLETING until webhook confirms COMPLETE.
+  // On failure, queue a COMPLETE_DEVICE command so the 5-min cron retries up to maxCommandRetries.
   await prismaAny.managedDevice.update({
     where: { id: device.id },
     data: {
-      enrollmentStatus: result.success ? 'COMPLETING' : device.enrollmentStatus,
+      enrollmentStatus: result.success || result.dryRun ? 'COMPLETING' : device.enrollmentStatus,
       desiredState: 'UNLOCKED',
       lastSyncedAt: new Date(),
-      lastError: result.success ? null : (result.error || 'Knox complete request failed'),
+      lastError: result.success || result.dryRun ? null : (result.error || 'Knox complete request failed — queued for retry'),
       lastKnoxAction: 'COMPLETE_DEVICE',
       lastTransactionId: result.transactionId || null,
     },
   });
 
-  if (device.inventoryItemId && result.success) {
+  if (!result.success && !result.dryRun) {
+    // Queue for automatic retry via the 5-minute command processor cron
+    await queueManagedDeviceCommand(device.id, 'COMPLETE_DEVICE', { message });
+  }
+
+  if (device.inventoryItemId && (result.success || result.dryRun)) {
     await prismaAny.inventoryItem.update({
       where: { id: device.inventoryItemId },
       data: { lockStatus: 'UNLOCKED' },
