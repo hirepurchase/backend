@@ -39,6 +39,7 @@ export const PERMISSIONS = {
   MANAGE_COMMISSION_SETTINGS: 'MANAGE_COMMISSION_SETTINGS',
   MANAGE_AGENT_LEDGER: 'MANAGE_AGENT_LEDGER',
   PAY_AGENT_DEPOSIT: 'PAY_AGENT_DEPOSIT',
+  EDIT_CONTRACT_VALUES: 'EDIT_CONTRACT_VALUES',
 } as const;
 
 export type PermissionName = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -101,6 +102,7 @@ export const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
   { name: PERMISSIONS.MANAGE_COMMISSION_SETTINGS, description: 'Configure agent commission settings', category: 'Administration', scope: 'action' },
   { name: PERMISSIONS.MANAGE_AGENT_LEDGER, description: 'View all agents deposit and commission ledgers', category: 'Payments', scope: 'all' },
   { name: PERMISSIONS.PAY_AGENT_DEPOSIT, description: 'Remit agent deposit collection to company via mobile money', category: 'Payments', scope: 'action' },
+  { name: PERMISSIONS.EDIT_CONTRACT_VALUES, description: 'Edit locked financial fields on a contract — total price, deposit amount, total installments, and start date', category: 'Contracts', scope: 'action' },
 ];
 
 export const CUSTOMER_ACCESS_PERMISSIONS = [
