@@ -1466,6 +1466,112 @@ export async function deleteContract(req: AuthenticatedRequest, res: Response): 
   }
 }
 
+// Nullify contract — wipes all records and frees the device
+export async function nullifyContract(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+
+    const contract = await prisma.hirePurchaseContract.findUnique({
+      where: { id },
+      include: {
+        installments: true,
+        payments: true,
+        penalties: true,
+        agentLedger: true,
+        managedDevice: true,
+        inventoryItem: true,
+        hubtelPreapproval: true,
+      },
+    });
+
+    if (!contract) {
+      res.status(404).json({ error: 'Contract not found' });
+      return;
+    }
+
+    if (contract.status === 'COMPLETED') {
+      res.status(400).json({ error: 'Cannot nullify a completed contract' });
+      return;
+    }
+
+    // Delete signature from Supabase if it exists
+    if (contract.signatureUrl) {
+      try { await deleteFromSupabase(contract.signatureUrl); } catch (_) {}
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Delete penalties
+      if (contract.penalties.length > 0) {
+        await tx.penalty.deleteMany({ where: { contractId: id } });
+      }
+
+      // Delete payment transactions
+      if (contract.payments.length > 0) {
+        await tx.paymentTransaction.deleteMany({ where: { contractId: id } });
+      }
+
+      // Delete installment schedules
+      await tx.installmentSchedule.deleteMany({ where: { contractId: id } });
+
+      // Detach and delete managed Knox device
+      if (contract.managedDevice) {
+        await tx.managedDevice.delete({ where: { id: contract.managedDevice.id } });
+      }
+
+      // Delete agent ledger entry
+      if (contract.agentLedger) {
+        await tx.agentDepositLedger.delete({ where: { id: contract.agentLedger.id } });
+      }
+
+      // Delete Hubtel preapproval if linked
+      if (contract.hubtelPreapproval) {
+        await tx.hubtelPreapproval.delete({ where: { id: contract.hubtelPreapproval.id } });
+      }
+
+      // Delete the contract itself
+      await tx.hirePurchaseContract.delete({ where: { id } });
+
+      // Free the inventory item
+      if (contract.inventoryItem) {
+        await tx.inventoryItem.update({
+          where: { id: contract.inventoryItem.id },
+          data: { status: 'AVAILABLE', contractId: null },
+        });
+      }
+    });
+
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'NULLIFY_CONTRACT',
+      entity: 'HirePurchaseContract',
+      entityId: id,
+      oldValues: {
+        contractNumber: contract.contractNumber,
+        customerId: contract.customerId_uuid,
+        totalPrice: contract.totalPrice,
+        paymentsDeleted: contract.payments.length,
+        installmentsDeleted: contract.installments.length,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({
+      message: `Contract ${contract.contractNumber} has been nullified`,
+      deleted: {
+        payments: contract.payments.length,
+        installments: contract.installments.length,
+        penalties: contract.penalties.length,
+        knoxDevice: !!contract.managedDevice,
+        agentLedger: !!contract.agentLedger,
+      },
+    });
+  } catch (error) {
+    console.error('Nullify contract error:', error);
+    res.status(500).json({ error: 'Failed to nullify contract' });
+  }
+}
+
 // Reschedule installments
 export async function rescheduleInstallments(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {

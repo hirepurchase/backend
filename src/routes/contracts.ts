@@ -12,6 +12,7 @@ import {
   writeOffContract,
   transferOwnership,
   deleteContract,
+  nullifyContract,
   rescheduleInstallments,
   editInstallment,
   getAllPendingInstallments,
@@ -69,6 +70,7 @@ router.post('/update-overdue', authenticateAdmin, requireAnyPermission(PERMISSIO
 router.post('/:id/reschedule', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), rescheduleInstallments);
 router.put('/:contractId/installments/:installmentId', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), editInstallment);
 router.post('/:contractId/installments/:installmentId/pay', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), payInstallment);
+router.post('/:id/nullify', authenticateAdmin, requireAnyPermission(PERMISSIONS.NULLIFY_CONTRACT), nullifyContract);
 router.post('/:id/cancel', authenticateAdmin, requireAnyPermission(PERMISSIONS.CANCEL_CONTRACT), cancelContract);
 router.post('/:id/write-off', authenticateAdmin, requireAnyPermission(PERMISSIONS.WRITE_OFF_CONTRACT), writeOffContract);
 router.post('/:id/transfer-ownership', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), transferOwnership);
