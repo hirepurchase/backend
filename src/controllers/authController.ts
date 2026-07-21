@@ -384,6 +384,7 @@ export async function requestCustomerPasswordReset(req: Request, res: Response):
     await sendSMS({
       to: normalizedPhone,
       message: `Your AIDOO TECH password reset code is ${code}. It expires in 10 minutes.`,
+      bypassSettingsCheck: true,
     });
 
     res.json({ message: 'If the account exists, an OTP has been sent' });

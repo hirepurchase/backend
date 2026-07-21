@@ -1,5 +1,6 @@
 import nodemailer from 'nodemailer';
 import axios from 'axios';
+import prisma from '../config/database';
 
 // Email configuration
 const emailPort = parseInt(process.env.EMAIL_PORT || '587');
@@ -49,6 +50,31 @@ interface EmailOptions {
 interface SMSOptions {
   to: string;
   message: string;
+  // Set only for account-recovery flows (e.g. OTP) that must not be
+  // silenced by the admin-facing SMS toggle, or customers get locked out.
+  bypassSettingsCheck?: boolean;
+}
+
+// Cached so every SMS send doesn't hit the DB; refreshed periodically since
+// settings changes should take effect without a server restart.
+let smsEnabledCache: { value: boolean; fetchedAt: number } | null = null;
+const SMS_SETTINGS_CACHE_TTL_MS = 30_000;
+
+async function isSmsEnabled(): Promise<boolean> {
+  const now = Date.now();
+  if (smsEnabledCache && now - smsEnabledCache.fetchedAt < SMS_SETTINGS_CACHE_TTL_MS) {
+    return smsEnabledCache.value;
+  }
+
+  try {
+    const settings = await prisma.notificationSettings.findFirst();
+    const value = settings ? settings.sendSMS : true;
+    smsEnabledCache = { value, fetchedAt: now };
+    return value;
+  } catch (error) {
+    console.error('Failed to load notification settings, defaulting to SMS enabled:', error);
+    return true;
+  }
 }
 
 // Send Email
@@ -84,6 +110,11 @@ export async function sendEmail(options: EmailOptions): Promise<boolean> {
 export async function sendSMS(options: SMSOptions): Promise<boolean> {
   if (process.env.ENABLE_SMS_NOTIFICATIONS !== 'true') {
     console.log('SMS notifications are disabled');
+    return false;
+  }
+
+  if (!options.bypassSettingsCheck && !(await isSmsEnabled())) {
+    console.log('SMS notifications are disabled in admin settings');
     return false;
   }
 
