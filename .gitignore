@@ -70,3 +70,22 @@ temp/
 # Misc
 certs/
 .vercel
+
+# One-off dev/debug scripts and already-applied migrations (kept locally, not shipped)
+# Note: prisma/migrations/*.sql must stay tracked — this only matches loose root-level files
+/scripts/
+/*.sql
+
+# Deploy helper scripts superseded by render.yaml / .deployment
+/deploy-prepare.sh
+/deploy.cmd
+/server-install.js
+
+# Planning/reference docs, not app code
+/DEPLOYMENT_CHECKLIST.md
+/DIRECT_DEBIT_FAILURE_HANDLING.md
+/HUBTEL_TEST_DEPLOYMENT.md
+/KNOX_GUARD_SETUP.md
+/MIGRATION_INSTRUCTIONS.md
+/PERMISSIONS.md
+/RENDER_DEPLOYMENT.md
