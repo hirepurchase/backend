@@ -6,8 +6,14 @@ import { createAuditLog } from '../services/auditService';
 import { sendWelcomeNotification } from '../services/notificationService';
 import { AuthenticatedRequest, AdminUserPayload, CustomerPayload } from '../types';
 import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
-import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
+import { uploadToSupabase, deleteFromSupabase, ImageCompressionOptions } from '../services/storageService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
+
+const CUSTOMER_PHOTO_COMPRESSION: ImageCompressionOptions = {
+  maxWidth: 800,
+  maxHeight: 800,
+  quality: 70,
+};
 
 function canViewAnyCustomer(adminUser: AdminUserPayload | undefined, customerCreatedById: string | null | undefined): boolean {
   const permissions = adminUser?.permissions ?? [];
@@ -31,11 +37,6 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
 
     if (!nationalId || !nationalId.trim()) {
       res.status(400).json({ error: 'National ID is required' });
-      return;
-    }
-
-    if (!req.file) {
-      res.status(400).json({ error: 'Customer photo is required' });
       return;
     }
 
@@ -74,11 +75,12 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
     // Handle photo upload
     let photoUrl: string | null = null;
     if (req.file) {
-      // Upload to Supabase Storage
+      // Upload to Supabase Storage (resized/compressed to save storage space)
       const uploadResult = await uploadToSupabase(
         req.file.buffer,
         'customers',
-        req.file.originalname
+        req.file.originalname,
+        CUSTOMER_PHOTO_COMPRESSION
       );
 
       if (uploadResult.success && uploadResult.publicUrl) {
@@ -384,7 +386,8 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
       const uploadResult = await uploadToSupabase(
         req.file.buffer,
         'customer-photos',
-        req.file.originalname
+        req.file.originalname,
+        CUSTOMER_PHOTO_COMPRESSION
       );
 
       if (uploadResult.success && uploadResult.publicUrl) {

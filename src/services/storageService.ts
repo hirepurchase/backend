@@ -1,6 +1,7 @@
 import { supabase, STORAGE_BUCKET } from '../config/supabase';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
+import sharp from 'sharp';
 
 export interface UploadResult {
   success: boolean;
@@ -8,17 +9,45 @@ export interface UploadResult {
   error?: string;
 }
 
+export interface ImageCompressionOptions {
+  maxWidth: number;
+  maxHeight: number;
+  quality: number; // 1-100
+}
+
+/**
+ * Resize and compress an image buffer, converting it to JPEG.
+ * Non-image buffers (e.g. PDFs) should never be passed here.
+ */
+async function compressImage(
+  fileBuffer: Buffer,
+  options: ImageCompressionOptions
+): Promise<Buffer> {
+  return sharp(fileBuffer)
+    .rotate() // respect EXIF orientation before resizing
+    .resize({
+      width: options.maxWidth,
+      height: options.maxHeight,
+      fit: 'inside',
+      withoutEnlargement: true,
+    })
+    .jpeg({ quality: options.quality })
+    .toBuffer();
+}
+
 /**
  * Upload a file to Supabase Storage
  * @param file - File buffer or path
  * @param folder - Folder name in bucket (e.g., 'customers', 'signatures')
  * @param originalFilename - Original filename
+ * @param imageOptions - When provided, the image is resized/compressed to JPEG before upload
  * @returns Upload result with public URL
  */
 export async function uploadToSupabase(
   fileBuffer: Buffer,
   folder: string,
-  originalFilename: string
+  originalFilename: string,
+  imageOptions?: ImageCompressionOptions
 ): Promise<UploadResult> {
   try {
     // Check if Supabase is configured
@@ -29,15 +58,22 @@ export async function uploadToSupabase(
       };
     }
 
+    let uploadBuffer = fileBuffer;
+    let fileExt = path.extname(originalFilename);
+
+    if (imageOptions) {
+      uploadBuffer = await compressImage(fileBuffer, imageOptions);
+      fileExt = '.jpg';
+    }
+
     // Generate unique filename
-    const fileExt = path.extname(originalFilename);
     const fileName = `${uuidv4()}${fileExt}`;
     const filePath = `${folder}/${fileName}`;
 
     // Upload file to Supabase
     const { data, error } = await supabase.storage
       .from(STORAGE_BUCKET)
-      .upload(filePath, fileBuffer, {
+      .upload(filePath, uploadBuffer, {
         contentType: getContentType(fileExt),
         cacheControl: '3600',
         upsert: false
