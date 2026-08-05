@@ -10,6 +10,7 @@ import {
   getDailyPayments,
   getAgentReport,
   getAgentDashboard,
+  getAgentOverdueInstallments,
 } from '../controllers/reportController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { DASHBOARD_ACCESS_PERMISSIONS, DAILY_PAYMENTS_ACCESS_PERMISSIONS, PERMISSIONS } from '../constants/permissions';
@@ -22,6 +23,7 @@ router.get('/dashboard', authenticateAdmin, requireAnyPermission(...DASHBOARD_AC
 
 // Agent personal dashboard (scoped to the logged-in agent)
 router.get('/agent-dashboard', authenticateAdmin, requireAnyPermission(...DASHBOARD_ACCESS_PERMISSIONS), getAgentDashboard);
+router.get('/agent-dashboard/overdue-installments', authenticateAdmin, requireAnyPermission(...DASHBOARD_ACCESS_PERMISSIONS), getAgentOverdueInstallments);
 
 // Standard reports (require VIEW_REPORTS permission)
 router.get('/sales', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getSalesReport);

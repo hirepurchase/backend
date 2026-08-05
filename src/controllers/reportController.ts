@@ -1108,3 +1108,69 @@ export async function getAgentDashboard(req: AuthenticatedRequest, res: Response
     res.status(500).json({ error: 'Failed to fetch agent dashboard' });
   }
 }
+
+// Agent's overdue installments — one row per overdue installment, with the
+// customer's contact info and payment history, so the agent can call them.
+export async function getAgentOverdueInstallments(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const agentId = req.user!.id;
+    const now = new Date();
+
+    const contracts = await prisma.hirePurchaseContract.findMany({
+      where: { createdById: agentId, status: 'ACTIVE' },
+      include: {
+        customer: { select: { id: true, firstName: true, lastName: true, membershipId: true, phone: true } },
+        inventoryItem: { include: { product: { select: { name: true } } } },
+        installments: {
+          where: { status: 'OVERDUE' },
+          orderBy: { dueDate: 'asc' },
+        },
+        payments: {
+          where: { status: 'SUCCESS' },
+          orderBy: { paymentDate: 'desc' },
+          take: 1,
+          select: { paymentDate: true, amount: true },
+        },
+      },
+    });
+
+    const rows = contracts.flatMap((contract) =>
+      contract.installments.map((installment) => {
+        const msOverdue = now.getTime() - new Date(installment.dueDate).getTime();
+        const daysOverdue = Math.max(0, Math.floor(msOverdue / (1000 * 60 * 60 * 24)));
+        const lastPayment = contract.payments[0] ?? null;
+
+        return {
+          contractId: contract.id,
+          contractNumber: contract.contractNumber,
+          installmentId: installment.id,
+          installmentNo: installment.installmentNo,
+          customer: {
+            id: contract.customer.id,
+            name: `${contract.customer.firstName} ${contract.customer.lastName}`.trim(),
+            phone: contract.customer.phone,
+            membershipId: contract.customer.membershipId,
+          },
+          product: contract.inventoryItem?.product?.name ?? null,
+          amountOverdue: Math.round((installment.amount - installment.paidAmount) * 100) / 100,
+          dueDate: installment.dueDate,
+          daysOverdue,
+          lastPaymentDate: lastPayment?.paymentDate ?? null,
+          lastPaymentAmount: lastPayment?.amount ?? null,
+        };
+      })
+    );
+
+    // Worst-overdue first
+    rows.sort((a, b) => b.daysOverdue - a.daysOverdue);
+
+    res.json({
+      count: rows.length,
+      totalOverdueAmount: Math.round(rows.reduce((sum, r) => sum + r.amountOverdue, 0) * 100) / 100,
+      installments: rows,
+    });
+  } catch (error) {
+    console.error('Get agent overdue installments error:', error);
+    res.status(500).json({ error: 'Failed to fetch overdue installments' });
+  }
+}
