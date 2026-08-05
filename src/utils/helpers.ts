@@ -24,6 +24,24 @@ export function generateTransactionRef(): string {
   return `${prefix}${timestamp}${random}`;
 }
 
+/**
+ * Round a money value to 2 decimal places using integer-cent arithmetic,
+ * avoiding IEEE-754 drift (e.g. 111.66999999999998 -> 111.67).
+ */
+export function roundMoney(amount: number): number {
+  return Math.round((amount + Number.EPSILON) * 100) / 100;
+}
+
+/**
+ * True when two money values are equal within half a cent, or `a` is
+ * effectively >= `b`. Use instead of raw >=/<=/== comparisons on money
+ * so leftover fractions-of-a-cent from float arithmetic don't block a
+ * payment from settling an installment/contract balance.
+ */
+export function isMoneyGte(a: number, b: number): boolean {
+  return roundMoney(a) >= roundMoney(b) - 0.005;
+}
+
 export function calculateInstallmentSchedule(
   financeAmount: number,
   frequency: PaymentFrequency,

@@ -4,6 +4,7 @@ import { sendPaymentFailureNotification } from './notificationService';
 import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService';
 import { appendWebhookToken } from '../utils/callbackSecurity';
 import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
+import { roundMoney, isMoneyGte } from '../utils/helpers';
 
 // Hubtel API Configuration
 const HUBTEL_POS_SALES_ID = process.env.HUBTEL_POS_SALES_ID || '';
@@ -802,19 +803,19 @@ export async function processPreapprovalCallback(callbackData: unknown): Promise
 // ==================== HELPER FUNCTIONS ====================
 
 async function processSuccessfulPayment(payment: any, contract: any): Promise<void> {
-  let remainingAmount = payment.amount;
+  let remainingAmount = roundMoney(payment.amount);
 
   await prisma.$transaction(async (tx) => {
     // First, apply to unpaid penalties
     for (const penalty of contract.penalties) {
       if (remainingAmount <= 0) break;
 
-      if (remainingAmount >= penalty.amount) {
+      if (isMoneyGte(remainingAmount, penalty.amount)) {
         await tx.penalty.update({
           where: { id: penalty.id },
           data: { isPaid: true, paidAt: new Date() },
         });
-        remainingAmount -= penalty.amount;
+        remainingAmount = roundMoney(remainingAmount - penalty.amount);
       }
     }
 
@@ -822,9 +823,9 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
     for (const installment of contract.installments) {
       if (remainingAmount <= 0) break;
 
-      const installmentRemaining = installment.amount - installment.paidAmount;
+      const installmentRemaining = roundMoney(installment.amount - installment.paidAmount);
 
-      if (remainingAmount >= installmentRemaining) {
+      if (isMoneyGte(remainingAmount, installmentRemaining)) {
         await tx.installmentSchedule.update({
           where: { id: installment.id },
           data: {
@@ -833,12 +834,12 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
             paidAt: new Date(),
           },
         });
-        remainingAmount -= installmentRemaining;
+        remainingAmount = roundMoney(remainingAmount - installmentRemaining);
       } else {
         await tx.installmentSchedule.update({
           where: { id: installment.id },
           data: {
-            paidAmount: installment.paidAmount + remainingAmount,
+            paidAmount: roundMoney(installment.paidAmount + remainingAmount),
             status: 'PARTIAL',
           },
         });
@@ -851,16 +852,17 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
       where: { contractId: contract.id, status: 'SUCCESS' },
     });
     const paymentsSum = allSuccessfulPayments.reduce((sum: number, p: any) => sum + p.amount, 0);
-    const newTotalPaid = contract.depositAmount + paymentsSum;
-    const newOutstandingBalance = contract.totalPrice - newTotalPaid;
+    const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
+    const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
 
     const contractUpdate: any = {
       totalPaid: newTotalPaid,
       outstandingBalance: Math.max(0, newOutstandingBalance),
     };
 
-    if (newOutstandingBalance <= 0) {
+    if (newOutstandingBalance <= 0.005) {
       contractUpdate.status = 'COMPLETED';
+      contractUpdate.outstandingBalance = 0;
     }
 
     await tx.hirePurchaseContract.update({

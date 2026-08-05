@@ -15,7 +15,7 @@ import {
 } from '../services/hubtelService';
 import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types';
 import { validateWebhookRequest } from '../utils/callbackSecurity';
-import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
+import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber, roundMoney, isMoneyGte } from '../utils/helpers';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 
@@ -98,13 +98,13 @@ export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Re
     }
 
     // Validate amount
-    const paymentAmount = Number(amount);
+    const paymentAmount = roundMoney(Number(amount));
     if (paymentAmount <= 0) {
       res.status(400).json({ error: 'Invalid payment amount' });
       return;
     }
 
-    if (paymentAmount > contract.outstandingBalance) {
+    if (!isMoneyGte(contract.outstandingBalance, paymentAmount)) {
       res.status(400).json({ error: 'Payment amount exceeds outstanding balance' });
       return;
     }
@@ -384,7 +384,7 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
 
   if (!payment || !payment.contract) return;
 
-  let remainingAmount = payment.amount;
+  let remainingAmount = roundMoney(payment.amount);
   const contract = payment.contract;
 
   await prisma.$transaction(async (tx) => {
@@ -392,12 +392,12 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
     for (const penalty of contract.penalties) {
       if (remainingAmount <= 0) break;
 
-      if (remainingAmount >= penalty.amount) {
+      if (isMoneyGte(remainingAmount, penalty.amount)) {
         await tx.penalty.update({
           where: { id: penalty.id },
           data: { isPaid: true, paidAt: new Date() },
         });
-        remainingAmount -= penalty.amount;
+        remainingAmount = roundMoney(remainingAmount - penalty.amount);
       }
     }
 
@@ -405,9 +405,9 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
     for (const installment of contract.installments) {
       if (remainingAmount <= 0) break;
 
-      const installmentRemaining = installment.amount - installment.paidAmount;
+      const installmentRemaining = roundMoney(installment.amount - installment.paidAmount);
 
-      if (remainingAmount >= installmentRemaining) {
+      if (isMoneyGte(remainingAmount, installmentRemaining)) {
         // Fully pay this installment
         await tx.installmentSchedule.update({
           where: { id: installment.id },
@@ -417,13 +417,13 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
             paidAt: new Date(),
           },
         });
-        remainingAmount -= installmentRemaining;
+        remainingAmount = roundMoney(remainingAmount - installmentRemaining);
       } else {
         // Partial payment
         await tx.installmentSchedule.update({
           where: { id: installment.id },
           data: {
-            paidAmount: installment.paidAmount + remainingAmount,
+            paidAmount: roundMoney(installment.paidAmount + remainingAmount),
             status: 'PARTIAL',
           },
         });
@@ -441,17 +441,18 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
     });
 
     const paymentsSum = allSuccessfulPayments.reduce((sum, p) => sum + p.amount, 0);
-    const newTotalPaid = contract.depositAmount + paymentsSum;
-    const newOutstandingBalance = contract.totalPrice - newTotalPaid;
+    const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
+    const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
 
     const contractUpdate: Record<string, unknown> = {
       totalPaid: newTotalPaid,
       outstandingBalance: Math.max(0, newOutstandingBalance),
     };
 
-    // Check if fully paid
-    if (newOutstandingBalance <= 0) {
+    // Check if fully paid (within half a cent, to absorb rounding drift)
+    if (newOutstandingBalance <= 0.005) {
       contractUpdate.status = 'COMPLETED';
+      contractUpdate.outstandingBalance = 0;
     }
 
     await tx.hirePurchaseContract.update({
@@ -543,8 +544,8 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
       return;
     }
 
-    const paymentAmount = Number(amount);
-    if (paymentAmount > contract.outstandingBalance) {
+    const paymentAmount = roundMoney(Number(amount));
+    if (!isMoneyGte(contract.outstandingBalance, paymentAmount)) {
       res.status(400).json({ error: 'Payment amount exceeds outstanding balance' });
       return;
     }
@@ -655,15 +656,16 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
         });
         const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount, 0);
         const contract = payment.contract;
-        const newTotalPaid = contract.depositAmount + paymentsSum;
-        const newOutstandingBalance = Math.max(0, contract.totalPrice - newTotalPaid);
+        const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
+        const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
+        const isFullyPaid = newOutstandingBalance <= 0.005;
 
         await tx.hirePurchaseContract.update({
           where: { id: payment.contractId },
           data: {
             totalPaid: newTotalPaid,
-            outstandingBalance: newOutstandingBalance,
-            status: newOutstandingBalance <= 0 ? 'COMPLETED' : 'ACTIVE',
+            outstandingBalance: Math.max(0, isFullyPaid ? 0 : newOutstandingBalance),
+            status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
           },
         });
 
@@ -685,16 +687,16 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
         }
 
         // Re-apply total payments sum across installments
-        let remaining = paymentsSum;
+        let remaining = roundMoney(paymentsSum);
         for (const inst of installments) {
           if (remaining <= 0) break;
           const owed = inst.amount;
-          if (remaining >= owed) {
+          if (isMoneyGte(remaining, owed)) {
             await tx.installmentSchedule.update({
               where: { id: inst.id },
               data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
             });
-            remaining -= owed;
+            remaining = roundMoney(remaining - owed);
           } else {
             await tx.installmentSchedule.update({
               where: { id: inst.id },
@@ -754,15 +756,16 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
       });
       const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount, 0);
       const contract = payment.contract;
-      const newTotalPaid = contract.depositAmount + paymentsSum;
-      const newOutstandingBalance = Math.max(0, contract.totalPrice - newTotalPaid);
+      const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
+      const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
+      const isFullyPaid = newOutstandingBalance <= 0.005;
 
       await tx.hirePurchaseContract.update({
         where: { id: payment.contractId },
         data: {
           totalPaid: newTotalPaid,
-          outstandingBalance: newOutstandingBalance,
-          status: newOutstandingBalance <= 0 ? 'COMPLETED' : 'ACTIVE',
+          outstandingBalance: Math.max(0, isFullyPaid ? 0 : newOutstandingBalance),
+          status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
         },
       });
 
@@ -779,16 +782,16 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
         });
       }
 
-      let remaining = paymentsSum;
+      let remaining = roundMoney(paymentsSum);
       for (const inst of installments) {
         if (remaining <= 0) break;
         const owed = inst.amount;
-        if (remaining >= owed) {
+        if (isMoneyGte(remaining, owed)) {
           await tx.installmentSchedule.update({
             where: { id: inst.id },
             data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
           });
-          remaining -= owed;
+          remaining = roundMoney(remaining - owed);
         } else {
           await tx.installmentSchedule.update({
             where: { id: inst.id },
@@ -876,13 +879,13 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
     }
 
     // Validate amount
-    const paymentAmount = Number(amount);
+    const paymentAmount = roundMoney(Number(amount));
     if (paymentAmount <= 0) {
       res.status(400).json({ error: 'Invalid payment amount' });
       return;
     }
 
-    if (paymentAmount > contract.outstandingBalance) {
+    if (!isMoneyGte(contract.outstandingBalance, paymentAmount)) {
       res.status(400).json({ error: 'Payment amount exceeds outstanding balance' });
       return;
     }
@@ -1365,8 +1368,8 @@ export async function initiateHubtelRegularPayment(req: AuthenticatedRequest, re
     }
 
     // Validate amount
-    const paymentAmount = Number(amount);
-    if (paymentAmount <= 0 || paymentAmount > contract.outstandingBalance) {
+    const paymentAmount = roundMoney(Number(amount));
+    if (paymentAmount <= 0 || !isMoneyGte(contract.outstandingBalance, paymentAmount)) {
       res.status(400).json({ error: 'Invalid payment amount' });
       return;
     }
@@ -1490,7 +1493,7 @@ export async function initiateDirectDebitPayment(req: AuthenticatedRequest, res:
 
     // Validate amount
     const paymentAmount = amount ? Number(amount) : contract.installmentAmount;
-    if (paymentAmount <= 0 || paymentAmount > contract.outstandingBalance) {
+    if (paymentAmount <= 0 || !isMoneyGte(contract.outstandingBalance, paymentAmount)) {
       res.status(400).json({ error: 'Invalid payment amount' });
       return;
     }
@@ -1665,7 +1668,7 @@ export async function initiateUssdPayment(req: Request, res: Response): Promise<
       return;
     }
 
-    const paymentAmount = Number(amount);
+    const paymentAmount = roundMoney(Number(amount));
     if (isNaN(paymentAmount) || paymentAmount <= 0) {
       res.status(400).json({ success: false, message: 'Amount must be a positive number.' });
       return;
@@ -2000,7 +2003,7 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
       const parts = ClientState.split('|');
       const [, contractId, network, customerId, customerName, customerEmail, phone, contractNumber] = parts;
 
-      const paymentAmount = parseFloat(Message);
+      const paymentAmount = roundMoney(parseFloat(Message));
       if (isNaN(paymentAmount) || paymentAmount <= 0) {
         res.json(ussdRelease(SessionId, 'Invalid amount. Please dial again and enter a valid amount.'));
         return;
