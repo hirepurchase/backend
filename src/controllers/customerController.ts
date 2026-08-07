@@ -850,6 +850,8 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
         nationalId: customer.nationalId,
         dateOfBirth: customer.dateOfBirth,
         photoUrl: customer.photoUrl,
+        guarantorName: customer.guarantorName,
+        guarantorPhone: customer.guarantorPhone,
         isActivated: customer.isActivated,
         activatedAt: customer.activatedAt,
         createdAt: customer.createdAt,
