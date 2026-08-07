@@ -621,8 +621,17 @@ function resolveManagedState(value: unknown): ManagedDeviceState | undefined {
     return 'UNLOCKED';
   }
 
+  // Enrollment states, not lock states. 'Accepted'/'Approval queued' mean the
+  // device is uploaded but its Knox Guard app has not connected yet — that tells
+  // us nothing about whether it is locked, so it must not resolve to PENDING
+  // (which reads as "a lock/unlock command is in flight"). enrollmentStatus is
+  // where this belongs, and resolveEnrollmentState already handles it.
+  if (['ACCEPTED', 'APPROVAL_QUEUED'].includes(normalized)) {
+    return 'UNKNOWN';
+  }
+
   if (
-    ['PENDING', 'PROCESSING', 'IN_PROGRESS', 'QUEUED', 'REQUESTED', 'WAITING', 'APPROVAL_QUEUED', 'ACCEPTED'].includes(normalized) ||
+    ['PENDING', 'PROCESSING', 'IN_PROGRESS', 'QUEUED', 'REQUESTED', 'WAITING'].includes(normalized) ||
     normalized.includes('PENDING') ||
     normalized.includes('QUEUE') ||
     normalized.includes('PROCESS')

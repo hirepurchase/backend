@@ -197,9 +197,18 @@ function normalizeKnoxPortalStatus(value: unknown): string | null {
 function deriveManagedDeviceSyncFromPortalStatus(status: string | null) {
   const normalized = (status || '').trim().toUpperCase();
 
+  // 'Accepted' is an ENROLLMENT state: the device was uploaded to Knox but the
+  // Knox Guard app has not connected on the handset yet. It says nothing about
+  // whether the device is locked, so actualState must not claim it does.
+  //
+  // This previously mapped to actualState 'PENDING', which reads as "a lock or
+  // unlock command is in flight". A device that had never been locked therefore
+  // displayed as mid-operation (desiredState UNLOCKED / actualState PENDING),
+  // and PENDING also suppressed control-command dispatch. UNKNOWN is the honest
+  // value here; enrollmentStatus APPROVAL_QUEUED already carries the real state.
   if (normalized === 'ACCEPTED') {
     return {
-      actualState: 'PENDING',
+      actualState: 'UNKNOWN',
       enrollmentStatus: 'APPROVAL_QUEUED',
       lastError: 'Device uploaded to Knox and waiting for the Knox Guard app to connect.',
     };

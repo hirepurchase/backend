@@ -1,0 +1,78 @@
+# Database (Supabase PostgreSQL)
+DIRECT_URL="postgresql://postgres.mjeytynpoecqeypaiojt:Year22025@aws-1-eu-west-1.pooler.supabase.com:5432/postgres"
+DATABASE_URL="postgresql://postgres.mjeytynpoecqeypaiojt:Year22025@aws-1-eu-west-1.pooler.supabase.com:5432/postgres"
+# JWT
+JWT_SECRET="your-super-secret-jwt-key-change-in-production"
+JWT_EXPIRES_IN="7d"
+
+# Server
+PORT=5000
+NODE_ENV="development"
+
+# Mobile Money Gateway (Example: Paystack, Flutterwave, or local providers)
+MOMO_API_URL="https://api.mobilemoney.example.com"
+MOMO_API_KEY="your-momo-api-key"
+MOMO_SECRET_KEY="your-momo-secret-key"
+MOMO_CALLBACK_URL="http://localhost:5000/api/payments/webhook"
+
+# Hubtel Payment Gateway
+# Get these from your Hubtel account dashboard
+HUBTEL_POS_SALES_ID="2036849"
+HUBTEL_API_KEY="nrLLn5P"
+HUBTEL_API_SECRET="2ca96dc539e84b158d477b346e87db1f"
+HUBTEL_CALLBACK_URL="https://hirepurchase-tt5mv.ondigitalocean.app/api/payments/hubtel/callback"
+
+# Note: For production, update HUBTEL_CALLBACK_URL to your production domain
+# Example: https://yourdomain.com/api/payments/hubtel/callback
+
+# Frontend URL (for CORS)
+FRONTEND_URL="http://localhost:3000"
+
+# Email Configuration (using Gmail as example - configure with your SMTP server)
+EMAIL_HOST="mail.eyosolutions.com"
+EMAIL_PORT=8889
+EMAIL_USER="info@eyosolutions.com"
+EMAIL_PASSWORD="password@1"
+EMAIL_FROM="AIDOO TECH<info@eyosolutions.com>"
+
+# SMS Configuration (Nalo SMS)
+SMS_PROVIDER="nalo"
+NALO_API_URL="https://api.nalosolutions.com/sms/v1/text/single"
+NALO_API_KEY="gcA_Qa6OSnoHmU3Fne8-DrnJytUK9JexgxrLHoHUtqSW19i4D_Ab_6eG4cSBQ1NJ"
+NALO_SENDER_ID="AidooTech"
+MOBILE_APP_DOWNLOAD_URL="https://drive.usercontent.google.com/download?id=1aK1pUqdjYvuxn-0XZyUIOuwaKlzkbaDw&export=download&authuser=0&confirm=t&uuid=30e795c0-d8d4-4749-9f94-a518c4d2c180&at=APcXIO0lhKml7tgfckZesE8XAY_j%3A1772534889762"
+
+# Notifications
+ENABLE_EMAIL_NOTIFICATIONS=true
+ENABLE_SMS_NOTIFICATIONS=true
+
+# Supabase Storage
+SUPABASE_URL="https://mjeytynpoecqeypaiojt.supabase.co"
+SUPABASE_SERVICE_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1qZXl0eW5wb2VjcWV5cGFpb2p0Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NDg2NjIyNCwiZXhwIjoyMDgwNDQyMjI0fQ.JrncbhAZWwZvQqegnj5SLl78TN7BHbOoaFatR6215cs"
+SUPABASE_STORAGE_BUCKET="images"
+
+# Knox Guard
+KNOX_GUARD_BASE_URL=https://eu-kcs-api.samsungknox.com/kcs/v1.1/kg-integration
+KNOX_GUARD_DRY_RUN=false
+KNOX_GUARD_ENABLE_LIVE_ACTIONS=true
+KNOX_GUARD_TIMEOUT_MS=15000
+KNOX_GUARD_CLIENT_IDENTIFIER=eyJhbGciOiJIUzUxMiJ9.eyJjbGllbnRJZGVudGlmaWVyIjoiNTZlZDJiYzMtZjYzMy00ZTMxLTk3NWEtMmQ0MTk1YTY4MmExMmVhYWExMjUtZjFiMS00NTNkLWE1ZDMtYmM2NDFmNDAzMzIyIiwiYXR0cjEiOiIxIn0.sJIfF5es3tYKLt8gz2OhMFHzndaQUGBbCY4WpccA8wIt5WD6J2qDNvX0nBVwgiW437Oz6QGSb0b6ePbmq75j4Q
+KNOX_GUARD_PRIVATE_KEY=MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCeYkoeOOdafYfJvdvOgKBKKV4IDlk+WF00PJ4SI86A6gOlw22Vip4pB9l4yXdEg2A3D0MqLR9T390TRbk3oDfij/f7JDE10psUHtlc7I0JSoEJWcR5uby5bNSOhctWIBQlsCuvD0df225OqRMD2gab3p0/Uam9sIX/zB/ovnOdiaotHU3nlIpvh82sDln7nfs/Yz5xXc94T+vahQtX4TcGqG9x7eIPnRvkeyhPFa+M+HFB7RXyKBbhn+Qsh4CrQnX05e8GxMmQGM8gWrWxXn1SRPRXEM5/miyfgMKI4lZITfczStGEn3BVCA+agynick3LpvKkBMpdA8TWUubuGUZjAgMBAAECggEALZJocyO6Zc4iyQiI+3UFKfGXLcg7I3Y3czVR4jRNUciDvilqGZImCfZJO7j0SVFn2M/aaoNLNU3/hXEVZw0Bp333Q1rZkfwERRjPQC6MMjUuxar/nmq0A8JtsoiKxkA6q9Fx8E/8IHe52IZLg1szdZvrMPHlXkAxfjWUpNpP1+7yw4tjxH0XYy3Nt0r7NplxyzIIpQvYxgA/4ZQJ7qJ2dI1XZWqzuiIupateamZ1JwmiTkFEKWpMSyPBlTKF7WC0VBq7fAeUymE4vQAZVCtRBpNLs5GD9ZrCLYiS8M4is4JIGNJH8nSDWiV+X+Wnzn0w0hFoypqT29NUfRO55x91uQKBgQD7E8IqB/pZzLvlf1Y2fDTSIeUkfYFBatRRVjUqHa1zVQNJPcUapf7EpYCHck0gm+ykl23LKi7nkdWfQWXTNJU8zFg7WLo359Vh1CNyBsa7e2JZ1okvxOBsLgV/fQSWP2Dvv2H0yrD4YjDi6kKH5aoiGN9zNSRxk407O7FZqWJ5NwKBgQChfUWzGbV6qVLrmDCeF+m+7gGuSAZz04AA9m6KbYABV3odTR+8SFhmpJ8LYbvKICg/9CbvTDkhjasP5E0sRuv5kllwvZI4rn6aPo+Op+Hn6Fbgg76KcgfbStkUByr9aolcSXPoyQWJW4MzZzo+GCMm45TVpzmIsNH+azUplTpCNQKBgCfBTCgtlTVs1n+TNwpvhkmTdl3dxX6fNLkgRlDB3Dn7xwZs0m3SxNFMR1qq/Y1hQwoYtBjMOBsQm1uZFk9n7w1uabYT6YB6o+3Wkjo22nbLJZqF/rjimopmixZRrE1CAc5UZmVFRto9afI0F46/Db5SY+cxDfEx5NXxMLa6vE3nAoGBAIldB6aa3bWixffEksZHTPqtdRyMA4EOjLlE5S42ikWZ5TN7YN1FJHza1rZVwejihZow0dWHHqmd2b5A0iwxf5Pgmte9SN2R//qv8GjGAPDEvvFm3vLgoDI2boQMvNKmhoTLrh56r4zxHJ7i1bXvzibMOtOp1NSio10oUCY42z9pAoGBANm8t6WT6ED/6lSo6A1FMUTzJWXYcInFzqCDP7H30SaktdOD+rDP3qsT2Tbvn6yfEZ+T6ni/y4mUvUijPYvGWDlFRDRcKF/ccFfcCUKu+qBsEO1ynI9VYIb4wKkgxNzRf0pFWWHCe/cIc5HroRYTKETdGxWtP70c9pZ/25aHZtQx
+
+# Knox Guard endpoint paths
+KNOX_GUARD_CHECK_AUTH_PATH=/authorization
+KNOX_GUARD_LIST_DEVICES_PATH=/devices/list
+KNOX_GUARD_APPROVE_DEVICE_PATH=/devices/approve
+KNOX_GUARD_LOCK_DEVICE_PATH=/devices/lock
+KNOX_GUARD_UNLOCK_DEVICE_PATH=/devices/unlock
+KNOX_GUARD_BLINK_DEVICE_PATH=/devices/blink
+KNOX_GUARD_SEND_MESSAGE_PATH=/devices/sendMessage
+KNOX_GUARD_COMPLETE_DEVICE_PATH=/devices/complete
+KNOX_GUARD_CANCEL_COMPLETE_PATH=/devices/cancelComplete
+
+# Knox Guard webhook shared token — must match the token configured in the Samsung Knox portal webhook subscription
+WEBHOOK_SHARED_TOKEN=aidootech-knox-webhook-2026
+
+# Devices API — device registration/removal (separate from Knox Guard command API)
+DEVICES_API_BASE_URL=https://upload.veritechltd.com/api/beta
+DEVICES_API_KEY=RLtXPHEN2DL7ZfJ5bdRHA8uf37VTJb4ZPcaMEFFF56pwmV3gXVYYYheF5fcMT1B7E9wTJXhz5GpChh44jBaJAUzsCEvyzp7V9gL59N4FeuDZmzgppMQJY6wm9cUTGqts
