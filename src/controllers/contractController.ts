@@ -265,17 +265,24 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       return;
     }
 
+    // Every new contract must carry a mobile money number so the customer can pay
+    // from the app. Contracts created before this rule may still have none, and
+    // updateContract deliberately keeps allowing them to be cleared.
+    if (!mobileMoneyNetwork || !mobileMoneyNumber) {
+      res.status(400).json({ error: 'Mobile money network and phone number are required' });
+      return;
+    }
+
+    if (!/^0[235][0-9]{8}$/.test(String(mobileMoneyNumber).replace(/\s/g, ''))) {
+      res.status(400).json({ error: 'Invalid mobile money number. Expected a 10-digit number, e.g. 0241234567' });
+      return;
+    }
+
     // Validate payment method if provided
     if (paymentMethod) {
       const validPaymentMethods = ['HUBTEL_REGULAR', 'HUBTEL_DIRECT_DEBIT', 'MANUAL', 'CASH'];
       if (!validPaymentMethods.includes(paymentMethod)) {
         res.status(400).json({ error: 'Invalid payment method' });
-        return;
-      }
-
-      // If Hubtel payment method, require network and phone number
-      if ((paymentMethod === 'HUBTEL_REGULAR' || paymentMethod === 'HUBTEL_DIRECT_DEBIT') && (!mobileMoneyNetwork || !mobileMoneyNumber)) {
-        res.status(400).json({ error: 'Mobile money network and phone number are required for Hubtel payment methods' });
         return;
       }
 
@@ -443,9 +450,9 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
           outstandingBalance: financeAmount,
           totalPaid: Number(depositAmount),
           signatureUrl,
-          paymentMethod: paymentMethod || null,
+          paymentMethod: paymentMethod || 'HUBTEL_REGULAR',
           mobileMoneyNetwork: mobileMoneyNetwork ? mobileMoneyNetwork.toUpperCase() : null,
-          mobileMoneyNumber: mobileMoneyNumber || null,
+          mobileMoneyNumber: String(mobileMoneyNumber).replace(/\s/g, ''),
           createdById: req.user!.id,
           status: initialStatus,
         },
