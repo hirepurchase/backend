@@ -177,7 +177,9 @@ export async function setAssignedAgents(req: AuthenticatedRequest, res: Response
   }
 }
 
-// GET /customer-service/my-agents — the signed-in officer's own portfolio
+// GET /customer-service/my-agents — the signed-in officer's own portfolio,
+// with each agent's current workload so the officer can see where the
+// verification and collection pressure sits.
 export async function getMyAssignedAgents(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const admin = req.user as AdminUserPayload;
@@ -186,11 +188,47 @@ export async function getMyAssignedAgents(req: AuthenticatedRequest, res: Respon
       where: { csoId: admin.id },
       include: {
         agent: {
-          select: { id: true, firstName: true, lastName: true, email: true, phone: true, isActive: true },
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            email: true,
+            phone: true,
+            isActive: true,
+            _count: { select: { customersCreated: true, contractsCreated: true } },
+          },
         },
       },
       orderBy: { createdAt: 'asc' },
     });
+
+    const agentIds = assignments.map((a) => a.agentId);
+
+    const [pendingByAgent, overdueContracts] = await Promise.all([
+      agentIds.length
+        ? prisma.hirePurchaseContract.groupBy({
+            by: ['createdById'],
+            where: { createdById: { in: agentIds }, status: 'PENDING_APPROVAL' },
+            _count: { _all: true },
+          })
+        : Promise.resolve([] as { createdById: string; _count: { _all: number } }[]),
+      agentIds.length
+        ? prisma.hirePurchaseContract.findMany({
+            where: {
+              createdById: { in: agentIds },
+              status: 'ACTIVE',
+              installments: { some: { status: 'OVERDUE' } },
+            },
+            select: { createdById: true },
+          })
+        : Promise.resolve([] as { createdById: string }[]),
+    ]);
+
+    const pendingMap = new Map(pendingByAgent.map((row) => [row.createdById, row._count._all]));
+    const overdueMap = new Map<string, number>();
+    for (const row of overdueContracts) {
+      overdueMap.set(row.createdById, (overdueMap.get(row.createdById) ?? 0) + 1);
+    }
 
     res.json({
       count: assignments.length,
@@ -200,10 +238,53 @@ export async function getMyAssignedAgents(req: AuthenticatedRequest, res: Respon
         email: a.agent.email,
         phone: a.agent.phone,
         isActive: a.agent.isActive,
+        assignedAt: a.createdAt,
+        customers: a.agent._count.customersCreated,
+        contracts: a.agent._count.contractsCreated,
+        pendingVerification: pendingMap.get(a.agentId) ?? 0,
+        contractsOverdue: overdueMap.get(a.agentId) ?? 0,
       })),
     });
   } catch (error) {
     console.error('getMyAssignedAgents error:', error);
     res.status(500).json({ error: 'Failed to fetch assigned agents' });
+  }
+}
+
+// GET /admin-users/me/customer-service — the officers responsible for the
+// signed-in agent. Any authenticated staff member may call this; it only ever
+// returns their own supervisors.
+export async function getMyCustomerServiceOfficers(
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const admin = req.user as AdminUserPayload;
+
+    const assignments = await prisma.csoAgentAssignment.findMany({
+      where: { agentId: admin.id },
+      include: {
+        cso: {
+          select: { id: true, firstName: true, lastName: true, email: true, phone: true, isActive: true },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    res.json({
+      count: assignments.length,
+      officers: assignments
+        .filter((a) => a.cso.isActive)
+        .map((a) => ({
+          id: a.cso.id,
+          name: `${a.cso.firstName} ${a.cso.lastName}`.trim(),
+          email: a.cso.email,
+          phone: a.cso.phone,
+          assignedAt: a.createdAt,
+        })),
+    });
+  } catch (error) {
+    console.error('getMyCustomerServiceOfficers error:', error);
+    res.status(500).json({ error: 'Failed to fetch customer service contact' });
   }
 }

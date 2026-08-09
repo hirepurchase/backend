@@ -7,7 +7,11 @@ import {
   getRoles,
   getPermissions,
 } from '../controllers/adminUserController';
-import { getAssignedAgents, setAssignedAgents } from '../controllers/csoAssignmentController';
+import {
+  getAssignedAgents,
+  setAssignedAgents,
+  getMyCustomerServiceOfficers,
+} from '../controllers/csoAssignmentController';
 import { authenticateAdmin, requireAnyPermission, requireSuperAdmin } from '../middleware/auth';
 import {
   PERMISSIONS,
@@ -23,6 +27,10 @@ router.use(authenticateAdmin);
 router.get('/', requireSuperAdmin, getAllAdminUsers);
 router.post('/', requireSuperAdmin, createAdminUser);
 router.post('/change-password', changePassword);
+
+// An agent's own customer service officers. Authentication only — it returns
+// nothing but the caller's own supervisors, so no extra permission is needed.
+router.get('/me/customer-service', getMyCustomerServiceOfficers);
 
 // Customer service officer -> agent assignments (before /:id so it isn't shadowed)
 router.get(
