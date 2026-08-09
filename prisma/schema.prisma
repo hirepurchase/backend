@@ -50,8 +50,59 @@ model AdminUser {
   auditLogs             AuditLog[]
   agentLedgerEntries    AgentDepositLedger[]   @relation("AgentLedger")
   assignedInventory     InventoryItem[]        @relation("AgentAssignedInventory")
+  csoAssignments        CsoAgentAssignment[]   @relation("CsoAssignments")
+  agentAssignedCsos     CsoAgentAssignment[]   @relation("AgentAssignedCsos")
+  csoAssignmentsCreated CsoAgentAssignment[]   @relation("CsoAssignmentCreatedBy")
+  contactAttempts       ContactAttempt[]       @relation("ContactAttemptOfficer")
   createdAt             DateTime              @default(now())
   updatedAt             DateTime              @updatedAt
+}
+
+// ============= CUSTOMER SERVICE =============
+
+// Which agents a customer service officer is responsible for. An officer with
+// no rows here sees nothing — see scopeService.resolveScope.
+model CsoAgentAssignment {
+  id           String    @id @default(uuid())
+  csoId        String
+  cso          AdminUser @relation("CsoAssignments", fields: [csoId], references: [id], onDelete: Cascade)
+  agentId      String
+  agent        AdminUser @relation("AgentAssignedCsos", fields: [agentId], references: [id], onDelete: Cascade)
+  assignedById String
+  assignedBy   AdminUser @relation("CsoAssignmentCreatedBy", fields: [assignedById], references: [id])
+  createdAt    DateTime  @default(now())
+
+  @@unique([csoId, agentId])
+  @@index([csoId])
+  @@index([agentId])
+}
+
+// A phone call to a customer — verification before approval, or collections
+// follow-up on an overdue installment.
+model ContactAttempt {
+  id                 String                @id @default(uuid())
+  customerId_uuid    String                @db.Uuid
+  customer           Customer              @relation(fields: [customerId_uuid], references: [id_uuid], onDelete: Cascade)
+  contractId         String?
+  contract           HirePurchaseContract? @relation(fields: [contractId], references: [id])
+  installmentId      String?
+  officerId          String
+  officer            AdminUser             @relation("ContactAttemptOfficer", fields: [officerId], references: [id])
+  purpose            String                // VERIFICATION, COLLECTION, FOLLOW_UP, OTHER
+  outcome            String                // REACHED, NO_ANSWER, WRONG_NUMBER, UNREACHABLE, PROMISE_TO_PAY, REFUSED, CALLBACK_REQUESTED
+  verificationResult String?               // VERIFIED, FAILED, INCONCLUSIVE — purpose=VERIFICATION only
+  notes              String?
+  promiseToPayDate   DateTime?
+  promiseToPayAmount Float?
+  nextFollowUpAt     DateTime?
+  contactedAt        DateTime              @default(now())
+  createdAt          DateTime              @default(now())
+
+  @@index([customerId_uuid, contactedAt])
+  @@index([contractId, purpose])
+  @@index([officerId, contactedAt])
+  @@index([nextFollowUpAt])
+  @@index([purpose, verificationResult])
 }
 
 // ============= CUSTOMER MANAGEMENT =============
@@ -81,6 +132,7 @@ model Customer {
   hubtelPreapprovals  HubtelPreapproval[]
   managedDevices      ManagedDevice[]
   passwordResetOtps   PasswordResetOtp[]
+  contactAttempts     ContactAttempt[]
   createdAt           DateTime              @default(now())
   updatedAt           DateTime              @updatedAt
 }
@@ -186,6 +238,7 @@ model HirePurchaseContract {
   installments        InstallmentSchedule[]
   payments            PaymentTransaction[]
   penalties           Penalty[]
+  contactAttempts     ContactAttempt[]
   agentLedger         AgentDepositLedger?
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt

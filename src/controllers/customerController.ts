@@ -8,6 +8,7 @@ import { AuthenticatedRequest, AdminUserPayload, CustomerPayload } from '../type
 import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase, ImageCompressionOptions } from '../services/storageService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
+import { resolveCustomerScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
 
 const CUSTOMER_PHOTO_COMPRESSION: ImageCompressionOptions = {
   maxWidth: 800,
@@ -35,14 +36,9 @@ async function rehashDefaultPasswordOnPhoneChange(
   return stillOnDefaultPassword ? bcrypt.hash(newPhone, 12) : null;
 }
 
-function canViewAnyCustomer(adminUser: AdminUserPayload | undefined, customerCreatedById: string | null | undefined): boolean {
-  const permissions = adminUser?.permissions ?? [];
-
-  if (hasPermission(permissions, PERMISSIONS.VIEW_CUSTOMERS)) {
-    return true;
-  }
-
-  return hasPermission(permissions, PERMISSIONS.VIEW_OWN_CUSTOMERS) && customerCreatedById === adminUser?.id;
+async function canViewAnyCustomer(adminUser: AdminUserPayload | undefined, customerCreatedById: string | null | undefined): Promise<boolean> {
+  const scope = await resolveCustomerScope(adminUser);
+  return scopeAllows(scope, customerCreatedById);
 }
 
 // Create customer (Admin only)
@@ -186,15 +182,11 @@ export async function getAllCustomers(req: AuthenticatedRequest, res: Response):
     } = req.query;
 
     const adminUser = req.user as AdminUserPayload;
-    const permissions = adminUser?.permissions ?? [];
-    const hasViewAll = hasPermission(permissions, PERMISSIONS.VIEW_CUSTOMERS);
-    const hasViewOwn = hasPermission(permissions, PERMISSIONS.VIEW_OWN_CUSTOMERS);
 
-    // Agents with VIEW_OWN_CUSTOMERS but not VIEW_CUSTOMERS see only customers they registered
+    // Agents see only customers they registered; customer service officers see
+    // those registered by their assigned agents.
     const where: Record<string, unknown> = {};
-    if (!hasViewAll && hasViewOwn) {
-      where.createdById = adminUser.id;
-    }
+    applyCreatorScope(where, await resolveCustomerScope(adminUser));
 
     if (search) {
       where.OR = [
@@ -302,7 +294,7 @@ export async function getCustomerById(req: AuthenticatedRequest, res: Response):
     }
 
     const adminUser = req.user as AdminUserPayload;
-    if (!canViewAnyCustomer(adminUser, customer.createdById)) {
+    if (!(await canViewAnyCustomer(adminUser, customer.createdById))) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -341,7 +333,7 @@ export async function getCustomerByMembershipId(req: AuthenticatedRequest, res: 
     }
 
     const adminUser = req.user as AdminUserPayload;
-    if (!canViewAnyCustomer(adminUser, customer.createdById)) {
+    if (!(await canViewAnyCustomer(adminUser, customer.createdById))) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -796,7 +788,7 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
     }
 
     const adminUser = req.user as AdminUserPayload;
-    if (!canViewAnyCustomer(adminUser, customer.createdById)) {
+    if (!(await canViewAnyCustomer(adminUser, customer.createdById))) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }

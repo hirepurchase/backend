@@ -41,19 +41,26 @@ export const PERMISSIONS = {
   PAY_AGENT_DEPOSIT: 'PAY_AGENT_DEPOSIT',
   EDIT_CONTRACT_VALUES: 'EDIT_CONTRACT_VALUES',
   NULLIFY_CONTRACT: 'NULLIFY_CONTRACT',
+  VIEW_ASSIGNED_CUSTOMERS: 'VIEW_ASSIGNED_CUSTOMERS',
+  VIEW_ASSIGNED_CONTRACTS: 'VIEW_ASSIGNED_CONTRACTS',
+  VERIFY_CUSTOMER: 'VERIFY_CUSTOMER',
+  MANAGE_CONTACT_ATTEMPTS: 'MANAGE_CONTACT_ATTEMPTS',
+  SEND_SMS: 'SEND_SMS',
+  MANAGE_CSO_ASSIGNMENTS: 'MANAGE_CSO_ASSIGNMENTS',
 } as const;
 
 export type PermissionName = typeof PERMISSIONS[keyof typeof PERMISSIONS];
 
-type PermissionCategory =
+export type PermissionCategory =
   | 'Customers'
   | 'Inventory'
   | 'Contracts'
   | 'Payments'
   | 'Reporting'
+  | 'Communication'
   | 'Administration';
 
-type PermissionScope = 'all' | 'own' | 'action';
+export type PermissionScope = 'all' | 'own' | 'action';
 
 export interface PermissionDefinition {
   name: PermissionName;
@@ -105,7 +112,25 @@ export const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
   { name: PERMISSIONS.PAY_AGENT_DEPOSIT, description: 'Remit agent deposit collection to company via mobile money', category: 'Payments', scope: 'action' },
   { name: PERMISSIONS.EDIT_CONTRACT_VALUES, description: 'Edit locked financial fields on a contract — total price, deposit amount, total installments, and start date', category: 'Contracts', scope: 'action' },
   { name: PERMISSIONS.NULLIFY_CONTRACT, description: 'Nullify a contract — permanently delete all transactions, payments, and related records and free the device', category: 'Contracts', scope: 'action' },
+  { name: PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS, description: 'View customers registered by assigned agents', category: 'Customers', scope: 'own' },
+  { name: PERMISSIONS.VIEW_ASSIGNED_CONTRACTS, description: 'View contracts created by assigned agents', category: 'Contracts', scope: 'own' },
+  { name: PERMISSIONS.VERIFY_CUSTOMER, description: 'Verify customer registrations by phone before contract approval', category: 'Customers', scope: 'action' },
+  { name: PERMISSIONS.MANAGE_CONTACT_ATTEMPTS, description: 'Log and view customer call attempts', category: 'Customers', scope: 'action' },
+  { name: PERMISSIONS.SEND_SMS, description: 'Send SMS messages to customers', category: 'Communication', scope: 'action' },
+  { name: PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, description: 'Assign agents to customer service officers', category: 'Administration', scope: 'action' },
 ];
+
+export const ASSIGNED_CUSTOMER_ACCESS_PERMISSIONS = [
+  PERMISSIONS.VIEW_CUSTOMERS,
+  PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS,
+  PERMISSIONS.VIEW_OWN_CUSTOMERS,
+] as const;
+
+export const ASSIGNED_CONTRACT_ACCESS_PERMISSIONS = [
+  PERMISSIONS.VIEW_CONTRACTS,
+  PERMISSIONS.VIEW_ASSIGNED_CONTRACTS,
+  PERMISSIONS.VIEW_OWN_CONTRACTS,
+] as const;
 
 export const CUSTOMER_ACCESS_PERMISSIONS = [
   PERMISSIONS.VIEW_CUSTOMERS,

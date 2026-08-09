@@ -3,6 +3,7 @@ import prisma from '../config/database';
 import { AdminUserPayload, AuthenticatedRequest } from '../types';
 import { getCache, setCache } from '../services/cacheService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
+import { resolveContractScope, applyCreatorScope } from '../services/scopeService';
 
 const REPORT_CACHE_TTL_SECONDS = Number(process.env.REPORT_CACHE_TTL_SECONDS || 90);
 
@@ -916,9 +917,6 @@ export async function getDailyPayments(req: AuthenticatedRequest, res: Response)
     const now = new Date();
     const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
     const endOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
-    const canViewAllContracts = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_CONTRACTS);
-    const canViewOwnContracts = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
-
     const where: Record<string, unknown> = {
       status: 'SUCCESS',
       OR: [
@@ -930,10 +928,11 @@ export async function getDailyPayments(req: AuthenticatedRequest, res: Response)
       ],
     };
 
-    if (!canViewAllContracts && canViewOwnContracts) {
-      where.contract = {
-        createdById: adminUser.id,
-      };
+    // Scope lives under the contract relation here, not on the payment.
+    const contractScope: Record<string, unknown> = {};
+    applyCreatorScope(contractScope, await resolveContractScope(adminUser));
+    if (Object.keys(contractScope).length > 0) {
+      where.contract = contractScope;
     }
 
     const [count, totalAmount, recentPayments] = await Promise.all([

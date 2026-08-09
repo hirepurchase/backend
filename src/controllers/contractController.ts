@@ -23,15 +23,11 @@ import {
 } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
 import { hasAnyPermission, hasPermission, PERMISSIONS } from '../constants/permissions';
+import { resolveContractScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
 
-function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCreatedById: string | null | undefined): boolean {
-  const permissions = adminUser?.permissions ?? [];
-
-  if (hasPermission(permissions, PERMISSIONS.VIEW_CONTRACTS)) {
-    return true;
-  }
-
-  return hasPermission(permissions, PERMISSIONS.VIEW_OWN_CONTRACTS) && contractCreatedById === adminUser?.id;
+async function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCreatedById: string | null | undefined): Promise<boolean> {
+  const scope = await resolveContractScope(adminUser);
+  return scopeAllows(scope, contractCreatedById);
 }
 
 type ContractCreateDeviceUnlockStatus = 'skipped' | 'succeeded' | 'pending';
@@ -671,8 +667,6 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
 
     const adminUser = req.user as AdminUserPayload;
     const permissions = adminUser?.permissions ?? [];
-    const hasViewAll = hasPermission(permissions, PERMISSIONS.VIEW_CONTRACTS);
-    const hasViewOwn = hasPermission(permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
     const canViewDeviceControl = hasAnyPermission(permissions, [
       PERMISSIONS.VIEW_DEVICE_CONTROL,
       PERMISSIONS.MANAGE_DEVICE_CONTROL,
@@ -680,11 +674,10 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
     const shouldIncludeDeviceControl =
       String(includeDeviceControl).toLowerCase() === 'true' && canViewDeviceControl;
 
-    // Agents with VIEW_OWN_CONTRACTS but not VIEW_CONTRACTS see only their own
+    // Agents see only contracts they created; customer service officers see
+    // those created by their assigned agents.
     const where: Record<string, unknown> = {};
-    if (!hasViewAll && hasViewOwn) {
-      where.createdById = adminUser.id;
-    }
+    applyCreatorScope(where, await resolveContractScope(adminUser));
 
     if (status) where.status = status;
     if (customerId) {
@@ -828,7 +821,7 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
 
     if (req.userType === 'admin') {
       const adminUser = req.user as AdminUserPayload;
-      if (!canViewAnyContract(adminUser, contract.createdById)) {
+      if (!(await canViewAnyContract(adminUser, contract.createdById))) {
         res.status(403).json({ error: 'Access denied' });
         return;
       }
@@ -2269,11 +2262,8 @@ export async function getAllPendingInstallments(req: AuthenticatedRequest, res: 
       ];
     }
 
-    const hasViewAll = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_CONTRACTS);
-    const hasViewOwn = hasPermission(adminUser.permissions, PERMISSIONS.VIEW_OWN_CONTRACTS);
-    if (!hasViewAll && hasViewOwn) {
-      where.contract.createdById = adminUser.id;
-    }
+    // Scope lives under the contract relation here, not on the installment.
+    applyCreatorScope(where.contract as Record<string, unknown>, await resolveContractScope(adminUser));
 
     const installments = await prisma.installmentSchedule.findMany({
       where,
