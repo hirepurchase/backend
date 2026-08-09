@@ -17,6 +17,7 @@ import smsRoutes from './sms';
 import commissionSettingsRoutes from './commissionSettings';
 import agentDepositRoutes from './agentDeposits';
 import contactAttemptRoutes from './contactAttempts';
+import customerServiceRoutes from './customerService';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
 
@@ -41,6 +42,7 @@ router.use('/knox-guard', knoxGuardRoutes);
 router.use('/commission-settings', commissionSettingsRoutes);
 router.use('/agent-deposits', agentDepositRoutes);
 router.use('/contact-attempts', contactAttemptRoutes);
+router.use('/customer-service', customerServiceRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

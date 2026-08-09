@@ -120,25 +120,17 @@ export const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
   { name: PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, description: 'Assign agents to customer service officers', category: 'Administration', scope: 'action' },
 ];
 
-export const ASSIGNED_CUSTOMER_ACCESS_PERMISSIONS = [
+// Who may reach a customer endpoint at all. What they actually see is decided
+// by scopeService, so the assigned-scope permission belongs here too.
+export const CUSTOMER_ACCESS_PERMISSIONS = [
   PERMISSIONS.VIEW_CUSTOMERS,
   PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS,
   PERMISSIONS.VIEW_OWN_CUSTOMERS,
 ] as const;
 
-export const ASSIGNED_CONTRACT_ACCESS_PERMISSIONS = [
-  PERMISSIONS.VIEW_CONTRACTS,
-  PERMISSIONS.VIEW_ASSIGNED_CONTRACTS,
-  PERMISSIONS.VIEW_OWN_CONTRACTS,
-] as const;
-
-export const CUSTOMER_ACCESS_PERMISSIONS = [
-  PERMISSIONS.VIEW_CUSTOMERS,
-  PERMISSIONS.VIEW_OWN_CUSTOMERS,
-] as const;
-
 export const CONTRACT_ACCESS_PERMISSIONS = [
   PERMISSIONS.VIEW_CONTRACTS,
+  PERMISSIONS.VIEW_ASSIGNED_CONTRACTS,
   PERMISSIONS.VIEW_OWN_CONTRACTS,
 ] as const;
 
