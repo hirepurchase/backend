@@ -10,6 +10,7 @@ type SeedRoles = {
   adminRole: { id: string; name: string };
   salesRole: { id: string; name: string };
   agentRole: { id: string; name: string };
+  customerServiceRole: { id: string; name: string };
 };
 
 type SeedCatalog = {
@@ -58,6 +59,13 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     PERMISSIONS.MANAGE_PERMISSIONS,
     PERMISSIONS.MANAGE_HUBTEL_PAYMENTS,
     PERMISSIONS.DELETE_INVENTORY,
+    // Assigning agents to officers is a super-admin function.
+    PERMISSIONS.MANAGE_CSO_ASSIGNMENTS,
+    // ADMIN already sees every customer/contract via VIEW_CUSTOMERS and
+    // VIEW_CONTRACTS; granting the assigned-scope permissions too would be
+    // dead weight that only muddies the role editor.
+    PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS,
+    PERMISSIONS.VIEW_ASSIGNED_CONTRACTS,
   ]);
 
   const adminPermissions = allPermissions
@@ -151,11 +159,48 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     select: { id: true, name: true },
   });
 
+  const customerServicePermissionNames = new Set<string>([
+    PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS,
+    PERMISSIONS.VIEW_ASSIGNED_CONTRACTS,
+    PERMISSIONS.UPDATE_CUSTOMER,
+    PERMISSIONS.VERIFY_CUSTOMER,
+    PERMISSIONS.MANAGE_CONTACT_ATTEMPTS,
+    PERMISSIONS.VIEW_CONTRACT_APPROVALS,
+    PERMISSIONS.APPROVE_CONTRACT,
+    PERMISSIONS.VIEW_PAYMENTS,
+    PERMISSIONS.VIEW_DAILY_PAYMENTS,
+    PERMISSIONS.SEND_SMS,
+    PERMISSIONS.VIEW_DASHBOARD,
+  ]);
+
+  const customerServicePermissions = allPermissions
+    .filter((permission) => customerServicePermissionNames.has(String(permission.name)))
+    .map((permission) => ({ id: permission.id }));
+
+  const customerServiceRole = await prisma.role.upsert({
+    where: { name: 'CUSTOMER_SERVICE' },
+    update: {
+      permissions: {
+        set: customerServicePermissions,
+      },
+    },
+    create: {
+      name: 'CUSTOMER_SERVICE',
+      description: "Customer service officer who verifies registrations by phone, approves their assigned agents' contracts and follows up on overdue payments",
+      isSystem: true,
+      permissions: {
+        connect: customerServicePermissions,
+      },
+    },
+    select: { id: true, name: true },
+  });
+
   return {
     superAdminRole,
     adminRole,
     salesRole,
     agentRole,
+    customerServiceRole,
   };
 }
 
