@@ -16,6 +16,12 @@ import { enrollManagedDeviceForContract } from '../services/deviceControlPolicyS
 import { createAgentDepositLedgerEntry } from './agentDepositController';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import { calculateInstallmentSchedule, calculateEndDate } from '../utils/helpers';
+import {
+  resolveContractScope,
+  applyCreatorScope,
+  scopeAllows,
+  CreatorScope,
+} from '../services/scopeService';
 
 const PRIORITY_RANK: Record<string, number> = {
   HIGH: 3,
@@ -58,11 +64,19 @@ function buildAgentContractWhere(admin: AdminUserPayload, query: AuthenticatedRe
   return where;
 }
 
-function buildPendingApprovalsWhere(query: AuthenticatedRequest['query']): Record<string, unknown> {
+function buildPendingApprovalsWhere(
+  query: AuthenticatedRequest['query'],
+  scope: CreatorScope
+): Record<string, unknown> {
   const where: Record<string, unknown> = { status: 'PENDING_APPROVAL' };
   const { search, agentId, paymentMethod } = query;
 
-  if (agentId) {
+  // Scope first, so a caller-supplied agentId can only ever narrow it.
+  applyCreatorScope(where, scope);
+
+  // agentId is a caller-supplied filter, not an authorization decision — it may
+  // only narrow within what the scope already allows.
+  if (agentId && scopeAllows(scope, agentId as string)) {
     where.createdById = agentId as string;
   }
 
@@ -241,8 +255,10 @@ export async function getPendingApprovals(req: AuthenticatedRequest, res: Respon
     const sortBy = (req.query.sortBy as string) || 'age';
     const sortOrder = normalizeSortOrder(req.query.sortOrder);
 
+    const queueScope = await resolveContractScope(req.user as AdminUserPayload);
+
     const contracts = await prisma.hirePurchaseContract.findMany({
-      where: buildPendingApprovalsWhere(req.query),
+      where: buildPendingApprovalsWhere(req.query, queueScope),
       include: {
         customer: {
           select: {
@@ -344,7 +360,12 @@ export async function getPendingApprovals(req: AuthenticatedRequest, res: Respon
 // GET /contracts/approvals/count — lightweight count for notification bell
 export async function getPendingApprovalsCount(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const count = await prisma.hirePurchaseContract.count({ where: { status: 'PENDING_APPROVAL' } });
+    // Must use the same scope as the queue itself, or the bell shows a
+    // company-wide count to an officer who can only action a subset.
+    const where: Record<string, unknown> = { status: 'PENDING_APPROVAL' };
+    applyCreatorScope(where, await resolveContractScope(req.user as AdminUserPayload));
+
+    const count = await prisma.hirePurchaseContract.count({ where });
     res.json({ count });
   } catch (error) {
     console.error('getPendingApprovalsCount error:', error);
@@ -408,6 +429,12 @@ export async function assignContractApprover(req: AuthenticatedRequest, res: Res
 
     if (contract.status !== 'PENDING_APPROVAL') {
       res.status(400).json({ error: `Only PENDING_APPROVAL contracts can be assigned (current: ${contract.status})` });
+      return;
+    }
+
+    const assignScope = await resolveContractScope(admin);
+    if (!scopeAllows(assignScope, contract.createdById)) {
+      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
       return;
     }
 
@@ -508,6 +535,12 @@ export async function approveContract(req: AuthenticatedRequest, res: Response):
 
     if (contract.status !== 'PENDING_APPROVAL') {
       res.status(400).json({ error: `Contract is not pending approval (current status: ${contract.status})` });
+      return;
+    }
+
+    const scope = await resolveContractScope(admin);
+    if (!scopeAllows(scope, contract.createdById)) {
+      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
       return;
     }
 
@@ -661,6 +694,12 @@ export async function requestContractRevision(req: AuthenticatedRequest, res: Re
 
     if (contract.status !== 'PENDING_APPROVAL') {
       res.status(400).json({ error: `Contract is not pending approval (current status: ${contract.status})` });
+      return;
+    }
+
+    const scope = await resolveContractScope(admin);
+    if (!scopeAllows(scope, contract.createdById)) {
+      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
       return;
     }
 
@@ -1057,6 +1096,12 @@ export async function editPendingContract(req: AuthenticatedRequest, res: Respon
 
     if (contract.status !== 'PENDING_APPROVAL') {
       res.status(400).json({ error: `Only PENDING_APPROVAL contracts can be edited here (current: ${contract.status})` });
+      return;
+    }
+
+    const editScope = await resolveContractScope(admin);
+    if (!scopeAllows(editScope, contract.createdById)) {
+      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
       return;
     }
 
