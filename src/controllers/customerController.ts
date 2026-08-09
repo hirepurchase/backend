@@ -15,6 +15,26 @@ const CUSTOMER_PHOTO_COMPRESSION: ImageCompressionOptions = {
   quality: 70,
 };
 
+/**
+ * A customer's default password IS their phone number (set at contract creation).
+ * Changing the phone without re-hashing silently locks them out of the portal,
+ * since they log in with the new number but the hash still holds the old one.
+ *
+ * Returns a new hash when the customer is still on that default, or null when
+ * they have chosen their own password — which must never be overwritten.
+ */
+async function rehashDefaultPasswordOnPhoneChange(
+  currentPhone: string,
+  currentPasswordHash: string | null,
+  newPhone: string
+): Promise<string | null> {
+  if (!currentPasswordHash || newPhone === currentPhone) {
+    return null;
+  }
+  const stillOnDefaultPassword = await bcrypt.compare(currentPhone, currentPasswordHash);
+  return stillOnDefaultPassword ? bcrypt.hash(newPhone, 12) : null;
+}
+
 function canViewAnyCustomer(adminUser: AdminUserPayload | undefined, customerCreatedById: string | null | undefined): boolean {
   const permissions = adminUser?.permissions ?? [];
 
@@ -374,6 +394,15 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
         return;
       }
       updateData.phone = normalizedPhone;
+
+      const rehashed = await rehashDefaultPasswordOnPhoneChange(
+        existingCustomer.phone,
+        existingCustomer.password,
+        normalizedPhone
+      );
+      if (rehashed) {
+        updateData.password = rehashed;
+      }
     }
     if (address !== undefined) updateData.address = address;
     if (nationalId !== undefined) updateData.nationalId = nationalId;
@@ -470,6 +499,15 @@ export async function updateOwnProfile(req: AuthenticatedRequest, res: Response)
         return;
       }
       updateData.phone = normalizedPhone;
+
+      const rehashed = await rehashDefaultPasswordOnPhoneChange(
+        existingCustomer.phone,
+        existingCustomer.password,
+        normalizedPhone
+      );
+      if (rehashed) {
+        updateData.password = rehashed;
+      }
     }
     if (address !== undefined) updateData.address = address;
 
