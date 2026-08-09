@@ -544,6 +544,24 @@ export async function approveContract(req: AuthenticatedRequest, res: Response):
       return;
     }
 
+    // Customer service officers must speak to the customer before approving.
+    // Deliberately scoped to 'assigned' — applying this to every approver would
+    // block admins from approving the contracts already in flight.
+    if (scope.mode === 'assigned') {
+      const verification = await prisma.contactAttempt.findFirst({
+        where: { contractId: id, purpose: 'VERIFICATION', verificationResult: 'VERIFIED' },
+        orderBy: { contactedAt: 'desc' },
+        select: { id: true },
+      });
+
+      if (!verification) {
+        res.status(400).json({
+          error: 'Call the customer and log a successful verification before approving this contract',
+        });
+        return;
+      }
+    }
+
     const updated = await prisma.$transaction(async (tx) => {
       const approved = await tx.hirePurchaseContract.update({
         where: { id },

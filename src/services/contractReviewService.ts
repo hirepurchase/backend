@@ -152,6 +152,12 @@ function getHistoryLabel(action: string, newValues: Record<string, unknown> | nu
   if (action === 'EDIT_REVISION_REQUESTED_CONTRACT') return 'Agent edited revision';
   if (action === 'RESUBMIT_CONTRACT_FOR_APPROVAL') return 'Resubmitted for approval';
   if (action === 'APPROVE_CONTRACT') return 'Contract approved';
+  if (action === 'VERIFY_CUSTOMER_CALL') {
+    const result = newValues?.verificationResult;
+    if (result === 'VERIFIED') return 'Customer verified by phone';
+    if (result === 'FAILED') return 'Phone verification failed';
+    return 'Phone verification attempted';
+  }
   return action.replace(/_/g, ' ').toLowerCase();
 }
 
@@ -404,6 +410,7 @@ async function getApprovalHistoryForContracts(contractIds: string[]): Promise<Re
           'EDIT_REVISION_REQUESTED_CONTRACT',
           'RESUBMIT_CONTRACT_FOR_APPROVAL',
           'APPROVE_CONTRACT',
+          'VERIFY_CUSTOMER_CALL',
         ],
       },
     },
