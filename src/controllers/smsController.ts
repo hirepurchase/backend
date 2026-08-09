@@ -1,12 +1,23 @@
 import { Response } from 'express';
 import prisma from '../config/database';
 import { sendSMS } from '../services/notificationService';
-import { AuthenticatedRequest } from '../types';
+import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { sanitizePhoneNumber } from '../utils/helpers';
+import { resolveCustomerScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
+
+// The send loop is synchronous within the request, with a delay per recipient,
+// so a very large blast would hold the connection open for minutes.
+const MAX_RECIPIENTS_PER_SEND = 500;
+
+/** Overdue = an active contract carrying at least one overdue installment. */
+const OVERDUE_CUSTOMER_FILTER = {
+  contracts: { some: { status: 'ACTIVE', installments: { some: { status: 'OVERDUE' } } } },
+};
 
 // Send custom SMS to selected customers or all customers
 export async function sendCustomSMS(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    const admin = req.user as AdminUserPayload;
     const { message, customerIds, sendToAll } = req.body;
 
     if (!message || !message.trim()) {
@@ -19,14 +30,47 @@ export async function sendCustomSMS(req: AuthenticatedRequest, res: Response): P
       return;
     }
 
-    // Fetch target customers
+    // Scope applies to both branches: "send to all" means all customers the
+    // sender is allowed to see, and explicit ids are filtered the same way so
+    // an id outside the sender's portfolio can never be messaged.
+    const scope = await resolveCustomerScope(admin);
+    const where: Record<string, unknown> = {};
+    applyCreatorScope(where, scope);
+
+    if (!sendToAll) {
+      where.id = { in: customerIds.map((value: unknown) => String(value)) };
+    }
+
     const customers = await prisma.customer.findMany({
-      where: sendToAll ? {} : { id: { in: customerIds } },
-      select: { id: true, firstName: true, lastName: true, phone: true, membershipId: true },
+      where,
+      select: { id: true, firstName: true, lastName: true, phone: true, membershipId: true, createdById: true },
     });
 
+    // Explicit selections must all be reachable; silently dropping one would
+    // leave the sender believing a customer was messaged when they were not.
+    if (!sendToAll && customers.length !== new Set(customerIds.map(String)).size) {
+      res.status(403).json({
+        error: 'One or more selected customers are outside your assigned portfolio',
+      });
+      return;
+    }
+
     if (customers.length === 0) {
-      res.status(400).json({ error: 'No active customers found' });
+      res.status(400).json({ error: 'No customers to send to' });
+      return;
+    }
+
+    if (customers.length > MAX_RECIPIENTS_PER_SEND) {
+      res.status(400).json({
+        error: `Too many recipients (${customers.length}). Send to at most ${MAX_RECIPIENTS_PER_SEND} at a time.`,
+      });
+      return;
+    }
+
+    // Defence in depth — the where clause already scoped this.
+    const unreachable = customers.find((customer) => !scopeAllows(scope, customer.createdById));
+    if (unreachable) {
+      res.status(403).json({ error: 'One or more customers are outside your assigned portfolio' });
       return;
     }
 
@@ -71,26 +115,49 @@ export async function sendCustomSMS(req: AuthenticatedRequest, res: Response): P
 // Get customers list for SMS selection (lightweight)
 export async function getSMSCustomers(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const { search } = req.query;
+    const admin = req.user as AdminUserPayload;
+    const { search, agentId, overdueOnly } = req.query;
 
-    const searchWhere = search
-      ? {
-          OR: [
-            { firstName: { contains: search as string, mode: 'insensitive' as const } },
-            { lastName: { contains: search as string, mode: 'insensitive' as const } },
-            { membershipId: { contains: search as string, mode: 'insensitive' as const } },
-            { phone: { contains: search as string, mode: 'insensitive' as const } },
-          ],
-        }
-      : {};
+    const scope = await resolveCustomerScope(admin);
+
+    // Base scope first, so the agent filter below can only ever narrow it.
+    const where: Record<string, unknown> = {};
+    applyCreatorScope(where, scope);
+
+    if (agentId) {
+      if (!scopeAllows(scope, agentId as string)) {
+        res.status(403).json({ error: 'That agent is outside your assigned portfolio' });
+        return;
+      }
+      where.createdById = agentId as string;
+    }
+
+    if (String(overdueOnly).toLowerCase() === 'true') {
+      Object.assign(where, OVERDUE_CUSTOMER_FILTER);
+    }
+
+    if (search) {
+      where.OR = [
+        { firstName: { contains: search as string, mode: 'insensitive' as const } },
+        { lastName: { contains: search as string, mode: 'insensitive' as const } },
+        { membershipId: { contains: search as string, mode: 'insensitive' as const } },
+        { phone: { contains: search as string, mode: 'insensitive' as const } },
+      ];
+    }
+
+    // totalAll is the sender's whole reachable audience, so the "send to all"
+    // count in the UI matches what a send would actually target.
+    const scopeOnlyWhere: Record<string, unknown> = {};
+    applyCreatorScope(scopeOnlyWhere, scope);
 
     const [customers, totalAll] = await Promise.all([
       prisma.customer.findMany({
-        where: searchWhere,
+        where,
         select: { id: true, firstName: true, lastName: true, phone: true, membershipId: true },
         orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+        take: 1000,
       }),
-      prisma.customer.count(),
+      prisma.customer.count({ where: scopeOnlyWhere }),
     ]);
 
     res.json({ customers, total: customers.length, totalAll });
