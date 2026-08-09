@@ -7,6 +7,7 @@ import {
   getRoles,
   getPermissions,
 } from '../controllers/adminUserController';
+import { getAssignedAgents, setAssignedAgents } from '../controllers/csoAssignmentController';
 import { authenticateAdmin, requireAnyPermission, requireSuperAdmin } from '../middleware/auth';
 import {
   PERMISSIONS,
@@ -21,8 +22,21 @@ router.use(authenticateAdmin);
 // Admin user management (Super Admin only)
 router.get('/', requireSuperAdmin, getAllAdminUsers);
 router.post('/', requireSuperAdmin, createAdminUser);
-router.put('/:id', requireAnyPermission(PERMISSIONS.MANAGE_USERS), updateAdminUser);
 router.post('/change-password', changePassword);
+
+// Customer service officer -> agent assignments (before /:id so it isn't shadowed)
+router.get(
+  '/:id/assigned-agents',
+  requireAnyPermission(PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, PERMISSIONS.MANAGE_USERS),
+  getAssignedAgents
+);
+router.put(
+  '/:id/assigned-agents',
+  requireAnyPermission(PERMISSIONS.MANAGE_CSO_ASSIGNMENTS),
+  setAssignedAgents
+);
+
+router.put('/:id', requireAnyPermission(PERMISSIONS.MANAGE_USERS), updateAdminUser);
 
 // Roles and permissions
 router.get('/roles', requireAnyPermission(...ROLE_DIRECTORY_ACCESS_PERMISSIONS), getRoles);
