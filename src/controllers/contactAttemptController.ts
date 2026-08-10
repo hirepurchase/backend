@@ -176,7 +176,7 @@ export async function createContactAttempt(req: AuthenticatedRequest, res: Respo
 export async function listContactAttempts(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const admin = req.user as AdminUserPayload;
-    const { page = 1, limit = 20, purpose, outcome, officerId, contractId } = req.query;
+    const { page = 1, limit = 20, purpose, outcome, officerId, contractId, search, from, to } = req.query;
 
     const scope = await resolveCustomerScope(admin);
     const where: Record<string, unknown> = {};
@@ -202,10 +202,32 @@ export async function listContactAttempts(req: AuthenticatedRequest, res: Respon
     if (officerId) where.officerId = officerId as string;
     if (contractId) where.contractId = contractId as string;
 
+    if (from || to) {
+      const range: Record<string, Date> = {};
+      if (from) range.gte = new Date(from as string);
+      if (to) {
+        const end = new Date(to as string);
+        end.setHours(23, 59, 59, 999);
+        range.lte = end;
+      }
+      where.contactedAt = range;
+    }
+
+    if (search) {
+      where.OR = [
+        { customer: { firstName: { contains: search as string, mode: 'insensitive' } } },
+        { customer: { lastName: { contains: search as string, mode: 'insensitive' } } },
+        { customer: { phone: { contains: search as string, mode: 'insensitive' } } },
+        { customer: { membershipId: { contains: search as string, mode: 'insensitive' } } },
+        { contract: { contractNumber: { contains: search as string, mode: 'insensitive' } } },
+        { notes: { contains: search as string, mode: 'insensitive' } },
+      ];
+    }
+
     const take = Math.min(Number(limit) || 20, 100);
     const skip = ((Number(page) || 1) - 1) * take;
 
-    const [attempts, total] = await Promise.all([
+    const [attempts, total, byOutcome] = await Promise.all([
       prisma.contactAttempt.findMany({
         where,
         include: {
@@ -218,15 +240,51 @@ export async function listContactAttempts(req: AuthenticatedRequest, res: Respon
         take,
       }),
       prisma.contactAttempt.count({ where }),
+      prisma.contactAttempt.groupBy({ by: ['outcome'], where, _count: { _all: true } }),
     ]);
 
     res.json({
       attempts,
+      summary: Object.fromEntries(byOutcome.map((row) => [row.outcome, row._count._all])),
       pagination: { page: Number(page) || 1, limit: take, total, totalPages: Math.ceil(total / take) },
     });
   } catch (error) {
     console.error('listContactAttempts error:', error);
     res.status(500).json({ error: 'Failed to fetch call log' });
+  }
+}
+
+// GET /contact-attempts/officers — everyone who has logged a call, for the
+// log's filter dropdown.
+export async function getContactAttemptOfficers(
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const officerIds = await prisma.contactAttempt.groupBy({
+      by: ['officerId'],
+      _count: { _all: true },
+    });
+
+    const officers = await prisma.adminUser.findMany({
+      where: { id: { in: officerIds.map((row) => row.officerId) } },
+      select: { id: true, firstName: true, lastName: true, role: { select: { name: true } } },
+      orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+    });
+
+    const counts = new Map(officerIds.map((row) => [row.officerId, row._count._all]));
+
+    res.json({
+      officers: officers.map((o) => ({
+        id: o.id,
+        name: `${o.firstName} ${o.lastName}`.trim(),
+        role: o.role.name,
+        calls: counts.get(o.id) ?? 0,
+      })),
+    });
+  } catch (error) {
+    console.error('getContactAttemptOfficers error:', error);
+    res.status(500).json({ error: 'Failed to fetch officers' });
   }
 }
 

@@ -38,6 +38,13 @@ async function resolveScope(
     return { mode: 'none' };
   }
 
+  // Mirrors the bypass in requireAnyPermission. Super admins hold every
+  // permission by seeding, but relying on that would silently reduce them to
+  // seeing nothing if the role were ever edited.
+  if (admin.role === 'SUPER_ADMIN') {
+    return { mode: 'all' };
+  }
+
   const permissions = admin.permissions ?? [];
 
   if (hasPermission(permissions, viewAll)) {
