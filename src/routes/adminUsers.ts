@@ -11,6 +11,7 @@ import {
   getAssignedAgents,
   setAssignedAgents,
   getMyCustomerServiceOfficers,
+  getCustomerServiceChart,
 } from '../controllers/csoAssignmentController';
 import { authenticateAdmin, requireAnyPermission, requireSuperAdmin } from '../middleware/auth';
 import {
@@ -31,6 +32,10 @@ router.post('/change-password', changePassword);
 // An agent's own customer service officers. Authentication only — it returns
 // nothing but the caller's own supervisors, so no extra permission is needed.
 router.get('/me/customer-service', getMyCustomerServiceOfficers);
+
+// Directory of officers and the agents they cover. Contact details only, no
+// customer data, so any signed-in staff member may read it.
+router.get('/customer-service-chart', getCustomerServiceChart);
 
 // Customer service officer -> agent assignments (before /:id so it isn't shadowed)
 router.get(

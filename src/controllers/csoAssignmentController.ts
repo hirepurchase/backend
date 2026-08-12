@@ -251,6 +251,81 @@ export async function getMyAssignedAgents(req: AuthenticatedRequest, res: Respon
   }
 }
 
+// GET /admin-users/customer-service-chart — every officer with the agents they
+// cover, plus any agents nobody covers yet. Readable by all staff: it is a
+// directory of who to contact, containing no customer data.
+export async function getCustomerServiceChart(
+  req: AuthenticatedRequest,
+  res: Response
+): Promise<void> {
+  try {
+    const [officers, assignments, allAgents] = await Promise.all([
+      prisma.adminUser.findMany({
+        where: { isActive: true, role: { name: CSO_ROLE } },
+        select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+      }),
+      prisma.csoAgentAssignment.findMany({
+        include: {
+          agent: {
+            select: { id: true, firstName: true, lastName: true, email: true, phone: true, isActive: true },
+          },
+        },
+      }),
+      prisma.adminUser.findMany({
+        where: { isActive: true, role: { name: { in: ASSIGNABLE_AGENT_ROLES } } },
+        select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+      }),
+    ]);
+
+    const byOfficer = new Map<string, typeof assignments>();
+    const coveredAgentIds = new Set<string>();
+    for (const assignment of assignments) {
+      if (!assignment.agent.isActive) continue;
+      coveredAgentIds.add(assignment.agentId);
+      const list = byOfficer.get(assignment.csoId) ?? [];
+      list.push(assignment);
+      byOfficer.set(assignment.csoId, list);
+    }
+
+    res.json({
+      officers: officers.map((officer) => {
+        const agents = (byOfficer.get(officer.id) ?? [])
+          .map((a) => ({
+            id: a.agent.id,
+            name: `${a.agent.firstName} ${a.agent.lastName}`.trim(),
+            email: a.agent.email,
+            phone: a.agent.phone,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+
+        return {
+          id: officer.id,
+          name: `${officer.firstName} ${officer.lastName}`.trim(),
+          email: officer.email,
+          phone: officer.phone,
+          agentCount: agents.length,
+          agents,
+        };
+      }),
+      // Surfaced deliberately: an uncovered agent's contracts sit in a
+      // verification queue no officer can see.
+      unassignedAgents: allAgents
+        .filter((agent) => !coveredAgentIds.has(agent.id))
+        .map((agent) => ({
+          id: agent.id,
+          name: `${agent.firstName} ${agent.lastName}`.trim(),
+          email: agent.email,
+          phone: agent.phone,
+        })),
+    });
+  } catch (error) {
+    console.error('getCustomerServiceChart error:', error);
+    res.status(500).json({ error: 'Failed to fetch customer service chart' });
+  }
+}
+
 // GET /admin-users/me/customer-service — the officers responsible for the
 // signed-in agent. Any authenticated staff member may call this; it only ever
 // returns their own supervisors.
