@@ -952,6 +952,20 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
       return;
     }
 
+    // Same restriction as contract creation — otherwise resubmission is a way
+    // around it. Only blocks an agent switching TO monthly; an approver editing
+    // a pending contract is unaffected.
+    if (
+      admin.role === 'AGENT' &&
+      (paymentFrequency ?? contract.paymentFrequency) === 'MONTHLY' &&
+      contract.paymentFrequency !== 'MONTHLY'
+    ) {
+      res.status(403).json({
+        error: 'Agents cannot create monthly contracts. Choose daily or weekly collections.',
+      });
+      return;
+    }
+
     const newTotalPrice = totalPrice !== undefined ? Number(totalPrice) : contract.totalPrice;
     const newDepositAmount = depositAmount !== undefined ? Number(depositAmount) : contract.depositAmount;
     const newFrequency = (paymentFrequency ?? contract.paymentFrequency) as PaymentFrequency;

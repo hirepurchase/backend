@@ -335,6 +335,13 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
 
     const creatorRole = (req.user as any)?.role as string;
 
+    // Agents sell on daily or weekly collections only. The form hides monthly
+    // for them, but the form is bypassable — this is what enforces it.
+    if (creatorRole === 'AGENT' && paymentFrequency === 'MONTHLY') {
+      res.status(403).json({ error: 'Agents cannot create monthly contracts. Choose daily or weekly collections.' });
+      return;
+    }
+
     // Enforce agent assignment: admins can use any device; only the assigned agent is restricted
     if (creatorRole === 'AGENT' && inventoryItem.assignedAgentId && inventoryItem.assignedAgentId !== req.user!.id) {
       res.status(403).json({ error: 'This device is assigned to a different agent and cannot be used for this contract.' });
