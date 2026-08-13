@@ -17,6 +17,8 @@ import {
   processPendingManagedDeviceCommands,
   requestManagedDeviceApprove,
   requestManagedDeviceLock,
+  previewManagedDeviceNotification,
+  sendManagedDeviceNotification,
   requestManagedDeviceUnlock,
 } from '../services/deviceControlPolicyService';
 import { AuthenticatedRequest } from '../middleware/auth';
@@ -179,6 +181,59 @@ export async function approveKnoxGuardContractDevice(req: AuthenticatedRequest, 
   } catch (error: any) {
     console.error('Approve Knox Guard device error:', error);
     res.status(400).json({ error: error.message || 'Failed to approve device' });
+  }
+}
+
+// GET /knox-guard/contracts/:contractId/notification-preview
+export async function previewKnoxGuardNotification(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { contractId } = req.params;
+    res.json(await previewManagedDeviceNotification(contractId));
+  } catch (error: any) {
+    console.error('Preview Knox Guard notification error:', error);
+    res.status(400).json({ error: error.message || 'Failed to build notification preview' });
+  }
+}
+
+// POST /knox-guard/contracts/:contractId/notify
+export async function notifyKnoxGuardContractDevice(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { contractId } = req.params;
+    const { message } = req.body || {};
+    const result = await sendManagedDeviceNotification(contractId, message);
+
+    await createAuditLog({
+      userId: getAdminUserId(req),
+      action: 'NOTIFY_KNOX_GUARD_DEVICE',
+      entity: 'ManagedDevice',
+      entityId: contractId,
+      newValues: {
+        contractId,
+        success: result.success,
+        dryRun: result.dryRun,
+        isOverdue: result.isOverdue,
+        // Recorded so a wrongly-worded message can be traced to what was sent.
+        message: result.message,
+        wasOverridden: Boolean(message?.trim()),
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    if (!result.success) {
+      res.status(502).json({ error: result.error || 'Knox Guard notification failed' });
+      return;
+    }
+
+    res.json({
+      message: result.dryRun ? 'Notification simulated (dry run)' : 'Notification sent',
+      sentMessage: result.message,
+      isOverdue: result.isOverdue,
+      dryRun: result.dryRun,
+    });
+  } catch (error: any) {
+    console.error('Notify Knox Guard device error:', error);
+    res.status(400).json({ error: error.message || 'Failed to send notification' });
   }
 }
 

@@ -3,6 +3,7 @@ import { isOverdue } from '../utils/helpers';
 import {
   approveKnoxGuardDevice,
   blinkKnoxGuardDevice,
+  sendKnoxGuardMessage,
   cancelCompleteKnoxGuardDevice,
   completeKnoxGuardDevice,
   getKnoxGuardConfigurationSummary,
@@ -171,7 +172,25 @@ const ALLOW_INCOMING_NUMBERS: string[] = ALLOW_INCOMING_NUMBERS_RAW
   : [];
 // Blinking reminder config
 const BLINK_BEFORE_LOCK_ENABLED = (process.env.KNOX_GUARD_BLINK_BEFORE_LOCK || 'true').toLowerCase() !== 'false';
-const BLINK_AFTER_OVERDUE_DAYS = Number(process.env.KNOX_GUARD_BLINK_AFTER_OVERDUE_DAYS || '3');
+const BLINK_AFTER_OVERDUE_DAYS_ENV = process.env.KNOX_GUARD_BLINK_AFTER_OVERDUE_DAYS;
+const BLINK_AFTER_OVERDUE_DAYS = Number(BLINK_AFTER_OVERDUE_DAYS_ENV || '3');
+
+/**
+ * The warning must land before the lock, or it never lands at all: blink only
+ * fires while a contract is overdue enough to warn but not yet enough to lock.
+ * With the stock defaults (blink 3, lock 1) that window is empty, so devices
+ * locked on day one with no warning ever sent.
+ *
+ * Honour an explicitly configured value; otherwise keep the warning one day
+ * ahead of the lock. Never move the lock threshold — locking sooner than an
+ * operator configured would be worse than not warning.
+ */
+function resolveBlinkAfterOverdueDays(lockAfterOverdueDays: number): number {
+  if (BLINK_AFTER_OVERDUE_DAYS_ENV) {
+    return BLINK_AFTER_OVERDUE_DAYS;
+  }
+  return Math.max(1, Math.min(BLINK_AFTER_OVERDUE_DAYS, lockAfterOverdueDays - 1));
+}
 const BLINK_INTERVAL_SECONDS = Number(process.env.KNOX_GUARD_BLINK_INTERVAL_SECONDS || '3600');
 // Rate-limit retry delay (ms) when Knox returns 429
 const RATE_LIMIT_RETRY_DELAY_MS = Number(process.env.KNOX_GUARD_RATE_LIMIT_RETRY_MS || '15000');
@@ -435,13 +454,86 @@ function buildEnrollmentMetadata(
   };
 }
 
+// Knox truncates device messages; keep every composed message inside this.
+const DEVICE_MESSAGE_MAX_LENGTH = 200;
+const FALLBACK_SUPPORT_PHONE = '0530505547';
+
+const DEVICE_MESSAGE_MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/**
+ * "15 Sep 2026" — short enough for the 200-character budget. Built by hand
+ * rather than via Intl, whose month abbreviations vary with the Node build's
+ * ICU data ("Sep" vs "Sept") and would change what customers read.
+ */
+function formatDeviceDate(date: Date): string {
+  const value = new Date(date);
+  return `${value.getDate()} ${DEVICE_MESSAGE_MONTHS[value.getMonth()]} ${value.getFullYear()}`;
+}
+
+/** Plain "GHS 125.00". Intl's formatter emits a glyph that wastes characters. */
+function formatDeviceAmount(amount: number): string {
+  return `GHS ${amount.toFixed(2)}`;
+}
+
+export interface DeviceMessageMetrics {
+  overdueAmount: number;
+  maxDaysOverdue: number;
+  nextPayment?: { installmentNo: number; dueDate: Date; amount: number } | null;
+}
+
+/**
+ * The message shown on a customer's device, worded for the contract's actual
+ * state. A customer who is up to date must never be told they are overdue —
+ * previously every message said so, rendering "GHS 0.00" when nothing was owed.
+ */
+function buildDeviceStatusMessage(
+  metrics: DeviceMessageMetrics,
+  customerExperience: DeviceControlCustomerExperience,
+  context: 'NOTIFICATION' | 'LOCK'
+): string {
+  const ussd = customerExperience.paymentUssd ? ` or USSD ${customerExperience.paymentUssd}` : '';
+  const payVia = `Pay via the ${customerExperience.paymentAppLabel || 'AIDOO TECH'} app${ussd}.`;
+
+  if (metrics.overdueAmount > 0) {
+    if (context === 'LOCK') {
+      const support = customerExperience.supportPhone || FALLBACK_SUPPORT_PHONE;
+      return `Your phone has been restricted because your payment is overdue. Amount due: ${formatDeviceAmount(
+        metrics.overdueAmount
+      )}. ${payVia} Support: ${support}`.slice(0, DEVICE_MESSAGE_MAX_LENGTH);
+    }
+
+    // The admin-configurable warning, which was previously read and discarded.
+    const warning =
+      customerExperience.warningMessage?.trim() ||
+      'Your account is overdue. Please make payment now to avoid device restriction.';
+    return `${warning} Amount overdue: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia}`.slice(
+      0,
+      DEVICE_MESSAGE_MAX_LENGTH
+    );
+  }
+
+  if (metrics.nextPayment) {
+    return `Your next payment of ${formatDeviceAmount(
+      metrics.nextPayment.amount
+    )} is due on ${formatDeviceDate(metrics.nextPayment.dueDate)}. ${payVia} Thank you.`.slice(
+      0,
+      DEVICE_MESSAGE_MAX_LENGTH
+    );
+  }
+
+  return `Your account is up to date. Thank you for paying on time.`.slice(0, DEVICE_MESSAGE_MAX_LENGTH);
+}
+
 function buildLockMessage(
   contract: any,
   overdueAmount: number,
   maxDaysOverdue: number,
   customerExperience: DeviceControlCustomerExperience
 ): string {
-  return `Your phone has been restricted because your payment is overdue. Amount due: GHS ${overdueAmount.toFixed(2)}. Please pay now using the AIDOO TECH App, USSD, or call 0530505547.`.trim();
+  return buildDeviceStatusMessage({ overdueAmount, maxDaysOverdue }, customerExperience, 'LOCK');
 }
 
 function parseJsonSafely(value: string | null | undefined): Record<string, unknown> | null {
@@ -831,14 +923,11 @@ function buildLockCommandPayload(contract: any, metrics: { overdueAmount: number
   };
 }
 
-function buildBlinkCommandPayload(contract: any, metrics: { overdueAmount: number; maxDaysOverdue: number }, defaults: DeviceControlEnrollmentDefaults) {
+function buildBlinkCommandPayload(contract: any, metrics: DeviceMessageMetrics, defaults: DeviceControlEnrollmentDefaults) {
   const customerExperience = extractCustomerExperience(parseJsonSafely(contract.managedDevice?.metadata), defaults);
-  const customerPhone = contract.customer?.phone || null;
-  const ussd = customerExperience.paymentUssd ? ` ${customerExperience.paymentUssd}` : '';
-  const message = `Your account is overdue. Please make payment now to avoid or remove device restriction. Amount overdue by GHS ${metrics.overdueAmount.toFixed(2)}. Use the AIDOO TECH app, payment USSD${ussd}. Thank You`.slice(0, 200);
 
   return {
-    message,
+    message: buildDeviceStatusMessage(metrics, customerExperience, 'NOTIFICATION'),
     tel: customerExperience.supportPhone || undefined,
     interval: BLINK_INTERVAL_SECONDS,
     timeLimitEnable: false,
@@ -976,12 +1065,28 @@ function calculateOverdueMetrics(contract: any, blockOnUnpaidPenalties: boolean)
     return Math.max(max, computeDaysOverdue(installment.dueDate, contract.gracePeriodDays));
   }, 0);
 
+  // The next unpaid installment, so a message can describe what is coming up
+  // rather than only what is late. Installments arrive ordered by installmentNo.
+  const nextInstallment = contract.installments.find(
+    (installment: any) =>
+      installment.status === 'PENDING' ||
+      installment.status === 'PARTIAL' ||
+      installment.status === 'OVERDUE'
+  );
+
   return {
     overdueInstallments,
     overdueAmount: Number(overdueAmount.toFixed(2)),
     unpaidPenaltyAmount: Number(unpaidPenaltyAmount.toFixed(2)),
     blockingPenaltyAmount: Number((blockOnUnpaidPenalties ? unpaidPenaltyAmount : 0).toFixed(2)),
     maxDaysOverdue,
+    nextPayment: nextInstallment
+      ? {
+          installmentNo: nextInstallment.installmentNo as number,
+          dueDate: nextInstallment.dueDate as Date,
+          amount: Number((nextInstallment.amount - nextInstallment.paidAmount).toFixed(2)),
+        }
+      : null,
   };
 }
 
@@ -1895,7 +2000,8 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const kSettings = await getKnoxSettings();
   const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
   const isActive = contract.status === 'ACTIVE';
-  const isOverdueEnoughToBlink = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= BLINK_AFTER_OVERDUE_DAYS;
+  const blinkAfterOverdueDays = resolveBlinkAfterOverdueDays(kSettings.lockAfterOverdueDays);
+  const isOverdueEnoughToBlink = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= blinkAfterOverdueDays;
   const isOverdueEnoughToLock = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
   const actualState = resolveManagedState(contract.managedDevice.actualState) || 'UNKNOWN';
   const enrollmentStatus = resolveEnrollmentState(contract.managedDevice.enrollmentStatus) || 'PENDING';
@@ -2055,6 +2161,78 @@ export async function requestManagedDeviceApprove(contractId: string) {
     dryRun: result.dryRun,
     transactionId: result.transactionId,
     error: result.error,
+  };
+}
+
+/**
+ * The message this contract would receive right now, without sending it.
+ * Lets staff see the exact wording before it lands on a customer's phone.
+ */
+export async function previewManagedDeviceNotification(contractId: string) {
+  const contract = await getContractWithDevice(contractId);
+  if (!contract) {
+    throw new Error('Contract not found');
+  }
+
+  const kSettings = await getKnoxSettings();
+  const defaults = await getDeviceControlEnrollmentDefaults();
+  const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
+  const customerExperience = extractCustomerExperience(
+    parseJsonSafely(contract.managedDevice?.metadata),
+    defaults
+  );
+
+  return {
+    contractNumber: contract.contractNumber,
+    customerName: `${contract.customer?.firstName ?? ''} ${contract.customer?.lastName ?? ''}`.trim(),
+    isOverdue: metrics.overdueAmount > 0,
+    overdueAmount: metrics.overdueAmount,
+    nextPayment: metrics.nextPayment,
+    hasDevice: Boolean(contract.managedDevice),
+    message: buildDeviceStatusMessage(metrics, customerExperience, 'NOTIFICATION'),
+  };
+}
+
+/**
+ * Send a one-off notification to a contract's device, worded for the contract's
+ * current state. Exists so staff stop sending static text from the Samsung
+ * console, which is what told up-to-date customers they were overdue.
+ */
+export async function sendManagedDeviceNotification(
+  contractId: string,
+  overrideMessage?: string
+) {
+  const contract = await getContractWithDevice(contractId);
+  if (!contract) {
+    throw new Error('Contract not found');
+  }
+  if (!contract.managedDevice) {
+    throw new Error('This contract has no managed device to notify');
+  }
+
+  const kSettings = await getKnoxSettings();
+  const defaults = await getDeviceControlEnrollmentDefaults();
+  const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
+  const customerExperience = extractCustomerExperience(
+    parseJsonSafely(contract.managedDevice.metadata),
+    defaults
+  );
+
+  const message = (overrideMessage?.trim() || buildDeviceStatusMessage(metrics, customerExperience, 'NOTIFICATION'))
+    .slice(0, DEVICE_MESSAGE_MAX_LENGTH);
+
+  const result = await sendKnoxGuardMessage({
+    ...getManagedDeviceIdentifier(contract.managedDevice),
+    message,
+    tel: customerExperience.supportPhone || undefined,
+  });
+
+  return {
+    success: result.success || result.dryRun,
+    dryRun: result.dryRun,
+    message,
+    isOverdue: metrics.overdueAmount > 0,
+    error: result.success || result.dryRun ? null : result.error ?? 'Knox Guard rejected the notification',
   };
 }
 

@@ -425,6 +425,24 @@ export async function blinkKnoxGuardDevice(payload: DeviceIdentifier & {
   });
 }
 
+/**
+ * Samsung's dedicated device-notification action. Unlike blink this does not
+ * flash the screen on an interval — it delivers a single message, which is what
+ * a courtesy payment reminder should do.
+ */
+export async function sendKnoxGuardMessage(payload: DeviceIdentifier & {
+  message: string;
+  tel?: string | null;
+  email?: string | null;
+}): Promise<KnoxGuardActionResult> {
+  return postAction(KNOX_GUARD_PATHS.sendMessage, {
+    ...normalizeIdentifier(payload),
+    message: payload.message,
+    ...(payload.tel ? { tel: payload.tel } : {}),
+    ...(payload.email ? { email: payload.email } : {}),
+  });
+}
+
 export async function completeKnoxGuardDevice(payload: DeviceIdentifier & {
   message?: string;
 }): Promise<KnoxGuardActionResult> {

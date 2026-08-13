@@ -13,6 +13,8 @@ import {
   listKnoxGuardCommands,
   listKnoxGuardDevices,
   lockKnoxGuardContractDevice,
+  previewKnoxGuardNotification,
+  notifyKnoxGuardContractDevice,
   processKnoxGuardCommands,
   unlockKnoxGuardContractDevice,
   verifyKnoxDeviceStatus,
@@ -102,6 +104,21 @@ router.post(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   evaluateKnoxGuardContractDevice
+);
+
+// Preview is read-only, so viewers may see what would be sent without sending.
+router.get(
+  '/contracts/:contractId/notification-preview',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  previewKnoxGuardNotification
+);
+
+router.post(
+  '/contracts/:contractId/notify',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  notifyKnoxGuardContractDevice
 );
 
 router.post(
