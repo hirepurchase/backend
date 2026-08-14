@@ -935,14 +935,21 @@ export async function getDailyPayments(req: AuthenticatedRequest, res: Response)
       where.contract = contractScope;
     }
 
+    // Only administrators see the day's takings. Everyone else gets the count.
+    // Omitted from the payload rather than hidden in the UI, since the response
+    // is readable by anyone who opens their browser's network tab.
+    const canViewTotals = ['SUPER_ADMIN', 'ADMIN'].includes(adminUser?.role);
+
     const [count, totalAmount, recentPayments] = await Promise.all([
       prisma.paymentTransaction.count({
         where,
       }),
-      prisma.paymentTransaction.aggregate({
-        _sum: { amount: true },
-        where,
-      }),
+      canViewTotals
+        ? prisma.paymentTransaction.aggregate({
+            _sum: { amount: true },
+            where,
+          })
+        : Promise.resolve(null),
       prisma.paymentTransaction.findMany({
         where,
         include: {
@@ -960,7 +967,7 @@ export async function getDailyPayments(req: AuthenticatedRequest, res: Response)
     res.json({
       date: startOfDay.toISOString().split('T')[0],
       count,
-      totalAmount: totalAmount._sum.amount ?? 0,
+      ...(canViewTotals ? { totalAmount: totalAmount?._sum.amount ?? 0 } : {}),
       recentPayments,
     });
   } catch (error) {
