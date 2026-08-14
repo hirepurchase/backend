@@ -170,27 +170,14 @@ const ALLOW_INCOMING_NUMBERS_RAW = (process.env.KNOX_GUARD_ALLOW_INCOMING_NUMBER
 const ALLOW_INCOMING_NUMBERS: string[] = ALLOW_INCOMING_NUMBERS_RAW
   ? ALLOW_INCOMING_NUMBERS_RAW.split(',').map((n) => n.trim()).filter(Boolean)
   : [];
-// Blinking reminder config
-const BLINK_BEFORE_LOCK_ENABLED = (process.env.KNOX_GUARD_BLINK_BEFORE_LOCK || 'true').toLowerCase() !== 'false';
-const BLINK_AFTER_OVERDUE_DAYS_ENV = process.env.KNOX_GUARD_BLINK_AFTER_OVERDUE_DAYS;
-const BLINK_AFTER_OVERDUE_DAYS = Number(BLINK_AFTER_OVERDUE_DAYS_ENV || '3');
-
-/**
- * The warning must land before the lock, or it never lands at all: blink only
- * fires while a contract is overdue enough to warn but not yet enough to lock.
- * With the stock defaults (blink 3, lock 1) that window is empty, so devices
- * locked on day one with no warning ever sent.
- *
- * Honour an explicitly configured value; otherwise keep the warning one day
- * ahead of the lock. Never move the lock threshold — locking sooner than an
- * operator configured would be worse than not warning.
- */
-function resolveBlinkAfterOverdueDays(lockAfterOverdueDays: number): number {
-  if (BLINK_AFTER_OVERDUE_DAYS_ENV) {
-    return BLINK_AFTER_OVERDUE_DAYS;
-  }
-  return Math.max(1, Math.min(BLINK_AFTER_OVERDUE_DAYS, lockAfterOverdueDays - 1));
-}
+// Device payment reminder config.
+//
+// The reminder is for payments that are still upcoming. Once a contract goes
+// overdue the device locks (lockAfterOverdueDays defaults to 1) and the lock
+// screen already carries the message, so an overdue reminder would only repeat
+// it on a phone the customer cannot use.
+const PAYMENT_REMINDER_ENABLED = (process.env.KNOX_GUARD_PAYMENT_REMINDER || 'true').toLowerCase() !== 'false';
+const REMIND_BEFORE_DUE_DAYS = Number(process.env.KNOX_GUARD_REMIND_BEFORE_DUE_DAYS || '3');
 const BLINK_INTERVAL_SECONDS = Number(process.env.KNOX_GUARD_BLINK_INTERVAL_SECONDS || '3600');
 // Rate-limit retry delay (ms) when Knox returns 429
 const RATE_LIMIT_RETRY_DELAY_MS = Number(process.env.KNOX_GUARD_RATE_LIMIT_RETRY_MS || '15000');
@@ -211,6 +198,13 @@ function computeDaysOverdue(dueDate: Date, gracePeriodDays: number): number {
   const today = todayAtMidnight();
   const diffMs = today.getTime() - dueWithGrace.getTime();
   return diffMs > 0 ? Math.floor(diffMs / 86400000) : 0;
+}
+
+/** Whole days from today until `date`. Negative once the date has passed. */
+function computeDaysUntil(date: Date): number {
+  const target = new Date(date);
+  target.setHours(0, 0, 0, 0);
+  return Math.round((target.getTime() - todayAtMidnight().getTime()) / 86400000);
 }
 
 function buildApproveId(contractNumber: string): string {
@@ -2000,9 +1994,20 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const kSettings = await getKnoxSettings();
   const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
   const isActive = contract.status === 'ACTIVE';
-  const blinkAfterOverdueDays = resolveBlinkAfterOverdueDays(kSettings.lockAfterOverdueDays);
-  const isOverdueEnoughToBlink = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= blinkAfterOverdueDays;
   const isOverdueEnoughToLock = isActive && metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
+
+  // The device reminder is for payments that are coming up, not ones already
+  // late: the phone locks a day after the grace period, so an overdue warning
+  // has nowhere useful to land and only repeats what the lock screen says.
+  const daysUntilNextPayment = metrics.nextPayment
+    ? computeDaysUntil(metrics.nextPayment.dueDate)
+    : null;
+  const hasUpcomingPaymentDue =
+    isActive &&
+    metrics.overdueAmount === 0 &&
+    daysUntilNextPayment !== null &&
+    daysUntilNextPayment >= 0 &&
+    daysUntilNextPayment <= REMIND_BEFORE_DUE_DAYS;
   const actualState = resolveManagedState(contract.managedDevice.actualState) || 'UNKNOWN';
   const enrollmentStatus = resolveEnrollmentState(contract.managedDevice.enrollmentStatus) || 'PENDING';
   // PENDING is treated the same as APPROVAL_QUEUED — Knox may reject but desiredState is recorded
@@ -2010,7 +2015,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const deviceCanAcceptControlCommand = ['PENDING', 'APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(enrollmentStatus);
   const deviceIsLockedOrPending = ['LOCKED', 'PENDING'].includes(actualState);
   const shouldLock = isOverdueEnoughToLock;
-  const shouldBlink = BLINK_BEFORE_LOCK_ENABLED && isOverdueEnoughToBlink && !isOverdueEnoughToLock;
+  const shouldBlink = PAYMENT_REMINDER_ENABLED && hasUpcomingPaymentDue && !isOverdueEnoughToLock;
   const shouldUnlock = deviceIsLockedOrPending && metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
   // Also unlock if admin explicitly set desiredState=UNLOCKED but device is still locked
   const pendingAdminUnlock = contract.managedDevice.desiredState === 'UNLOCKED' && actualState === 'LOCKED';
