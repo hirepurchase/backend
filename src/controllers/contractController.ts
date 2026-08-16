@@ -669,6 +669,7 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
       status,
       customerId,
       search,
+      hasBalance,
       includeDeviceControl,
     } = req.query;
 
@@ -687,6 +688,12 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
     applyCreatorScope(where, await resolveContractScope(adminUser));
 
     if (status) where.status = status;
+    // Payment screens ask for contracts that can still take money. Filtering
+    // here rather than client-side keeps contracts beyond the first page from
+    // being silently dropped.
+    if (String(hasBalance).toLowerCase() === 'true') {
+      where.outstandingBalance = { gt: 0 };
+    }
     if (customerId) {
       const filterCustomer = await prisma.customer.findUnique({
         where: { id: customerId as string },
@@ -758,7 +765,7 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
       };
     }
 
-    const [contracts, total] = await Promise.all([
+    const [contracts, total, balanceSummary] = await Promise.all([
       prisma.hirePurchaseContract.findMany({
         where,
         include: contractInclude,
@@ -767,10 +774,19 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
         take: Number(limit),
       }),
       prisma.hirePurchaseContract.count({ where }),
+      // Aggregated over the whole filtered set, so a paginated caller can show
+      // portfolio totals without loading every contract.
+      prisma.hirePurchaseContract.aggregate({
+        where,
+        _sum: { outstandingBalance: true },
+      }),
     ]);
 
     res.json({
       contracts,
+      summary: {
+        totalOutstanding: Number((balanceSummary._sum.outstandingBalance ?? 0).toFixed(2)),
+      },
       pagination: {
         page: Number(page),
         limit: Number(limit),
