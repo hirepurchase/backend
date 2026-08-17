@@ -123,7 +123,7 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
       include: {
         customer: { select: { id: true, firstName: true, lastName: true, membershipId: true, phone: true } },
         inventoryItem: { include: { product: { select: { name: true } } } },
-        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
         installments: { where: { status: 'OVERDUE' }, orderBy: { dueDate: 'asc' } },
         payments: {
           where: { status: 'SUCCESS' },
@@ -140,18 +140,19 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
       },
     });
 
-    const rows = contracts.flatMap((contract) =>
-      contract.installments.map((installment) => {
-        const msOverdue = now.getTime() - new Date(installment.dueDate).getTime();
-        const daysOverdue = Math.max(0, Math.floor(msOverdue / (1000 * 60 * 60 * 24)));
-        const lastPayment = contract.payments[0] ?? null;
-        const lastCall = contract.contactAttempts[0] ?? null;
+    // One row per customer, not per overdue installment. A customer 5 payments
+    // behind is still one phone call; listing them 5 times made the queue look
+    // 4x longer than the work in it.
+    const byCustomer = new Map<string, any>();
 
-        return {
-          contractId: contract.id,
-          contractNumber: contract.contractNumber,
-          installmentId: installment.id,
-          installmentNo: installment.installmentNo,
+    for (const contract of contracts) {
+      if (contract.installments.length === 0) continue;
+
+      const key = contract.customer.id;
+      let row = byCustomer.get(key);
+
+      if (!row) {
+        row = {
           customer: {
             id: contract.customer.id,
             name: `${contract.customer.firstName} ${contract.customer.lastName}`.trim(),
@@ -159,26 +160,81 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
             membershipId: contract.customer.membershipId,
           },
           agent: contract.createdBy
-            ? `${contract.createdBy.firstName} ${contract.createdBy.lastName}`.trim()
+            ? {
+                id: contract.createdBy.id,
+                name: `${contract.createdBy.firstName} ${contract.createdBy.lastName}`.trim(),
+                phone: contract.createdBy.phone,
+                email: contract.createdBy.email,
+              }
             : null,
-          product: contract.inventoryItem?.product?.name ?? null,
-          amountOverdue: Math.round((installment.amount - installment.paidAmount) * 100) / 100,
-          dueDate: installment.dueDate,
-          daysOverdue,
-          lastPaymentDate: lastPayment?.paymentDate ?? null,
-          lastPaymentAmount: lastPayment?.amount ?? null,
-          lastCallAt: lastCall?.contactedAt ?? null,
-          lastCallOutcome: lastCall?.outcome ?? null,
-          promiseToPayDate: lastCall?.promiseToPayDate ?? null,
+          overdueCount: 0,
+          amountOverdue: 0,
+          daysOverdue: 0,
+          oldestDueDate: null as Date | null,
+          lastPaymentDate: null as Date | null,
+          lastPaymentAmount: null as number | null,
+          lastCallAt: null as Date | null,
+          lastCallOutcome: null as string | null,
+          promiseToPayDate: null as Date | null,
+          contracts: [] as any[],
         };
-      })
-    );
+        byCustomer.set(key, row);
+      }
 
-    rows.sort((a, b) => b.daysOverdue - a.daysOverdue);
+      const contractOverdue = contract.installments.reduce(
+        (sum, i) => sum + (i.amount - i.paidAmount),
+        0
+      );
+      const oldest = contract.installments[0];
+      const daysOverdue = Math.max(
+        0,
+        Math.floor((now.getTime() - new Date(oldest.dueDate).getTime()) / 86400000)
+      );
+
+      row.overdueCount += contract.installments.length;
+      row.amountOverdue = Math.round((row.amountOverdue + contractOverdue) * 100) / 100;
+      row.daysOverdue = Math.max(row.daysOverdue, daysOverdue);
+      if (!row.oldestDueDate || new Date(oldest.dueDate) < new Date(row.oldestDueDate)) {
+        row.oldestDueDate = oldest.dueDate;
+      }
+
+      // Most recent across all of the customer's contracts.
+      const lastPayment = contract.payments[0] ?? null;
+      if (lastPayment?.paymentDate && (!row.lastPaymentDate || lastPayment.paymentDate > row.lastPaymentDate)) {
+        row.lastPaymentDate = lastPayment.paymentDate;
+        row.lastPaymentAmount = lastPayment.amount;
+      }
+      const lastCall = contract.contactAttempts[0] ?? null;
+      if (lastCall?.contactedAt && (!row.lastCallAt || lastCall.contactedAt > row.lastCallAt)) {
+        row.lastCallAt = lastCall.contactedAt;
+        row.lastCallOutcome = lastCall.outcome;
+        row.promiseToPayDate = lastCall.promiseToPayDate;
+      }
+
+      row.contracts.push({
+        contractId: contract.id,
+        contractNumber: contract.contractNumber,
+        product: contract.inventoryItem?.product?.name ?? null,
+        overdueCount: contract.installments.length,
+        amountOverdue: Math.round(contractOverdue * 100) / 100,
+        daysOverdue,
+        installments: contract.installments.map((i) => ({
+          installmentId: i.id,
+          installmentNo: i.installmentNo,
+          dueDate: i.dueDate,
+          amountOverdue: Math.round((i.amount - i.paidAmount) * 100) / 100,
+        })),
+      });
+    }
+
+    const rows = Array.from(byCustomer.values()).sort((a, b) => b.daysOverdue - a.daysOverdue);
 
     res.json({
       count: rows.length,
+      overdueInstallmentCount: rows.reduce((sum, row) => sum + row.overdueCount, 0),
       totalOverdueAmount: Math.round(rows.reduce((sum, row) => sum + row.amountOverdue, 0) * 100) / 100,
+      customers: rows,
+      // Retained so an older client keeps working until it is updated.
       installments: rows,
     });
   } catch (error) {
