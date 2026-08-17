@@ -94,10 +94,21 @@ export async function getVerificationQueue(req: AuthenticatedRequest, res: Respo
       };
     });
 
+    // A customer is most reachable shortly after signing, and the contract
+    // cannot go live until the call is made — so waiting time is the number
+    // that matters here, not queue length.
+    const awaiting = rows.filter((row) => !row.isVerified);
+    const hoursWaiting = (row: { createdAt: Date }) =>
+      (Date.now() - new Date(row.createdAt).getTime()) / 3600000;
+
     res.json({
       count: rows.length,
-      awaitingVerification: rows.filter((row) => !row.isVerified).length,
+      awaitingVerification: awaiting.length,
       readyToApprove: rows.filter((row) => row.isVerified).length,
+      overdueForCall: awaiting.filter((row) => hoursWaiting(row) > 6).length,
+      oldestWaitingHours: awaiting.length
+        ? Math.round(Math.max(...awaiting.map(hoursWaiting)) * 10) / 10
+        : 0,
       contracts: rows,
     });
   } catch (error) {
@@ -339,6 +350,7 @@ export async function getCsoDashboard(req: AuthenticatedRequest, res: Response):
         where: pendingWhere,
         select: {
           id: true,
+          createdAt: true,
           contactAttempts: {
             where: { purpose: 'VERIFICATION', verificationResult: 'VERIFIED' },
             select: { id: true },
@@ -363,7 +375,10 @@ export async function getCsoDashboard(req: AuthenticatedRequest, res: Response):
       }),
     ]);
 
-    const verified = pendingContracts.filter((c) => c.contactAttempts.length > 0).length;
+    const awaitingCallContracts = pendingContracts.filter((c) => c.contactAttempts.length === 0);
+    const verified = pendingContracts.length - awaitingCallContracts.length;
+    const hoursWaiting = (c: { createdAt: Date }) =>
+      (Date.now() - new Date(c.createdAt).getTime()) / 3600000;
     const overdueAmount = overdueContracts.reduce(
       (sum, contract) =>
         sum + contract.installments.reduce((s, i) => s + (i.amount - i.paidAmount), 0),
@@ -375,8 +390,13 @@ export async function getCsoDashboard(req: AuthenticatedRequest, res: Response):
       customers: customerCount,
       verification: {
         pending: pendingContracts.length,
-        awaitingCall: pendingContracts.length - verified,
+        awaitingCall: awaitingCallContracts.length,
         readyToApprove: verified,
+        // Waiting time, not queue length, is what an officer needs to act on.
+        overdueForCall: awaitingCallContracts.filter((c) => hoursWaiting(c) > 6).length,
+        oldestWaitingHours: awaitingCallContracts.length
+          ? Math.round(Math.max(...awaitingCallContracts.map(hoursWaiting)) * 10) / 10
+          : 0,
       },
       collections: {
         contractsOverdue: overdueContracts.length,
