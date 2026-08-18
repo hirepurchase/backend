@@ -491,34 +491,47 @@ function buildDeviceStatusMessage(
   const ussd = customerExperience.paymentUssd ? ` or USSD ${customerExperience.paymentUssd}` : '';
   const payVia = `Pay via the ${customerExperience.paymentAppLabel || 'AIDOO TECH'} app${ussd}.`;
 
+  // Knox truncates at 200 characters. Trim the configurable prose rather than
+  // the whole message, so the payment details and USSD code always survive —
+  // a code cut mid-string is worse than no message at all.
+  const withinLimit = (prose: string, facts: string) => {
+    const room = DEVICE_MESSAGE_MAX_LENGTH - facts.length - 1;
+    const trimmed = prose.length > room ? `${prose.slice(0, Math.max(0, room - 1)).trimEnd()}…` : prose;
+    return `${trimmed} ${facts}`.trim().slice(0, DEVICE_MESSAGE_MAX_LENGTH);
+  };
+
   if (metrics.overdueAmount > 0) {
     if (context === 'LOCK') {
       const support = customerExperience.supportPhone || FALLBACK_SUPPORT_PHONE;
-      return `Your phone has been restricted because your payment is overdue. Amount due: ${formatDeviceAmount(
-        metrics.overdueAmount
-      )}. ${payVia} Support: ${support}`.slice(0, DEVICE_MESSAGE_MAX_LENGTH);
+      return withinLimit(
+        'Your phone has been restricted because your payment is overdue.',
+        `Amount due: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia} Support: ${support}`
+      );
     }
 
-    // The admin-configurable warning, which was previously read and discarded.
-    const warning =
-      customerExperience.warningMessage?.trim() ||
-      'Your account is overdue. Please make payment now to avoid device restriction.';
-    return `${warning} Amount overdue: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia}`.slice(
-      0,
-      DEVICE_MESSAGE_MAX_LENGTH
+    // Reached only by a manual send — the automatic reminder never fires once a
+    // contract is overdue, because the device locks a day after grace instead.
+    return withinLimit(
+      'Your account is overdue.',
+      `Amount overdue: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia}`
     );
   }
 
   if (metrics.nextPayment) {
-    return `Your next payment of ${formatDeviceAmount(
-      metrics.nextPayment.amount
-    )} is due on ${formatDeviceDate(metrics.nextPayment.dueDate)}. ${payVia} Thank you.`.slice(
-      0,
-      DEVICE_MESSAGE_MAX_LENGTH
+    // warningMessage is the admin-configurable reminder for an upcoming
+    // payment. The amount and date are appended so the customer knows exactly
+    // what to pay and when.
+    const reminder =
+      customerExperience.warningMessage?.trim() || 'Your next payment is due soon.';
+    return withinLimit(
+      reminder,
+      `${formatDeviceAmount(metrics.nextPayment.amount)} due ${formatDeviceDate(
+        metrics.nextPayment.dueDate
+      )}. ${payVia}`
     );
   }
 
-  return `Your account is up to date. Thank you for paying on time.`.slice(0, DEVICE_MESSAGE_MAX_LENGTH);
+  return 'Your account is up to date. Thank you for paying on time.'.slice(0, DEVICE_MESSAGE_MAX_LENGTH);
 }
 
 function buildLockMessage(
