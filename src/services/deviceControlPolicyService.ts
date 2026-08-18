@@ -500,20 +500,14 @@ function buildDeviceStatusMessage(
     return `${trimmed} ${facts}`.trim().slice(0, DEVICE_MESSAGE_MAX_LENGTH);
   };
 
+  // Overdue only ever reaches the lock screen. Notifications are refused for
+  // overdue contracts (see sendManagedDeviceNotification) because the device
+  // locks and the lock screen carries the amount due.
   if (metrics.overdueAmount > 0) {
-    if (context === 'LOCK') {
-      const support = customerExperience.supportPhone || FALLBACK_SUPPORT_PHONE;
-      return withinLimit(
-        'Your phone has been restricted because your payment is overdue.',
-        `Amount due: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia} Support: ${support}`
-      );
-    }
-
-    // Reached only by a manual send — the automatic reminder never fires once a
-    // contract is overdue, because the device locks a day after grace instead.
+    const support = customerExperience.supportPhone || FALLBACK_SUPPORT_PHONE;
     return withinLimit(
-      'Your account is overdue.',
-      `Amount overdue: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia}`
+      'Your phone has been restricted because your payment is overdue.',
+      `Amount due: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia} Support: ${support}`
     );
   }
 
@@ -2207,7 +2201,13 @@ export async function previewManagedDeviceNotification(contractId: string) {
     overdueAmount: metrics.overdueAmount,
     nextPayment: metrics.nextPayment,
     hasDevice: Boolean(contract.managedDevice),
-    message: buildDeviceStatusMessage(metrics, customerExperience, 'NOTIFICATION'),
+    // Overdue contracts cannot be notified — the lock screen carries the
+    // message. Stated here so a caller knows before attempting to send.
+    canNotify: metrics.overdueAmount === 0,
+    message:
+      metrics.overdueAmount > 0
+        ? 'No notification is sent for an overdue account — the device lock screen shows the amount due.'
+        : buildDeviceStatusMessage(metrics, customerExperience, 'NOTIFICATION'),
   };
 }
 
@@ -2235,6 +2235,16 @@ export async function sendManagedDeviceNotification(
     parseJsonSafely(contract.managedDevice.metadata),
     defaults
   );
+
+  // Device notifications are reminders about an upcoming payment. Once a
+  // contract is overdue the device locks and the lock screen already states
+  // the amount due and how to pay, so a notification would either repeat it or
+  // land on a phone the customer cannot use. Collections calls cover the rest.
+  if (metrics.overdueAmount > 0) {
+    throw new Error(
+      'This account is overdue, so the device shows the amount due on its lock screen. Device notifications are only for upcoming payments.'
+    );
+  }
 
   const message = (overrideMessage?.trim() || buildDeviceStatusMessage(metrics, customerExperience, 'NOTIFICATION'))
     .slice(0, DEVICE_MESSAGE_MAX_LENGTH);
