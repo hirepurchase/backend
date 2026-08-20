@@ -719,6 +719,10 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
       userAgent: req.headers['user-agent'],
     });
 
+    // Editing an amount can clear the last of a balance, or reopen one that was
+    // settled — either way the device state must be re-evaluated.
+    await safelyEvaluateManagedDeviceForContract(payment.contractId);
+
     res.status(200).json({ message: 'Payment updated successfully' });
   } catch (error) {
     console.error('Update manual payment error:', error);
@@ -811,6 +815,10 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+
+    // Removing a payment can reopen a balance that was settled, which should
+    // put the device back under management.
+    await safelyEvaluateManagedDeviceForContract(payment.contractId);
 
     res.status(200).json({ message: 'Payment deleted successfully' });
   } catch (error) {
