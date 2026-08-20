@@ -1,5 +1,6 @@
 import prisma from '../config/database';
 import { isOverdue } from '../utils/helpers';
+import { createAuditLog } from './auditService';
 import {
   approveKnoxGuardDevice,
   blinkKnoxGuardDevice,
@@ -2006,6 +2007,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     contract.managedDevice.enrollmentStatus
   );
   if (contract.status === 'COMPLETED' && !alreadyReleased) {
+    await transferOwnershipOnCompletion(contractId);
     const released = await unenrollManagedDeviceForContract(
       contractId,
       'Contract completed — ownership transferred to customer.'
@@ -2428,6 +2430,65 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
     actualState: nextState,
     error: result.error,
   };
+}
+
+
+/**
+ * A contract that completes on its final payment has been paid for in full, so
+ * the device belongs to the customer. Previously this only happened when an
+ * admin pressed Transfer Ownership, leaving fully-paid contracts marked as not
+ * transferred and the device still registered to the company.
+ *
+ * Idempotent — safe to call on every evaluation.
+ */
+async function transferOwnershipOnCompletion(contractId: string): Promise<void> {
+  const contract = await prisma.hirePurchaseContract.findUnique({
+    where: { id: contractId },
+    select: {
+      id: true,
+      ownershipTransferred: true,
+      outstandingBalance: true,
+      customer: { select: { firstName: true, lastName: true } },
+      inventoryItem: { select: { id: true, registeredUnder: true } },
+    },
+  });
+
+  if (!contract || contract.ownershipTransferred) {
+    return;
+  }
+
+  // Guard against transferring on a contract marked complete while money is
+  // still owed — completion should already imply a zero balance.
+  if (contract.outstandingBalance > 0.005) {
+    return;
+  }
+
+  const customerName = `${contract.customer?.firstName ?? ''} ${contract.customer?.lastName ?? ''}`.trim();
+
+  await prisma.$transaction(async (tx) => {
+    await tx.hirePurchaseContract.update({
+      where: { id: contractId },
+      data: { ownershipTransferred: true },
+    });
+
+    if (contract.inventoryItem && customerName) {
+      await tx.inventoryItem.update({
+        where: { id: contract.inventoryItem.id },
+        data: { registeredUnder: customerName },
+      });
+    }
+  });
+
+  await createAuditLog({
+    action: 'TRANSFER_OWNERSHIP',
+    entity: 'HirePurchaseContract',
+    entityId: contractId,
+    newValues: {
+      ownershipTransferred: true,
+      registeredUnder: customerName,
+      trigger: 'Automatic on contract completion',
+    },
+  });
 }
 
 export async function unenrollManagedDeviceForContract(
