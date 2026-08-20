@@ -1998,6 +1998,26 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     throw new Error('Contract has no enrolled managed device');
   }
 
+  // A contract can complete without anyone pressing a button — the final
+  // payment clears the balance and the status flips. Ownership has transferred
+  // at that point, so the device must be released rather than left enrolled
+  // and, worse, left blinking a reminder at a customer who has paid in full.
+  const alreadyReleased = ['COMPLETED', 'COMPLETING', 'CANCELLED'].includes(
+    contract.managedDevice.enrollmentStatus
+  );
+  if (contract.status === 'COMPLETED' && !alreadyReleased) {
+    const released = await unenrollManagedDeviceForContract(
+      contractId,
+      'Contract completed — ownership transferred to customer.'
+    );
+    return {
+      contractId,
+      action: 'COMPLETE_DEVICE',
+      success: released?.success ?? false,
+      dryRun: released?.dryRun ?? false,
+    };
+  }
+
   const kSettings = await getKnoxSettings();
   const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
   const isActive = contract.status === 'ACTIVE';
@@ -2023,7 +2043,14 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const deviceIsLockedOrPending = ['LOCKED', 'PENDING'].includes(actualState);
   const shouldLock = isOverdueEnoughToLock;
   const shouldBlink = PAYMENT_REMINDER_ENABLED && hasUpcomingPaymentDue && !isOverdueEnoughToLock;
-  const shouldUnlock = deviceIsLockedOrPending && metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
+  // A blinking reminder keeps showing until Knox is told to stop, and unlock is
+  // the command that stops it. Without this, a customer who cleared their
+  // arrears kept seeing the reminder indefinitely — the device was never
+  // locked, so the unlock path below never considered it.
+  const deviceIsBlinking = contract.managedDevice.lastKnoxAction === 'BLINK_DEVICE';
+  const arrearsCleared = metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
+  const shouldStopBlink = deviceIsBlinking && arrearsCleared && !hasUpcomingPaymentDue;
+  const shouldUnlock = (deviceIsLockedOrPending || shouldStopBlink) && arrearsCleared;
   // Also unlock if admin explicitly set desiredState=UNLOCKED but device is still locked
   const pendingAdminUnlock = contract.managedDevice.desiredState === 'UNLOCKED' && actualState === 'LOCKED';
   const needsLockCommand = shouldLock
@@ -2031,7 +2058,9 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     && !['LOCKED', 'PENDING'].includes(actualState);
   const needsUnlockCommand = (shouldUnlock || pendingAdminUnlock)
     && deviceCanAcceptControlCommand
-    && !['UNLOCKED', 'PENDING'].includes(actualState);
+    // A blinking device reports UNLOCKED, so that state must not veto the
+    // command that stops the blink.
+    && (shouldStopBlink || !['UNLOCKED', 'PENDING'].includes(actualState));
 
   const desiredState: ManagedDeviceState = shouldLock ? 'LOCKED' : 'UNLOCKED';
   const identifier = getManagedDeviceIdentifier(contract.managedDevice);
@@ -2064,9 +2093,11 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   } else if (needsUnlockCommand) {
     actionResult = await unlockKnoxGuardDevice({
       ...identifier,
-      message: 'Your payment has been received. Your device has been unlocked.',
+      message: shouldStopBlink && actualState !== 'LOCKED'
+        ? 'Thank you. Your account is up to date.'
+        : 'Your payment has been received. Your device has been unlocked.',
     });
-    actionType = 'UNLOCK_DEVICE';
+    actionType = shouldStopBlink && actualState !== 'LOCKED' ? 'STOP_REMINDER' : 'UNLOCK_DEVICE';
     if (actionResult.success || actionResult.dryRun) nextActualState = 'UNLOCKED';
   } else if (!shouldLock && contract.managedDevice.actualState === 'UNKNOWN' && !contract.managedDevice.lastSyncedAt) {
     actionResult = await lookupKnoxGuardDevice(identifier);
