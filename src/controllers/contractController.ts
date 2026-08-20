@@ -20,6 +20,7 @@ import {
   isOverdue,
   calculatePenalty,
   sanitizePhoneNumber,
+  roundMoney as roundMoneyShared,
 } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
 import { hasAnyPermission, hasPermission, PERMISSIONS } from '../constants/permissions';
@@ -2445,15 +2446,25 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
     });
 
     if (updatedContract) {
-      const totalPaid = updatedContract.installments.reduce((sum, i) => sum + i.paidAmount, 0);
-      const outstandingBalance = updatedContract.financeAmount - totalPaid;
+      // totalPaid is deposit + successful payments, measured against totalPrice —
+      // the same rule processSuccessfulPayment and recordManualPayment apply.
+      // Summing installment paidAmount against financeAmount instead silently
+      // dropped the deposit and overstated what the customer still owed.
+      const successfulPayments = await prisma.paymentTransaction.findMany({
+        where: { contractId, status: 'SUCCESS' },
+        select: { amount: true },
+      });
+      const paymentsSum = successfulPayments.reduce((sum, p) => sum + p.amount, 0);
+      const totalPaid = roundMoneyShared(updatedContract.depositAmount + paymentsSum);
+      const outstandingBalance = roundMoneyShared(updatedContract.totalPrice - totalPaid);
+      const isFullyPaid = outstandingBalance <= 0.005;
 
       await prisma.hirePurchaseContract.update({
         where: { id: contractId },
         data: {
           totalPaid,
-          outstandingBalance,
-          status: outstandingBalance <= 0 ? 'COMPLETED' : 'ACTIVE',
+          outstandingBalance: Math.max(0, isFullyPaid ? 0 : outstandingBalance),
+          status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
         },
       });
     }
