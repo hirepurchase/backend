@@ -225,6 +225,8 @@ export async function createContractPreflight(req: AuthenticatedRequest, res: Re
       startDate: startDate ? new Date(startDate) : undefined,
       paymentMethod: paymentMethod ? String(paymentMethod) : null,
       mobileMoneyNumber: mobileMoneyNumber ? String(mobileMoneyNumber) : null,
+      agentId: req.user!.id,
+      agentRole: (req.user as any)?.role,
     });
 
     res.json(assessment);
@@ -364,6 +366,8 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
       startDate: startDate ? new Date(startDate) : undefined,
       paymentMethod: paymentMethod || null,
       mobileMoneyNumber: mobileMoneyNumber || null,
+      agentId: req.user!.id,
+      agentRole: creatorRole,
     });
 
     if (guardrails.blockers.length > 0) {

@@ -187,6 +187,7 @@ function assessContractContext(input: {
   paymentMethod?: string | null;
   mobileMoneyNumber?: string | null;
   excludeContractId?: string;
+  agentOutstandingDeposits?: { count: number; total: number } | null;
 }): ContractGuardrailAssessment {
   const {
     customer,
@@ -198,11 +199,23 @@ function assessContractContext(input: {
     paymentMethod,
     mobileMoneyNumber,
     excludeContractId,
+    agentOutstandingDeposits,
   } = input;
 
   const blockers: string[] = [];
   const warnings: string[] = [];
   const riskFlags: string[] = [];
+
+  // Agents who are sitting on any unremitted deposit are blocked from creating
+  // further contracts until they pay it down — this is what stops an agent from
+  // indefinitely growing their AgentDepositLedger debt.
+  if (agentOutstandingDeposits && agentOutstandingDeposits.count >= 1) {
+    riskFlags.push('AGENT_DEPOSIT_ARREARS');
+    const depositWord = agentOutstandingDeposits.count === 1 ? 'deposit remittance' : 'deposit remittances';
+    blockers.push(
+      `You have ${agentOutstandingDeposits.count} unpaid ${depositWord} (GHS ${agentOutstandingDeposits.total.toFixed(2)}) outstanding. Pay your outstanding deposit before you can create another contract.`
+    );
+  }
 
   if (!customer) {
     blockers.push('Selected customer could not be found.');
@@ -338,6 +351,8 @@ export async function evaluateContractSubmissionGuardrails(input: {
   paymentMethod?: string | null;
   mobileMoneyNumber?: string | null;
   excludeContractId?: string;
+  agentId?: string;
+  agentRole?: string | null;
 }): Promise<ContractGuardrailAssessment> {
   const {
     customerId,
@@ -349,9 +364,11 @@ export async function evaluateContractSubmissionGuardrails(input: {
     paymentMethod,
     mobileMoneyNumber,
     excludeContractId,
+    agentId,
+    agentRole,
   } = input;
 
-  const [customer, inventoryItem] = await Promise.all([
+  const [customer, inventoryItem, agentLedgerEntries] = await Promise.all([
     prisma.customer.findUnique({
       where: { id: customerId },
       select: {
@@ -371,7 +388,20 @@ export async function evaluateContractSubmissionGuardrails(input: {
         productId: true,
       },
     }),
+    agentRole === 'AGENT' && agentId
+      ? prisma.agentDepositLedger.findMany({
+          where: { agentId, outstandingBalance: { gt: 0 } },
+          select: { outstandingBalance: true },
+        })
+      : Promise.resolve([]),
   ]);
+
+  const agentOutstandingDeposits = agentLedgerEntries.length > 0
+    ? {
+        count: agentLedgerEntries.length,
+        total: agentLedgerEntries.reduce((sum, entry) => sum + entry.outstandingBalance, 0),
+      }
+    : null;
 
   return assessContractContext({
     customer,
@@ -383,6 +413,7 @@ export async function evaluateContractSubmissionGuardrails(input: {
     paymentMethod,
     mobileMoneyNumber,
     excludeContractId,
+    agentOutstandingDeposits,
   });
 }
 
