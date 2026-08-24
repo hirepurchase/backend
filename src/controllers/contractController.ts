@@ -1522,6 +1522,19 @@ export async function nullifyContract(req: AuthenticatedRequest, res: Response):
       return;
     }
 
+    // Nullify is for a customer backing out before there's anything real to
+    // preserve — either the contract never got approved, or no payment has
+    // been recorded against it yet. Once both have happened, use Cancel or
+    // Write-off instead so the payment history isn't destroyed.
+    const isUnapproved = contract.status === 'PENDING_APPROVAL' || contract.status === 'REVISION_REQUESTED';
+    const hasPayments = contract.payments.length > 0;
+    if (!isUnapproved && hasPayments) {
+      res.status(400).json({
+        error: 'Cannot nullify an approved contract that already has recorded payments. Use Cancel or Write-off instead to preserve the payment history.',
+      });
+      return;
+    }
+
     // Delete signature from Supabase if it exists
     if (contract.signatureUrl) {
       try { await deleteFromSupabase(contract.signatureUrl); } catch (_) {}
