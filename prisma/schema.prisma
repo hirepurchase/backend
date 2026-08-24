@@ -54,6 +54,7 @@ model AdminUser {
   agentAssignedCsos     CsoAgentAssignment[]   @relation("AgentAssignedCsos")
   csoAssignmentsCreated CsoAgentAssignment[]   @relation("CsoAssignmentCreatedBy")
   contactAttempts       ContactAttempt[]       @relation("ContactAttemptOfficer")
+  announcementsPosted   StaffAnnouncement[]    @relation("AnnouncementCreatedBy")
   createdAt             DateTime              @default(now())
   updatedAt             DateTime              @updatedAt
 }
@@ -497,6 +498,26 @@ model NotificationLog {
 
   @@index([customerId_uuid, installmentId, type, createdAt])
   @@index([status, createdAt])
+}
+
+// ============= STAFF ANNOUNCEMENTS =============
+
+// In-app announcement shown to staff (agents, CSOs, etc.) on login. Only admins
+// can post one (see PERMISSIONS.MANAGE_ANNOUNCEMENTS). It surfaces to every
+// staff member whose roleId is in targetRoleIds until expiresAt — by default
+// 7 days after posting — or until an admin deactivates it early.
+model StaffAnnouncement {
+  id            String    @id @default(uuid())
+  message       String
+  targetRoleIds String[]
+  createdById   String
+  createdBy     AdminUser @relation("AnnouncementCreatedBy", fields: [createdById], references: [id])
+  expiresAt     DateTime
+  isActive      Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([isActive, expiresAt])
 }
 
 // ============= PASSWORD RESET (SMS OTP) =============

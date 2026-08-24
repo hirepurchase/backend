@@ -47,6 +47,7 @@ export const PERMISSIONS = {
   MANAGE_CONTACT_ATTEMPTS: 'MANAGE_CONTACT_ATTEMPTS',
   SEND_SMS: 'SEND_SMS',
   MANAGE_CSO_ASSIGNMENTS: 'MANAGE_CSO_ASSIGNMENTS',
+  MANAGE_ANNOUNCEMENTS: 'MANAGE_ANNOUNCEMENTS',
 } as const;
 
 export type PermissionName = typeof PERMISSIONS[keyof typeof PERMISSIONS];
@@ -118,6 +119,7 @@ export const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
   { name: PERMISSIONS.MANAGE_CONTACT_ATTEMPTS, description: 'Log and view customer call attempts', category: 'Customers', scope: 'action' },
   { name: PERMISSIONS.SEND_SMS, description: 'Send SMS messages to customers', category: 'Communication', scope: 'action' },
   { name: PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, description: 'Assign agents to customer service officers', category: 'Administration', scope: 'action' },
+  { name: PERMISSIONS.MANAGE_ANNOUNCEMENTS, description: 'Post and manage staff announcements shown to agents and CSOs on login', category: 'Administration', scope: 'action' },
 ];
 
 // Who may reach a customer endpoint at all. What they actually see is decided
