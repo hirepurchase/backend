@@ -1559,8 +1559,11 @@ export async function nullifyContract(req: AuthenticatedRequest, res: Response):
         await tx.managedDevice.delete({ where: { id: contract.managedDevice.id } });
       }
 
-      // Delete agent ledger entry
+      // Delete agent ledger entry, including any remittance attempts against
+      // it (successful or FAILED) — the ledger can't be deleted while those
+      // AgentDepositPayment rows still reference it.
       if (contract.agentLedger) {
+        await tx.agentDepositPayment.deleteMany({ where: { ledgerEntryId: contract.agentLedger.id } });
         await tx.agentDepositLedger.delete({ where: { id: contract.agentLedger.id } });
       }
 
