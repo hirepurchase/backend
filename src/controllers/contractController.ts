@@ -8,6 +8,7 @@ import {
   enrollManagedDeviceForContract,
   linkManagedDeviceToContract,
   requestManagedDeviceUnlock,
+  requestStandaloneInventoryDeviceLock,
 } from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
@@ -1281,7 +1282,7 @@ export async function writeOffContract(req: AuthenticatedRequest, res: Response)
 
     const contract = await prisma.hirePurchaseContract.findUnique({
       where: { id },
-      include: { inventoryItem: true },
+      include: { inventoryItem: true, managedDevice: true },
     });
 
     if (!contract) {
@@ -1320,6 +1321,14 @@ export async function writeOffContract(req: AuthenticatedRequest, res: Response)
         data: { status: 'WRITTEN_OFF' },
       });
 
+      // Detach the Knox-managed device — the customer defaulted, this isn't a
+      // completed sale, so it must not be treated like one. Deleting it (rather
+      // than just unlocking) lets requestStandaloneInventoryDeviceLock below
+      // re-enroll it fresh, exactly like a device that was never assigned.
+      if (contract.managedDevice) {
+        await tx.managedDevice.delete({ where: { id: contract.managedDevice.id } });
+      }
+
       // Return inventory item to available so it can be re-used or repossessed
       if (contract.inventoryItem) {
         await tx.inventoryItem.update({
@@ -1341,11 +1350,18 @@ export async function writeOffContract(req: AuthenticatedRequest, res: Response)
       userAgent: req.headers['user-agent'],
     });
 
-    // Release device from Knox Guard — customer no longer has a live contract
-    try {
-      await unenrollManagedDeviceForContract(id, `Contract written off: ${reason.trim()}`);
-    } catch (knoxError) {
-      console.error(`Knox Guard unenrollment failed for written-off contract ${id}:`, knoxError);
+    // Re-lock the device standalone — the customer defaulted, so it goes back
+    // to the same locked, unassigned state as a freshly uploaded device, not
+    // unlocked as if the sale had completed.
+    if (contract.inventoryItem) {
+      try {
+        // No custom message — defaults to the standard standalone lockscreen
+        // ("not yet linked to an active hire purchase contract"), same as a
+        // freshly uploaded, unassigned device.
+        await requestStandaloneInventoryDeviceLock(contract.inventoryItem.id);
+      } catch (knoxError) {
+        console.error(`Knox Guard standalone lock failed for written-off contract ${id}:`, knoxError);
+      }
     }
 
     res.json({
@@ -1599,6 +1615,19 @@ export async function nullifyContract(req: AuthenticatedRequest, res: Response):
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+
+    // Re-lock the device standalone — back to the same locked, unassigned
+    // state as a freshly uploaded device, not left unlocked.
+    if (contract.inventoryItem) {
+      try {
+        // No custom message — defaults to the standard standalone lockscreen
+        // ("not yet linked to an active hire purchase contract"), same as a
+        // freshly uploaded, unassigned device.
+        await requestStandaloneInventoryDeviceLock(contract.inventoryItem.id);
+      } catch (knoxError) {
+        console.error(`Knox Guard standalone lock failed for nullified contract ${id}:`, knoxError);
+      }
+    }
 
     res.json({
       message: `Contract ${contract.contractNumber} has been nullified`,
