@@ -222,6 +222,22 @@ function deriveManagedDeviceSyncFromPortalStatus(status: string | null) {
     };
   }
 
+  // Blink/reminder is a separate state dimension from lock on Knox's side —
+  // "Blinked", "StartingReminder", "StoppingReminder" were previously
+  // unrecognized here and silently skipped, so a device that dropped out of
+  // LOCKED into a reminder state stayed marked LOCKED in our DB indefinitely
+  // (nothing else ever re-checked it, since evaluate skips re-locking a
+  // device it already believes is locked). The phone is not actually
+  // restricted while blinking, so this must map to UNLOCKED — not LOCKED —
+  // so the next evaluation correctly sees it needs a real lock command.
+  if (normalized === 'BLINKED' || normalized.includes('REMINDER')) {
+    return {
+      actualState: 'UNLOCKED',
+      enrollmentStatus: 'ACTIVE',
+      lastError: null,
+    };
+  }
+
   if (normalized.includes('UNLOCK')) {
     return {
       actualState: 'UNLOCKED',
