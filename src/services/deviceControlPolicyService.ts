@@ -936,6 +936,28 @@ function buildBlinkCommandPayload(contract: any, metrics: DeviceMessageMetrics, 
   };
 }
 
+// Knox's blink repeats hourly forever with no built-in expiry — a customer
+// who later goes overdue and gets locked can end up with a leftover reminder
+// loop that keeps firing on its own schedule and silently reverts the
+// device's status back to "Blinked", overwriting a lock that already
+// succeeded, with nothing to tell our system it happened. Rather than rely
+// on an unconfirmed Knox expiry parameter, immediately cancel the repeat
+// after every blink using the same stop-reminder call already proven to
+// work — so the customer sees it once, not every hour indefinitely.
+async function stopBlinkRepeat(identifier: ReturnType<typeof getManagedDeviceIdentifier>): Promise<void> {
+  try {
+    const stopResult = await unlockKnoxGuardDevice({
+      ...identifier,
+      message: 'Reminder acknowledged.',
+    });
+    if (!stopResult.success && !stopResult.dryRun) {
+      console.error(`Failed to stop blink repeat for device ${identifier.deviceUid}:`, stopResult.error);
+    }
+  } catch (error) {
+    console.error(`Failed to stop blink repeat for device ${identifier.deviceUid}:`, error);
+  }
+}
+
 function buildStandaloneInventoryLockPayload(defaults: DeviceControlEnrollmentDefaults) {
   return {
     message: 'This phone has been restricted because it is not yet linked to an active hire purchase contract. Please contact AIDOO TECH support to continue.',
@@ -2203,6 +2225,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     });
     actionType = 'BLINK_DEVICE';
     retryPayload = { ...blinkPayload };
+    if (actionResult.success || actionResult.dryRun) await stopBlinkRepeat(identifier);
   } else if (!shouldLock && contract.managedDevice.actualState === 'UNKNOWN' && !contract.managedDevice.lastSyncedAt) {
     actionResult = await lookupKnoxGuardDevice(identifier);
     actionType = 'SYNC_DEVICE';
@@ -2804,6 +2827,8 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
             interval: Number(payload.interval || BLINK_INTERVAL_SECONDS),
             timeLimitEnable: Boolean(payload.timeLimitEnable || false),
           });
+          // Fire once, not a repeating hourly nag — see stopBlinkRepeat.
+          if (result.success || result.dryRun) await stopBlinkRepeat(identifier);
           break;
         case 'LOCK_DEVICE':
           result = await lockKnoxGuardDevice({
