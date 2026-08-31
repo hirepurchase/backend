@@ -2082,6 +2082,22 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     });
     actionType = 'LOCK_DEVICE';
     if (actionResult.success || actionResult.dryRun) nextActualState = 'LOCKED';
+  } else if (needsUnlockCommand) {
+    // Checked before blink: a device that has cleared its arrears must be
+    // unlocked first, even if the next installment is already due soon. Blink
+    // never touches actualState, so checking it first left customers who paid
+    // off overdue balances stuck on a locked device — they'd just get a
+    // "payment coming up" reminder instead of the unlock they'd earned. The
+    // reminder can still fire on the next evaluation once actualState reflects
+    // the unlock.
+    actionResult = await unlockKnoxGuardDevice({
+      ...identifier,
+      message: shouldStopBlink && actualState !== 'LOCKED'
+        ? 'Thank you. Your account is up to date.'
+        : 'Your payment has been received. Your device has been unlocked.',
+    });
+    actionType = shouldStopBlink && actualState !== 'LOCKED' ? 'STOP_REMINDER' : 'UNLOCK_DEVICE';
+    if (actionResult.success || actionResult.dryRun) nextActualState = 'UNLOCKED';
   } else if (shouldBlink && contract.managedDevice.desiredState !== 'LOCKED') {
     const blinkPayload = buildBlinkCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
     actionResult = await blinkKnoxGuardDevice({
@@ -2092,15 +2108,6 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
       timeLimitEnable: blinkPayload.timeLimitEnable,
     });
     actionType = 'BLINK_DEVICE';
-  } else if (needsUnlockCommand) {
-    actionResult = await unlockKnoxGuardDevice({
-      ...identifier,
-      message: shouldStopBlink && actualState !== 'LOCKED'
-        ? 'Thank you. Your account is up to date.'
-        : 'Your payment has been received. Your device has been unlocked.',
-    });
-    actionType = shouldStopBlink && actualState !== 'LOCKED' ? 'STOP_REMINDER' : 'UNLOCK_DEVICE';
-    if (actionResult.success || actionResult.dryRun) nextActualState = 'UNLOCKED';
   } else if (!shouldLock && contract.managedDevice.actualState === 'UNKNOWN' && !contract.managedDevice.lastSyncedAt) {
     actionResult = await lookupKnoxGuardDevice(identifier);
     actionType = 'SYNC_DEVICE';
