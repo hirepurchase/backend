@@ -27,7 +27,96 @@ function resolveStateFromPortalStatus(
   };
 }
 
-export async function syncManagedDevicesFromKnoxPortal(): Promise<number> {
+async function syncOneDeviceFromPortal(device: {
+  id: string;
+  deviceUid: string;
+  approveId: string;
+  knoxObjectId: string | null;
+  enrollmentStatus: string;
+  actualState: string;
+  knoxStatus: string | null;
+  lastError: string | null;
+}): Promise<boolean> {
+  try {
+    const lookup = await lookupKnoxGuardDevice({
+      objectId: device.knoxObjectId || undefined,
+      deviceUid: device.deviceUid,
+      approveId: device.approveId,
+    });
+
+    if (!lookup.success || lookup.dryRun) return false;
+
+    const deviceList = (lookup.data as any)?.deviceList;
+    const portalDevice = Array.isArray(deviceList)
+      ? deviceList.find((d: any) =>
+          d?.deviceUid === device.deviceUid ||
+          d?.imei === device.deviceUid ||
+          (device.knoxObjectId && d?.objectId === device.knoxObjectId)
+        ) ?? deviceList[0] ?? null
+      : null;
+
+    // Device not found on portal — if locally ACTIVE, downgrade to APPROVAL_QUEUED
+    if (!portalDevice) {
+      if (device.enrollmentStatus === 'ACTIVE') {
+        await (prisma as any).managedDevice.update({
+          where: { id: device.id },
+          data: {
+            enrollmentStatus: 'APPROVAL_QUEUED',
+            actualState: 'UNKNOWN',
+            lastSyncedAt: new Date(),
+            lastError: 'Device not found on Knox Guard portal',
+          },
+        });
+        return true;
+      }
+      return false;
+    }
+
+    const portalStatus: string | null = portalDevice.status || null;
+    const resolved = resolveStateFromPortalStatus(portalStatus);
+    if (!resolved) return false;
+
+    // Only update if state has changed
+    const stateChanged = resolved.enrollmentStatus !== device.enrollmentStatus
+      || resolved.actualState !== device.actualState
+      || portalStatus !== device.knoxStatus
+      || resolved.lastError !== device.lastError;
+    if (!stateChanged) return false;
+
+    const knoxObjectId = normalizeDeviceIdentifier(portalDevice.objectId);
+    await (prisma as any).managedDevice.update({
+      where: { id: device.id },
+      data: {
+        enrollmentStatus: resolved.enrollmentStatus,
+        actualState: resolved.actualState,
+        knoxStatus: portalStatus,
+        ...(knoxObjectId ? { knoxObjectId } : {}),
+        lastSyncedAt: new Date(),
+        lastError: resolved.lastError,
+      },
+    });
+    return true;
+  } catch (err) {
+    console.error(`Portal sync failed for device ${device.deviceUid}:`, err);
+    return false;
+  }
+}
+
+// A full sequential pass over the whole fleet (1,900+ devices, one real Knox
+// API call each) takes far longer than the 5-minute cron window this runs
+// on — measured coverage was only ~54% of devices synced in a 24h period.
+// Bounding each run to a scoped, priority-ordered batch with concurrency
+// means every tick makes real, predictable progress: contracts where
+// enforcement actually matters (ACTIVE/WRITTEN_OFF) go first, and within
+// that, whichever devices have gone longest without a check go first, so
+// staleness self-balances across ticks instead of the same slow crawl
+// through creation order every time.
+export async function syncManagedDevicesFromKnoxPortal(
+  options: { limit?: number; concurrency?: number } = {}
+): Promise<number> {
+  const limit = options.limit ?? 300;
+  const concurrency = options.concurrency ?? 10;
+
   const allManagedDevices = await (prisma as any).managedDevice.findMany({
     where: { isActive: true },
     select: {
@@ -39,73 +128,29 @@ export async function syncManagedDevicesFromKnoxPortal(): Promise<number> {
       actualState: true,
       knoxStatus: true,
       lastError: true,
+      lastSyncedAt: true,
+      contract: { select: { status: true } },
     },
   });
 
+  const priorityRank = (d: any) =>
+    d.contract && ['ACTIVE', 'WRITTEN_OFF'].includes(d.contract.status) ? 0 : 1;
+
+  const batch = allManagedDevices
+    .sort((a: any, b: any) => {
+      const rankDiff = priorityRank(a) - priorityRank(b);
+      if (rankDiff !== 0) return rankDiff;
+      const aTime = a.lastSyncedAt ? new Date(a.lastSyncedAt).getTime() : 0;
+      const bTime = b.lastSyncedAt ? new Date(b.lastSyncedAt).getTime() : 0;
+      return aTime - bTime; // never-synced / oldest-synced first
+    })
+    .slice(0, limit);
+
   let synced = 0;
-  for (const device of allManagedDevices) {
-    try {
-      const lookup = await lookupKnoxGuardDevice({
-        objectId: device.knoxObjectId || undefined,
-        deviceUid: device.deviceUid,
-        approveId: device.approveId,
-      });
-
-      if (!lookup.success || lookup.dryRun) continue;
-
-      const deviceList = (lookup.data as any)?.deviceList;
-      const portalDevice = Array.isArray(deviceList)
-        ? deviceList.find((d: any) =>
-            d?.deviceUid === device.deviceUid ||
-            d?.imei === device.deviceUid ||
-            (device.knoxObjectId && d?.objectId === device.knoxObjectId)
-          ) ?? deviceList[0] ?? null
-        : null;
-
-      // Device not found on portal — if locally ACTIVE, downgrade to APPROVAL_QUEUED
-      if (!portalDevice) {
-        if (device.enrollmentStatus === 'ACTIVE') {
-          await (prisma as any).managedDevice.update({
-            where: { id: device.id },
-            data: {
-              enrollmentStatus: 'APPROVAL_QUEUED',
-              actualState: 'UNKNOWN',
-              lastSyncedAt: new Date(),
-              lastError: 'Device not found on Knox Guard portal',
-            },
-          });
-          synced++;
-        }
-        continue;
-      }
-
-      const portalStatus: string | null = portalDevice.status || null;
-      const resolved = resolveStateFromPortalStatus(portalStatus);
-      if (!resolved) continue;
-
-      // Only update if state has changed
-      const stateChanged = resolved.enrollmentStatus !== device.enrollmentStatus
-        || resolved.actualState !== device.actualState
-        || portalStatus !== device.knoxStatus
-        || resolved.lastError !== device.lastError;
-      if (!stateChanged) continue;
-
-      const knoxObjectId = normalizeDeviceIdentifier(portalDevice.objectId);
-      await (prisma as any).managedDevice.update({
-        where: { id: device.id },
-        data: {
-          enrollmentStatus: resolved.enrollmentStatus,
-          actualState: resolved.actualState,
-          knoxStatus: portalStatus,
-          ...(knoxObjectId ? { knoxObjectId } : {}),
-          lastSyncedAt: new Date(),
-          lastError: resolved.lastError,
-        },
-      });
-      synced++;
-    } catch (err) {
-      console.error(`Portal sync failed for device ${device.deviceUid}:`, err);
-    }
+  for (let i = 0; i < batch.length; i += concurrency) {
+    const chunk = batch.slice(i, i + concurrency);
+    const results = await Promise.all(chunk.map((device: any) => syncOneDeviceFromPortal(device)));
+    synced += results.filter(Boolean).length;
   }
   return synced;
 }
