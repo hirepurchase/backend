@@ -2160,6 +2160,9 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   let actionResult: Awaited<ReturnType<typeof lockKnoxGuardDevice>> | null = null;
   let actionType: string | null = null;
   let nextActualState: ManagedDeviceState = actualState;
+  // Populated alongside actionType so a failed command can be requeued below
+  // with the exact same payload, instead of being silently dropped.
+  let retryPayload: Record<string, unknown> | null = null;
 
   if (needsLockCommand) {
     const lockPayload = buildLockCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
@@ -2172,6 +2175,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
       allowIncomingNumbers: lockPayload.allowIncomingNumbers,
     });
     actionType = 'LOCK_DEVICE';
+    retryPayload = { ...lockPayload };
     if (actionResult.success || actionResult.dryRun) nextActualState = 'LOCKED';
   } else if (needsUnlockCommand) {
     // Checked before blink: a device that has cleared its arrears must be
@@ -2181,13 +2185,12 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     // "payment coming up" reminder instead of the unlock they'd earned. The
     // reminder can still fire on the next evaluation once actualState reflects
     // the unlock.
-    actionResult = await unlockKnoxGuardDevice({
-      ...identifier,
-      message: shouldStopBlink && actualState !== 'LOCKED'
-        ? 'Thank you. Your account is up to date.'
-        : 'Your payment has been received. Your device has been unlocked.',
-    });
+    const unlockMessage = shouldStopBlink && actualState !== 'LOCKED'
+      ? 'Thank you. Your account is up to date.'
+      : 'Your payment has been received. Your device has been unlocked.';
+    actionResult = await unlockKnoxGuardDevice({ ...identifier, message: unlockMessage });
     actionType = shouldStopBlink && actualState !== 'LOCKED' ? 'STOP_REMINDER' : 'UNLOCK_DEVICE';
+    retryPayload = { message: unlockMessage };
     if (actionResult.success || actionResult.dryRun) nextActualState = 'UNLOCKED';
   } else if (shouldBlink && contract.managedDevice.desiredState !== 'LOCKED') {
     const blinkPayload = buildBlinkCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
@@ -2199,9 +2202,22 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
       timeLimitEnable: blinkPayload.timeLimitEnable,
     });
     actionType = 'BLINK_DEVICE';
+    retryPayload = { ...blinkPayload };
   } else if (!shouldLock && contract.managedDevice.actualState === 'UNKNOWN' && !contract.managedDevice.lastSyncedAt) {
     actionResult = await lookupKnoxGuardDevice(identifier);
     actionType = 'SYNC_DEVICE';
+  }
+
+  // A failed lock/unlock/blink used to just sit there — nothing retried it
+  // until the next unrelated evaluation (a payment, or the next day's sweep)
+  // happened to run for the same contract. Queue it onto the same retry path
+  // already used for COMPLETE_DEVICE, so the 5-minute processor picks it up
+  // with real backoff instead of it going stale for days or months.
+  if (
+    actionResult && !actionResult.success && !actionResult.dryRun && retryPayload &&
+    (actionType === 'LOCK_DEVICE' || actionType === 'UNLOCK_DEVICE' || actionType === 'BLINK_DEVICE')
+  ) {
+    await queueManagedDeviceCommand(contract.managedDevice.id, actionType, retryPayload);
   }
 
   const deviceUpdate: Record<string, unknown> = {
