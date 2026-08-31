@@ -8,6 +8,7 @@ import {
   evaluateKnoxGuardContractDevice,
   getKnoxGuardContractDevice,
   getKnoxGuardHealth,
+  getDeviceLockIssuesReport,
   getKnoxPortalDeviceStatus,
   handleKnoxGuardWebhook,
   listKnoxGuardCommands,
@@ -62,6 +63,13 @@ router.get(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
   getKnoxGuardHealth
+);
+
+router.get(
+  '/device-issues',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.VIEW_DEVICE_CONTROL, PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  getDeviceLockIssuesReport
 );
 
 router.get(

@@ -1728,6 +1728,97 @@ export async function getManagedDeviceHealthSummary() {
   };
 }
 
+export interface DeviceLockIssue {
+  contractId: string;
+  contractNumber: string;
+  contractStatus: string;
+  createdById: string;
+  customerId: string;
+  customerName: string;
+  customerPhone: string;
+  deviceUid: string;
+  deviceUidType: string;
+  desiredState: string;
+  actualState: string;
+  lastError: string | null;
+  reason: string;
+}
+
+function friendlyDeviceIssueReason(lastError: string | null): string {
+  if (!lastError) return 'No error recorded — needs re-check';
+  if (lastError.toLowerCase().includes('not found')) return 'Device not found on Knox';
+  if (lastError.toLowerCase().includes('waiting for the knox guard app')) return 'Awaiting Knox app connection';
+  if (lastError === 'DEVICE_STATE_INVALID') return 'Knox rejects state change';
+  return lastError;
+}
+
+// Contracts where the device's intended lock state (desiredState) and its
+// actual state on Knox disagree — the same computation that backs the admin
+// device-issues page, its notification bell, and the CSO call-queue urgent
+// boost. Scoped to ACTIVE/WRITTEN_OFF contracts, since that's where a
+// mismatch actually matters (a completed contract's device is moot).
+export async function getDeviceLockIssues(): Promise<{
+  categoryA: DeviceLockIssue[];
+  categoryB: DeviceLockIssue[];
+  categoryC: DeviceLockIssue[];
+}> {
+  const devices = await prismaAny.managedDevice.findMany({
+    where: { isActive: true },
+    include: {
+      contract: {
+        select: {
+          id: true,
+          contractNumber: true,
+          status: true,
+          createdById: true,
+          customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        },
+      },
+    },
+  });
+
+  const categoryA: DeviceLockIssue[] = [];
+  const categoryB: DeviceLockIssue[] = [];
+  const categoryC: DeviceLockIssue[] = [];
+
+  for (const d of devices) {
+    const contract = d.contract;
+    if (!contract || !['ACTIVE', 'WRITTEN_OFF'].includes(contract.status)) continue;
+    if (d.desiredState === d.actualState) continue;
+
+    const issue: DeviceLockIssue = {
+      contractId: contract.id,
+      contractNumber: contract.contractNumber,
+      contractStatus: contract.status,
+      createdById: contract.createdById,
+      customerId: contract.customer.id,
+      customerName: `${contract.customer.firstName} ${contract.customer.lastName}`.trim(),
+      customerPhone: contract.customer.phone,
+      deviceUid: d.deviceUid,
+      deviceUidType: d.deviceUidType,
+      desiredState: d.desiredState,
+      actualState: d.actualState,
+      lastError: d.lastError,
+      reason: friendlyDeviceIssueReason(d.lastError),
+    };
+
+    if (d.desiredState === 'LOCKED' && d.actualState !== 'LOCKED') {
+      categoryA.push(issue);
+    } else if (d.desiredState === 'UNLOCKED' && d.actualState === 'LOCKED') {
+      categoryB.push(issue);
+    } else {
+      categoryC.push(issue);
+    }
+  }
+
+  const byContractNumber = (a: DeviceLockIssue, b: DeviceLockIssue) => a.contractNumber.localeCompare(b.contractNumber);
+  categoryA.sort(byContractNumber);
+  categoryB.sort(byContractNumber);
+  categoryC.sort(byContractNumber);
+
+  return { categoryA, categoryB, categoryC };
+}
+
 export async function listManagedDevices(options: { page?: number; limit?: number; q?: string; enrollmentStatus?: string } = {}) {
   const page = Math.max(1, Number(options.page) || 1);
   const limit = Math.min(Math.max(1, Number(options.limit) || 10), 100);

@@ -6,7 +6,9 @@ import {
   resolveContractScope,
   resolveCustomerScope,
   applyCreatorScope,
+  scopeAllows,
 } from '../services/scopeService';
+import { getDeviceLockIssues } from '../services/deviceControlPolicyService';
 
 function startOfToday(): Date {
   const now = new Date();
@@ -126,8 +128,9 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
     const admin = req.user as AdminUserPayload;
     const now = new Date();
 
+    const scope = await resolveContractScope(admin);
     const where: Record<string, unknown> = { status: 'ACTIVE' };
-    applyCreatorScope(where, await resolveContractScope(admin));
+    applyCreatorScope(where, scope);
 
     const contracts = await prisma.hirePurchaseContract.findMany({
       where,
@@ -187,6 +190,8 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
           lastCallAt: null as Date | null,
           lastCallOutcome: null as string | null,
           promiseToPayDate: null as Date | null,
+          isUrgent: false,
+          urgentReason: null as string | null,
           contracts: [] as any[],
         };
         byCustomer.set(key, row);
@@ -238,10 +243,70 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
       });
     }
 
-    const rows = Array.from(byCustomer.values()).sort((a, b) => b.daysOverdue - a.daysOverdue);
+    // Contracts with a device lock-state mismatch jump to the top of the
+    // queue — a customer who's wrongly still locked despite clearing arrears,
+    // or overdue enough to lock but Knox never applied it, needs a call
+    // regardless of where they'd otherwise rank by days overdue.
+    const contractIdToRow = new Map<string, any>();
+    for (const row of byCustomer.values()) {
+      for (const c of row.contracts) contractIdToRow.set(c.contractId, row);
+    }
+
+    const { categoryA, categoryB } = await getDeviceLockIssues();
+    for (const issue of [...categoryA, ...categoryB]) {
+      if (!scopeAllows(scope, issue.createdById)) continue;
+
+      const existingRow = contractIdToRow.get(issue.contractId);
+      if (existingRow) {
+        existingRow.isUrgent = true;
+        existingRow.urgentReason = issue.reason;
+        continue;
+      }
+
+      // Not already in the queue (typically category B — arrears cleared, so
+      // no OVERDUE installments exist to have pulled the contract in).
+      let row = byCustomer.get(issue.customerId);
+      if (!row) {
+        row = {
+          customer: { id: issue.customerId, name: issue.customerName, phone: issue.customerPhone, membershipId: null },
+          agent: null,
+          overdueCount: 0,
+          amountOverdue: 0,
+          daysOverdue: 0,
+          oldestDueDate: null,
+          lastPaymentDate: null,
+          lastPaymentAmount: null,
+          lastCallAt: null,
+          lastCallOutcome: null,
+          promiseToPayDate: null,
+          isUrgent: false,
+          urgentReason: null,
+          contracts: [],
+        };
+        byCustomer.set(issue.customerId, row);
+      }
+      row.isUrgent = true;
+      row.urgentReason = issue.reason;
+      row.contracts.push({
+        contractId: issue.contractId,
+        contractNumber: issue.contractNumber,
+        product: null,
+        overdueCount: 0,
+        amountOverdue: 0,
+        daysOverdue: 0,
+        installments: [],
+        deviceIssue: issue.reason,
+      });
+    }
+
+    const rows = Array.from(byCustomer.values()).sort((a, b) => {
+      if (a.isUrgent !== b.isUrgent) return a.isUrgent ? -1 : 1;
+      return b.daysOverdue - a.daysOverdue;
+    });
 
     res.json({
       count: rows.length,
+      urgentCount: rows.filter((row) => row.isUrgent).length,
       overdueInstallmentCount: rows.reduce((sum, row) => sum + row.overdueCount, 0),
       totalOverdueAmount: Math.round(rows.reduce((sum, row) => sum + row.amountOverdue, 0) * 100) / 100,
       customers: rows,

@@ -9,6 +9,7 @@ import {
   linkManagedDeviceToContract,
   evaluateManagedDeviceForContract,
   getDeviceControlEnrollmentDefaults,
+  getDeviceLockIssues,
   getManagedDeviceByContract,
   getManagedDeviceHealthSummary,
   reconcileKnoxGuardWebhookEvent,
@@ -35,6 +36,29 @@ export async function getKnoxGuardHealth(req: AuthenticatedRequest, res: Respons
   } catch (error) {
     console.error('Get Knox Guard health error:', error);
     res.status(500).json({ error: 'Failed to get Knox Guard health summary' });
+  }
+}
+
+// GET /knox-guard/device-issues — contracts whose device lock state disagrees
+// with what it should be. Backs the admin device-issues page and its bell.
+export async function getDeviceLockIssuesReport(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { categoryA, categoryB, categoryC } = await getDeviceLockIssues();
+    res.json({
+      categoryA,
+      categoryB,
+      categoryC,
+      counts: {
+        categoryA: categoryA.length,
+        categoryB: categoryB.length,
+        categoryC: categoryC.length,
+        urgent: categoryA.length + categoryB.length,
+        total: categoryA.length + categoryB.length + categoryC.length,
+      },
+    });
+  } catch (error) {
+    console.error('Get device lock issues error:', error);
+    res.status(500).json({ error: 'Failed to get device lock issues' });
   }
 }
 
