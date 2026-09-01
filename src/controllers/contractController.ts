@@ -1325,7 +1325,10 @@ export async function writeOffContract(req: AuthenticatedRequest, res: Response)
       // completed sale, so it must not be treated like one. Deleting it (rather
       // than just unlocking) lets requestStandaloneInventoryDeviceLock below
       // re-enroll it fresh, exactly like a device that was never assigned.
+      // Queued retry commands against it must go first — same foreign key
+      // constraint as nullify.
       if (contract.managedDevice) {
+        await tx.managedDeviceCommand.deleteMany({ where: { managedDeviceId: contract.managedDevice.id } });
         await tx.managedDevice.delete({ where: { id: contract.managedDevice.id } });
       }
 
@@ -1570,8 +1573,12 @@ export async function nullifyContract(req: AuthenticatedRequest, res: Response):
       // Delete installment schedules
       await tx.installmentSchedule.deleteMany({ where: { contractId: id } });
 
-      // Detach and delete managed Knox device
+      // Detach and delete managed Knox device, including any queued retry
+      // commands against it — same foreign key issue as the agent ledger
+      // below: the device can't be deleted while ManagedDeviceCommand rows
+      // still reference it (the retry queue added today creates these).
       if (contract.managedDevice) {
+        await tx.managedDeviceCommand.deleteMany({ where: { managedDeviceId: contract.managedDevice.id } });
         await tx.managedDevice.delete({ where: { id: contract.managedDevice.id } });
       }
 
