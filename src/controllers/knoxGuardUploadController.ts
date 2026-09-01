@@ -74,7 +74,21 @@ async function syncOneDeviceFromPortal(device: {
 
     const portalStatus: string | null = portalDevice.status || null;
     const resolved = resolveStateFromPortalStatus(portalStatus);
-    if (!resolved) return false;
+    if (!resolved) {
+      // Unrecognized status string — we can't confidently map it to
+      // actualState/enrollmentStatus, but silently skipping entirely (the
+      // old behavior) is exactly how "Blinked" went undetected for weeks.
+      // Record the raw value so an unrecognized status is at least visible
+      // for the next person to investigate, instead of invisible forever.
+      if (portalStatus && portalStatus !== device.knoxStatus) {
+        await (prisma as any).managedDevice.update({
+          where: { id: device.id },
+          data: { knoxStatus: portalStatus, lastSyncedAt: new Date() },
+        });
+        return true;
+      }
+      return false;
+    }
 
     // Only update if state has changed
     const stateChanged = resolved.enrollmentStatus !== device.enrollmentStatus

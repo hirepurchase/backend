@@ -3,7 +3,7 @@ import prisma from '../config/database';
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { isOverdue, calculatePenalty } from '../utils/helpers';
-import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices } from './deviceControlPolicyService';
+import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices, relockDriftedWrittenOffDevices } from './deviceControlPolicyService';
 
 // Mark past-due installments as OVERDUE and apply penalties
 export async function markOverdueInstallments(): Promise<{ updated: number; penalties: number }> {
@@ -244,6 +244,12 @@ export function initializeNotificationScheduler(): void {
       console.log('Knox Guard: running proactive evaluate for all active enrolled contracts...');
       const result = await evaluateAllActiveContractsWithDevices();
       console.log(`Knox Guard proactive evaluate: ${result.evaluated} evaluated, ${result.locked} locked, ${result.unlocked} unlocked, ${result.errors} errors`);
+
+      // ACTIVE contracts are covered above, but a written-off contract's
+      // device gets no further checks after the write-off action itself —
+      // catch any that have drifted since.
+      const writtenOffResult = await relockDriftedWrittenOffDevices();
+      console.log(`Knox Guard written-off relock: ${writtenOffResult.evaluated} needed relocking, ${writtenOffResult.relocked} relocked, ${writtenOffResult.errors} errors`);
     });
     if (!enqueued) {
       console.log('Skipping Knox proactive evaluate - previous job still running');

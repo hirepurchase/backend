@@ -936,6 +936,31 @@ function buildBlinkCommandPayload(contract: any, metrics: DeviceMessageMetrics, 
   };
 }
 
+// Knox can report a command as failed (e.g. DEVICE_STATE_INVALID) even when
+// it actually applied — confirmed live: a lock command that reported failure
+// left the device genuinely Locked seconds later, and a retry against the
+// same already-correct device failed again for the same reason. Before
+// trusting a failure enough to queue a retry, burn a retry attempt, or
+// record a phantom error, check whether the device is already where we
+// wanted it — Knox's own live status is the only source of truth here.
+async function isDeviceAlreadyInState(
+  identifier: ReturnType<typeof getManagedDeviceIdentifier>,
+  target: 'LOCKED' | 'UNLOCKED'
+): Promise<boolean> {
+  try {
+    const lookup = await lookupKnoxGuardDevice(identifier);
+    if (!lookup.success || lookup.dryRun) return false;
+    const liveStatus: string = (lookup.data as any)?.deviceList?.[0]?.status || '';
+    const normalized = liveStatus.toUpperCase();
+    if (target === 'LOCKED') {
+      return normalized.includes('LOCK') && !normalized.includes('UNLOCK');
+    }
+    return normalized.includes('UNLOCK') || normalized === 'ENROLLED';
+  } catch {
+    return false;
+  }
+}
+
 // Knox's blink repeats hourly forever with no built-in expiry — a customer
 // who later goes overdue and gets locked can end up with a leftover reminder
 // loop that keeps firing on its own schedule and silently reverts the
@@ -944,14 +969,24 @@ function buildBlinkCommandPayload(contract: any, metrics: DeviceMessageMetrics, 
 // on an unconfirmed Knox expiry parameter, immediately cancel the repeat
 // after every blink using the same stop-reminder call already proven to
 // work — so the customer sees it once, not every hour indefinitely.
-async function stopBlinkRepeat(identifier: ReturnType<typeof getManagedDeviceIdentifier>): Promise<void> {
+async function stopBlinkRepeat(
+  identifier: ReturnType<typeof getManagedDeviceIdentifier>,
+  managedDeviceId: string
+): Promise<void> {
   try {
     const stopResult = await unlockKnoxGuardDevice({
       ...identifier,
       message: 'Reminder acknowledged.',
     });
     if (!stopResult.success && !stopResult.dryRun) {
-      console.error(`Failed to stop blink repeat for device ${identifier.deviceUid}:`, stopResult.error);
+      // Still actively reminding despite the failure? Queue a real retry
+      // instead of just logging — a stop that never lands is exactly what
+      // lets the hourly repeat outlive the fix meant to prevent it.
+      const stillReminding = !(await isDeviceAlreadyInState(identifier, 'UNLOCKED'));
+      if (stillReminding) {
+        console.error(`Failed to stop blink repeat for device ${identifier.deviceUid}:`, stopResult.error);
+        await queueManagedDeviceCommand(managedDeviceId, 'UNLOCK_DEVICE', { message: 'Reminder acknowledged.' });
+      }
     }
   } catch (error) {
     console.error(`Failed to stop blink repeat for device ${identifier.deviceUid}:`, error);
@@ -1149,6 +1184,40 @@ export async function evaluateAllActiveContractsWithDevices(): Promise<{ evaluat
   }
 
   return { evaluated, locked, unlocked, errors };
+}
+
+// Write-off and nullify both re-lock the device at the moment they run, but
+// nothing ever checks on it again afterward — evaluateAllActiveContractsWithDevices
+// only queries status: 'ACTIVE', and evaluateManagedDeviceForContract's own
+// lock decision requires isActive (status === 'ACTIVE') too, so a written-off
+// contract whose device later drifts (the same Blinked/StartingReminder drift
+// found across the ACTIVE fleet) has no automatic path back to correct. This
+// re-locks any WRITTEN_OFF contract's device found not actually LOCKED.
+export async function relockDriftedWrittenOffDevices(): Promise<{ evaluated: number; relocked: number; errors: number }> {
+  const devices = await prismaAny.managedDevice.findMany({
+    where: {
+      isActive: true,
+      actualState: { not: 'LOCKED' },
+      contract: { status: 'WRITTEN_OFF' },
+    },
+    include: { contract: { select: { id: true, contractNumber: true } } },
+  });
+
+  let relocked = 0;
+  let errors = 0;
+
+  for (const device of devices) {
+    if (!device.contract) continue;
+    try {
+      const result = await requestManagedDeviceLock(device.contract.id);
+      if (result.success || result.dryRun) relocked++;
+    } catch (error) {
+      errors++;
+      console.error(`Failed to relock written-off contract ${device.contract.contractNumber}:`, error);
+    }
+  }
+
+  return { evaluated: devices.length, relocked, errors };
 }
 
 export async function getDeviceControlPolicySummary() {
@@ -2225,10 +2294,24 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     });
     actionType = 'BLINK_DEVICE';
     retryPayload = { ...blinkPayload };
-    if (actionResult.success || actionResult.dryRun) await stopBlinkRepeat(identifier);
+    if (actionResult.success || actionResult.dryRun) await stopBlinkRepeat(identifier, contract.managedDevice.id);
   } else if (!shouldLock && contract.managedDevice.actualState === 'UNKNOWN' && !contract.managedDevice.lastSyncedAt) {
     actionResult = await lookupKnoxGuardDevice(identifier);
     actionType = 'SYNC_DEVICE';
+  }
+
+  // Before trusting a reported failure, check whether it actually applied
+  // anyway (see isDeviceAlreadyInState) — reclassify as success so the
+  // bookkeeping below and the retry-queue guard both see the truth.
+  if (
+    actionResult && !actionResult.success && !actionResult.dryRun &&
+    (actionType === 'LOCK_DEVICE' || actionType === 'UNLOCK_DEVICE')
+  ) {
+    const target = actionType === 'LOCK_DEVICE' ? 'LOCKED' : 'UNLOCKED';
+    if (await isDeviceAlreadyInState(identifier, target)) {
+      actionResult = { ...actionResult, success: true, error: undefined };
+      nextActualState = target;
+    }
   }
 
   // A failed lock/unlock/blink used to just sit there — nothing retried it
@@ -2472,7 +2555,7 @@ export async function requestManagedDeviceLock(contractId: string, message?: str
   const lockPayload = buildLockCommandPayload(contract, metrics, lockDefaults);
   const identifier = getManagedDeviceIdentifier(contract.managedDevice);
 
-  const result = await lockKnoxGuardDevice({
+  let result = await lockKnoxGuardDevice({
     ...identifier,
     message: message || lockPayload.message,
     tel: lockPayload.tel,
@@ -2480,6 +2563,35 @@ export async function requestManagedDeviceLock(contractId: string, message?: str
     blockIncomingCalls: lockPayload.blockIncomingCalls,
     allowIncomingNumbers: lockPayload.allowIncomingNumbers,
   });
+
+  // Knox can report DEVICE_STATE_INVALID etc. even when the command actually
+  // applied — confirmed live. Don't record a phantom failure without checking.
+  if (!result.success && !result.dryRun && await isDeviceAlreadyInState(identifier, 'LOCKED')) {
+    result = { ...result, success: true, error: undefined };
+  }
+
+  // Genuinely still failing with DEVICE_STATE_INVALID — confirmed live to
+  // mean an active, uncancelled reminder is blocking the transition (the
+  // exact mechanism behind devices found stuck on Blinked/StartingReminder
+  // from before the reminder-fires-once fix existed). Explicitly stop the
+  // reminder, then retry the lock once, instead of leaving it stuck.
+  if (!result.success && !result.dryRun && result.error?.includes('DEVICE_STATE_INVALID')) {
+    await unlockKnoxGuardDevice({ ...identifier, message: 'Clearing stale reminder before lock.' });
+    await new Promise((r) => setTimeout(r, 2000));
+    const retryResult = await lockKnoxGuardDevice({
+      ...identifier,
+      message: message || lockPayload.message,
+      tel: lockPayload.tel,
+      warningMessage: lockPayload.warningMessage,
+      blockIncomingCalls: lockPayload.blockIncomingCalls,
+      allowIncomingNumbers: lockPayload.allowIncomingNumbers,
+    });
+    if (retryResult.success || retryResult.dryRun || await isDeviceAlreadyInState(identifier, 'LOCKED')) {
+      result = { ...retryResult, success: true, error: undefined };
+    } else {
+      result = retryResult;
+    }
+  }
 
   const nextState: ManagedDeviceState = result.dryRun || result.success ? 'LOCKED' : contract.managedDevice.actualState as ManagedDeviceState || 'UNKNOWN';
 
@@ -2531,6 +2643,12 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
   for (let attempt = 2; attempt <= 3 && !result.success && !result.dryRun; attempt++) {
     await new Promise((r) => setTimeout(r, 3000));
     result = await unlockKnoxGuardDevice({ ...identifier, message: unlockMessage });
+  }
+
+  // Knox can report DEVICE_STATE_INVALID etc. even when the command actually
+  // applied — confirmed live. Don't record a phantom failure without checking.
+  if (!result.success && !result.dryRun && await isDeviceAlreadyInState(identifier, 'UNLOCKED')) {
+    result = { ...result, success: true, error: undefined };
   }
 
   const nextState: ManagedDeviceState = result.dryRun || result.success ? 'UNLOCKED' : contract.managedDevice.actualState as ManagedDeviceState || 'UNKNOWN';
@@ -2828,7 +2946,7 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
             timeLimitEnable: Boolean(payload.timeLimitEnable || false),
           });
           // Fire once, not a repeating hourly nag — see stopBlinkRepeat.
-          if (result.success || result.dryRun) await stopBlinkRepeat(identifier);
+          if (result.success || result.dryRun) await stopBlinkRepeat(identifier, command.managedDevice.id);
           break;
         case 'LOCK_DEVICE':
           result = await lockKnoxGuardDevice({
@@ -2913,6 +3031,19 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
       });
       summary.results.push({ commandId: command.id, type: command.type, status: 'RATE_LIMITED', dryRun: false, error: 'Device in Accepted state — waiting for app' });
       continue;
+    }
+
+    // Knox can report a command as failed even when it actually applied —
+    // confirmed live. Before burning a retry attempt on LOCK_DEVICE/
+    // UNLOCK_DEVICE, check whether the device is already where we wanted it.
+    if (
+      !result.success && !result.rateLimited &&
+      (command.type === 'LOCK_DEVICE' || command.type === 'UNLOCK_DEVICE')
+    ) {
+      const target = command.type === 'LOCK_DEVICE' ? 'LOCKED' : 'UNLOCKED';
+      if (await isDeviceAlreadyInState(identifier, target)) {
+        result = { ...result, success: true, error: undefined };
+      }
     }
 
     if (!result.success) {
