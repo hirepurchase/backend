@@ -383,6 +383,7 @@ model ManagedDevice {
   lastTransactionId String?               // Last x-knox-transactionId for debugging
   metadata          String?
   commands         ManagedDeviceCommand[]
+  actionLogs       KnoxActionLog[]
   createdAt        DateTime              @default(now())
   updatedAt        DateTime              @updatedAt
 
@@ -410,6 +411,47 @@ model ManagedDeviceCommand {
 
   @@index([managedDeviceId, createdAt])
   @@index([status, nextAttemptAt, createdAt])
+}
+
+// Durable per-attempt history of every Knox action decision — distinct from
+// ManagedDevice, which only holds the latest snapshot, and from
+// ManagedDeviceCommand, which only exists for actions that went through the
+// retry queue. This is written on every direct dispatch too, so drift and
+// flapping are visible without re-running a manual audit against Knox.
+model KnoxActionLog {
+  id                String        @id @default(uuid())
+  managedDeviceId   String?
+  managedDevice     ManagedDevice? @relation(fields: [managedDeviceId], references: [id], onDelete: SetNull)
+  contractId        String?
+  contractNumber    String?
+  actionType        String        // LOCK_DEVICE, UNLOCK_DEVICE, BLINK_DEVICE, STOP_REMINDER, SYNC_DEVICE, APPROVE_DEVICE, COMPLETE_DEVICE, CANCEL_COMPLETE
+  source            String        // EVALUATE, DIRECT, RETRY_QUEUE
+  success           Boolean
+  dryRun            Boolean
+  desiredState      String?
+  actualStateBefore String?
+  actualStateAfter  String?
+  error             String?
+  transactionId     String?
+  createdAt         DateTime      @default(now())
+
+  @@index([managedDeviceId, createdAt])
+  @@index([actionType, success, createdAt])
+}
+
+// One row per daily full-fleet reconciliation run — lets drift be tracked as
+// a trend instead of only ever being visible at the moment someone opens the
+// device-issues page.
+model DeviceAuditSnapshot {
+  id             String   @id @default(uuid())
+  categoryACount Int
+  categoryBCount Int
+  categoryCCount Int
+  totalIssues    Int
+  totalDevices   Int
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt])
 }
 
 // ============= AUDIT LOGGING =============

@@ -208,6 +208,52 @@ function computeDaysUntil(date: Date): number {
   return Math.round((target.getTime() - todayAtMidnight().getTime()) / 86400000);
 }
 
+function isSameCalendarDay(date: Date | null | undefined): boolean {
+  if (!date) return false;
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime() === todayAtMidnight().getTime();
+}
+
+// Durable per-attempt history — see KnoxActionLog in schema.prisma for why
+// this exists alongside ManagedDevice's latest-snapshot fields. Never allowed
+// to fail the real action it's describing.
+async function logKnoxAction(params: {
+  managedDeviceId: string;
+  contractId?: string | null;
+  contractNumber?: string | null;
+  actionType: string;
+  source: 'EVALUATE' | 'DIRECT' | 'RETRY_QUEUE';
+  success: boolean;
+  dryRun: boolean;
+  desiredState?: string | null;
+  actualStateBefore?: string | null;
+  actualStateAfter?: string | null;
+  error?: string | null;
+  transactionId?: string | null;
+}): Promise<void> {
+  try {
+    await prismaAny.knoxActionLog.create({
+      data: {
+        managedDeviceId: params.managedDeviceId,
+        contractId: params.contractId ?? null,
+        contractNumber: params.contractNumber ?? null,
+        actionType: params.actionType,
+        source: params.source,
+        success: params.success,
+        dryRun: params.dryRun,
+        desiredState: params.desiredState ?? null,
+        actualStateBefore: params.actualStateBefore ?? null,
+        actualStateAfter: params.actualStateAfter ?? null,
+        error: params.error ?? null,
+        transactionId: params.transactionId ?? null,
+      },
+    });
+  } catch (error) {
+    console.error('Failed to write Knox action log:', error);
+  }
+}
+
 function buildApproveId(contractNumber: string): string {
   return contractNumber;
 }
@@ -1910,6 +1956,61 @@ export async function getDeviceLockIssues(): Promise<{
   return { categoryA, categoryB, categoryC };
 }
 
+// Formalizes the manual full-fleet audit into a scheduled, recurring check —
+// getDeviceLockIssues() already reflects live-enough state (kept fresh by the
+// 5-minute portal sync), so this doesn't call Knox directly. It exists to
+// turn a point-in-time page view into a trend: each run is persisted, so a
+// spike in issues is visible even if nobody happens to open the device-issues
+// page that day.
+export async function runDailyDeviceAudit(): Promise<{
+  categoryACount: number;
+  categoryBCount: number;
+  categoryCCount: number;
+  totalIssues: number;
+  totalDevices: number;
+  newIssuesSincePriorSnapshot: number | null;
+}> {
+  const { categoryA, categoryB, categoryC } = await getDeviceLockIssues();
+  const totalDevices = await prismaAny.managedDevice.count({ where: { isActive: true } });
+  const totalIssues = categoryA.length + categoryB.length + categoryC.length;
+
+  const priorSnapshot = await prismaAny.deviceAuditSnapshot.findFirst({
+    orderBy: { createdAt: 'desc' },
+  });
+
+  await prismaAny.deviceAuditSnapshot.create({
+    data: {
+      categoryACount: categoryA.length,
+      categoryBCount: categoryB.length,
+      categoryCCount: categoryC.length,
+      totalIssues,
+      totalDevices,
+    },
+  });
+
+  const newIssuesSincePriorSnapshot = priorSnapshot ? totalIssues - priorSnapshot.totalIssues : null;
+  if (newIssuesSincePriorSnapshot !== null && newIssuesSincePriorSnapshot > 0) {
+    console.warn(
+      `⚠️  Knox Guard daily audit: device issues increased by ${newIssuesSincePriorSnapshot} since the prior run ` +
+      `(${priorSnapshot.totalIssues} -> ${totalIssues}). categoryA=${categoryA.length} categoryB=${categoryB.length} categoryC=${categoryC.length}`
+    );
+  } else {
+    console.log(
+      `Knox Guard daily audit: ${totalIssues} device issue(s) across ${totalDevices} active devices ` +
+      `(categoryA=${categoryA.length}, categoryB=${categoryB.length}, categoryC=${categoryC.length})`
+    );
+  }
+
+  return {
+    categoryACount: categoryA.length,
+    categoryBCount: categoryB.length,
+    categoryCCount: categoryC.length,
+    totalIssues,
+    totalDevices,
+    newIssuesSincePriorSnapshot,
+  };
+}
+
 export async function listManagedDevices(options: { page?: number; limit?: number; q?: string; enrollmentStatus?: string } = {}) {
   const page = Math.max(1, Number(options.page) || 1);
   const limit = Math.min(Math.max(1, Number(options.limit) || 10), 100);
@@ -2232,6 +2333,10 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   // arrears kept seeing the reminder indefinitely — the device was never
   // locked, so the unlock path below never considered it.
   const deviceIsBlinking = contract.managedDevice.lastKnoxAction === 'BLINK_DEVICE';
+  // A contract can get evaluated more than once in a day (an event-driven
+  // trigger plus the daily proactive sweep) — without this a customer could
+  // be buzzed twice in one morning for the same still-unpaid installment.
+  const alreadyBlinkedToday = deviceIsBlinking && isSameCalendarDay(contract.managedDevice.lastEvaluatedAt);
   const arrearsCleared = metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
   const shouldStopBlink = deviceIsBlinking && arrearsCleared && !hasUpcomingPaymentDue;
   const shouldUnlock = (deviceIsLockedOrPending || shouldStopBlink) && arrearsCleared;
@@ -2283,7 +2388,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     actionType = shouldStopBlink && actualState !== 'LOCKED' ? 'STOP_REMINDER' : 'UNLOCK_DEVICE';
     retryPayload = { message: unlockMessage };
     if (actionResult.success || actionResult.dryRun) nextActualState = 'UNLOCKED';
-  } else if (shouldBlink && contract.managedDevice.desiredState !== 'LOCKED') {
+  } else if (shouldBlink && contract.managedDevice.desiredState !== 'LOCKED' && !alreadyBlinkedToday) {
     const blinkPayload = buildBlinkCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
     actionResult = await blinkKnoxGuardDevice({
       ...identifier,
@@ -2357,6 +2462,23 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     await prismaAny.inventoryItem.update({
       where: { id: contract.managedDevice.inventoryItemId },
       data: { lockStatus: actionType === 'LOCK_DEVICE' ? 'LOCKED' : 'UNLOCKED' },
+    });
+  }
+
+  if (actionType && actionResult) {
+    await logKnoxAction({
+      managedDeviceId: contract.managedDevice.id,
+      contractId: contract.id,
+      contractNumber: contract.contractNumber,
+      actionType,
+      source: 'EVALUATE',
+      success: actionResult.success,
+      dryRun: actionResult.dryRun,
+      desiredState,
+      actualStateBefore: actualState,
+      actualStateAfter: updatedDevice.actualState,
+      error: actionResult.error ?? null,
+      transactionId: actionResult.transactionId ?? null,
     });
   }
 
@@ -2620,6 +2742,21 @@ export async function requestManagedDeviceLock(contractId: string, message?: str
     }
   });
 
+  await logKnoxAction({
+    managedDeviceId: contract.managedDevice.id,
+    contractId: contract.id,
+    contractNumber: contract.contractNumber,
+    actionType: 'LOCK_DEVICE',
+    source: 'DIRECT',
+    success: result.success,
+    dryRun: result.dryRun,
+    desiredState: 'LOCKED',
+    actualStateBefore: contract.managedDevice.actualState,
+    actualStateAfter: nextState,
+    error: result.error ?? null,
+    transactionId: result.transactionId ?? null,
+  });
+
   return {
     success: result.success,
     dryRun: result.dryRun,
@@ -2676,6 +2813,21 @@ export async function requestManagedDeviceUnlock(contractId: string, reason?: st
         data: { lockStatus: 'UNLOCKED' },
       });
     }
+  });
+
+  await logKnoxAction({
+    managedDeviceId: contract.managedDevice.id,
+    contractId: contract.id,
+    contractNumber: contract.contractNumber,
+    actionType: 'UNLOCK_DEVICE',
+    source: 'DIRECT',
+    success: result.success,
+    dryRun: result.dryRun,
+    desiredState: 'UNLOCKED',
+    actualStateBefore: contract.managedDevice.actualState,
+    actualStateAfter: nextState,
+    error: result.error ?? null,
+    transactionId: result.transactionId ?? null,
   });
 
   return {
@@ -3066,6 +3218,20 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
         dryRun: result.dryRun,
         error: result.error || null,
       });
+      await logKnoxAction({
+        managedDeviceId: command.managedDevice.id,
+        contractId: command.managedDevice.contract?.id ?? null,
+        contractNumber: command.managedDevice.contract?.contractNumber ?? null,
+        actionType: command.type,
+        source: 'RETRY_QUEUE',
+        success: false,
+        dryRun: result.dryRun,
+        desiredState: command.managedDevice.desiredState,
+        actualStateBefore: command.managedDevice.actualState,
+        actualStateAfter: command.managedDevice.actualState,
+        error: result.error || null,
+        transactionId: result.transactionId ?? null,
+      });
       continue;
     }
 
@@ -3173,6 +3339,21 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
       status: 'SUCCEEDED',
       dryRun: isDryRun,
       error: null,
+    });
+
+    await logKnoxAction({
+      managedDeviceId: command.managedDevice.id,
+      contractId: command.managedDevice.contract?.id ?? null,
+      contractNumber: command.managedDevice.contract?.contractNumber ?? null,
+      actionType: command.type,
+      source: 'RETRY_QUEUE',
+      success: true,
+      dryRun: isDryRun,
+      desiredState: command.managedDevice.desiredState,
+      actualStateBefore: command.managedDevice.actualState,
+      actualStateAfter: nextState,
+      error: null,
+      transactionId: result.transactionId ?? null,
     });
 
     if (command.type === 'APPROVE_DEVICE') {

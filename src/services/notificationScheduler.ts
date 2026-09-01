@@ -3,7 +3,7 @@ import prisma from '../config/database';
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { isOverdue, calculatePenalty } from '../utils/helpers';
-import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices, relockDriftedWrittenOffDevices } from './deviceControlPolicyService';
+import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices, relockDriftedWrittenOffDevices, runDailyDeviceAudit } from './deviceControlPolicyService';
 
 // Mark past-due installments as OVERDUE and apply penalties
 export async function markOverdueInstallments(): Promise<{ updated: number; penalties: number }> {
@@ -236,10 +236,12 @@ export function initializeNotificationScheduler(): void {
     }
   });
 
-  // Proactively evaluate ALL active enrolled contracts at 8:30 AM (after overdue marking).
+  // Proactively evaluate ALL active enrolled contracts at 8:32 AM (after overdue marking).
   // Catches devices that should be locked but missed event-driven evaluate — e.g. device
   // enrolled days after installment went overdue, or server restart mid-cycle.
-  cron.schedule('30 8 * * *', () => {
+  // Deliberately off the 5-minute mark (the device-control scheduler runs on
+  // */5) so this doesn't double up Knox API load with that tick.
+  cron.schedule('32 8 * * *', () => {
     const enqueued = enqueueSingletonJob('knox-proactive-evaluate', async () => {
       console.log('Knox Guard: running proactive evaluate for all active enrolled contracts...');
       const result = await evaluateAllActiveContractsWithDevices();
@@ -253,6 +255,20 @@ export function initializeNotificationScheduler(): void {
     });
     if (!enqueued) {
       console.log('Skipping Knox proactive evaluate - previous job still running');
+    }
+  });
+
+  // Full-fleet reconciliation audit at 8:41 AM, after the proactive sweep above
+  // has had a chance to self-correct what it can. Formalizes the manual audit
+  // that originally caught fleet-wide drift into a recurring, trend-tracked
+  // check instead of relying on someone opening the device-issues page.
+  cron.schedule('41 8 * * *', () => {
+    const enqueued = enqueueSingletonJob('knox-daily-device-audit', async () => {
+      console.log('Knox Guard: running daily full-fleet device audit...');
+      await runDailyDeviceAudit();
+    });
+    if (!enqueued) {
+      console.log('Skipping Knox daily device audit - previous job still running');
     }
   });
 
@@ -280,7 +296,8 @@ export function initializeNotificationScheduler(): void {
 
   console.log('Notification scheduler initialized');
   console.log('- Overdue installment marking: Daily at 8:00 AM');
-  console.log('- Knox proactive device evaluate: Daily at 8:30 AM');
+  console.log('- Knox proactive device evaluate: Daily at 8:32 AM');
+  console.log('- Knox daily full-fleet device audit: Daily at 8:41 AM');
   console.log('- Upcoming payments check: Daily at 9:00 AM');
   console.log('- Overdue payments check: Daily at 10:00 AM');
 }
