@@ -1266,6 +1266,81 @@ export async function relockDriftedWrittenOffDevices(): Promise<{ evaluated: num
   return { evaluated: devices.length, relocked, errors };
 }
 
+// Unlike evaluateAllActiveContractsWithDevices (which trusts ManagedDevice.actualState
+// and only dispatches a lock when our own DB disagrees), this checks each overdue-enough
+// contract's device against Knox's LIVE status. That distinction matters because of the
+// zombie-reminder case: a lock can report success while an old, pre-existing reminder loop
+// (issued before every-blink-stops-itself existed) keeps repeating independently on Knox's
+// own schedule and later silently reverts the device — invisible to our DB, which still
+// shows the lock as having succeeded. Confirmed live on CON2607IOE1EC on 2026-09-02.
+export async function liveVerifyAndRelockOverdueDevices(): Promise<{
+  checked: number;
+  alreadyLocked: number;
+  relocked: number;
+  failed: number;
+  details: Array<{ contractNumber: string; customerName: string; outcome: 'ALREADY_LOCKED' | 'RELOCKED' | 'FAILED'; error?: string }>;
+}> {
+  const kSettings = await getKnoxSettings();
+  const contracts = await prismaAny.hirePurchaseContract.findMany({
+    where: {
+      status: 'ACTIVE',
+      managedDevice: { isActive: true, enrollmentStatus: { in: ['PENDING', 'APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'] } },
+    },
+    include: {
+      installments: true,
+      penalties: true,
+      customer: { select: { firstName: true, lastName: true } },
+      managedDevice: true,
+    },
+  });
+
+  let checked = 0;
+  let alreadyLocked = 0;
+  let relocked = 0;
+  let failed = 0;
+  const details: Array<{ contractNumber: string; customerName: string; outcome: 'ALREADY_LOCKED' | 'RELOCKED' | 'FAILED'; error?: string }> = [];
+
+  for (const contract of contracts) {
+    if (!contract.managedDevice) continue;
+
+    const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
+    const isOverdueEnoughToLock = metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
+    if (!isOverdueEnoughToLock) continue;
+
+    checked++;
+    const customerName = `${contract.customer.firstName} ${contract.customer.lastName}`.trim();
+    const identifier = getManagedDeviceIdentifier(contract.managedDevice);
+
+    const isLockedLive = await isDeviceAlreadyInState(identifier, 'LOCKED');
+    if (isLockedLive) {
+      alreadyLocked++;
+      details.push({ contractNumber: contract.contractNumber, customerName, outcome: 'ALREADY_LOCKED' });
+      continue;
+    }
+
+    try {
+      // Explicitly stop any active reminder before locking — the same
+      // sequence confirmed to fix the zombie case, rather than relying on
+      // a lock command to implicitly cancel a reminder it may not touch.
+      await unlockKnoxGuardDevice({ ...identifier, message: 'Reminder acknowledged.' });
+      await new Promise((r) => setTimeout(r, 1500));
+      const result = await requestManagedDeviceLock(contract.id);
+      if (result.success || result.dryRun) {
+        relocked++;
+        details.push({ contractNumber: contract.contractNumber, customerName, outcome: 'RELOCKED' });
+      } else {
+        failed++;
+        details.push({ contractNumber: contract.contractNumber, customerName, outcome: 'FAILED', error: result.error });
+      }
+    } catch (error: any) {
+      failed++;
+      details.push({ contractNumber: contract.contractNumber, customerName, outcome: 'FAILED', error: error?.message || 'Unknown error' });
+    }
+  }
+
+  return { checked, alreadyLocked, relocked, failed, details };
+}
+
 export async function getDeviceControlPolicySummary() {
   const s = await getKnoxSettings();
   return {

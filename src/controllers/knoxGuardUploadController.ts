@@ -69,6 +69,12 @@ async function syncOneDeviceFromPortal(device: {
         });
         return true;
       }
+      // Still bump lastSyncedAt — see the note below on why a successful
+      // check must always advance this, even with nothing to change.
+      await (prisma as any).managedDevice.update({
+        where: { id: device.id },
+        data: { lastSyncedAt: new Date() },
+      });
       return false;
     }
 
@@ -80,36 +86,46 @@ async function syncOneDeviceFromPortal(device: {
       // old behavior) is exactly how "Blinked" went undetected for weeks.
       // Record the raw value so an unrecognized status is at least visible
       // for the next person to investigate, instead of invisible forever.
-      if (portalStatus && portalStatus !== device.knoxStatus) {
-        await (prisma as any).managedDevice.update({
-          where: { id: device.id },
-          data: { knoxStatus: portalStatus, lastSyncedAt: new Date() },
-        });
-        return true;
-      }
-      return false;
+      const changed = Boolean(portalStatus) && portalStatus !== device.knoxStatus;
+      await (prisma as any).managedDevice.update({
+        where: { id: device.id },
+        data: {
+          lastSyncedAt: new Date(),
+          ...(changed ? { knoxStatus: portalStatus } : {}),
+        },
+      });
+      return changed;
     }
 
-    // Only update if state has changed
     const stateChanged = resolved.enrollmentStatus !== device.enrollmentStatus
       || resolved.actualState !== device.actualState
       || portalStatus !== device.knoxStatus
       || resolved.lastError !== device.lastError;
-    if (!stateChanged) return false;
 
     const knoxObjectId = normalizeDeviceIdentifier(portalDevice.objectId);
+    // A successful check must always bump lastSyncedAt, whether or not the
+    // state changed — the sync batch is ordered oldest-lastSyncedAt-first,
+    // so a device whose state never changes would otherwise never age out
+    // of the front of that queue. A large stable population would then
+    // permanently occupy every tick's slots, starving devices that actually
+    // drifted of a recheck — measured live: 1,035 of 1,917 devices sat over
+    // 24h stale despite the 5-minute cron, and a device that genuinely
+    // reverted from LOCKED to a live Knox "Blinked" state went unnoticed the
+    // entire time because of exactly this.
     await (prisma as any).managedDevice.update({
       where: { id: device.id },
       data: {
-        enrollmentStatus: resolved.enrollmentStatus,
-        actualState: resolved.actualState,
-        knoxStatus: portalStatus,
-        ...(knoxObjectId ? { knoxObjectId } : {}),
         lastSyncedAt: new Date(),
-        lastError: resolved.lastError,
+        ...(stateChanged ? {
+          enrollmentStatus: resolved.enrollmentStatus,
+          actualState: resolved.actualState,
+          knoxStatus: portalStatus,
+          lastError: resolved.lastError,
+        } : {}),
+        ...(knoxObjectId ? { knoxObjectId } : {}),
       },
     });
-    return true;
+    return stateChanged;
   } catch (err) {
     console.error(`Portal sync failed for device ${device.deviceUid}:`, err);
     return false;
