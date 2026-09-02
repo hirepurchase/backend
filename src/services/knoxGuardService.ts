@@ -369,6 +369,16 @@ export async function lookupKnoxGuardDevice(identifier: DeviceIdentifier): Promi
   });
 }
 
+// Omitting `search` returns the whole tenant, paginated — far cheaper than
+// one lookup per device when the goal is to scan the entire fleet's live
+// status (e.g. finding every device currently mid-reminder).
+export async function listKnoxGuardDevicesPage(options: { pageNum?: number; pageSize?: number } = {}): Promise<KnoxGuardActionResult> {
+  return postListAction(KNOX_GUARD_PATHS.listDevices, {
+    pageNum: options.pageNum ?? 0,
+    pageSize: options.pageSize ?? 100,
+  });
+}
+
 export async function approveKnoxGuardDevice(payload: DeviceIdentifier & {
   approveComment?: string;
 }): Promise<KnoxGuardActionResult> {

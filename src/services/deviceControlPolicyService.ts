@@ -9,6 +9,7 @@ import {
   completeKnoxGuardDevice,
   getKnoxGuardConfigurationSummary,
   lockKnoxGuardDevice,
+  listKnoxGuardDevicesPage,
   lookupKnoxGuardDevice,
   unlockKnoxGuardDevice,
 } from './knoxGuardService';
@@ -182,6 +183,10 @@ const REMIND_BEFORE_DUE_DAYS = Number(process.env.KNOX_GUARD_REMIND_BEFORE_DUE_D
 const BLINK_INTERVAL_SECONDS = Number(process.env.KNOX_GUARD_BLINK_INTERVAL_SECONDS || '3600');
 // Rate-limit retry delay (ms) when Knox returns 429
 const RATE_LIMIT_RETRY_DELAY_MS = Number(process.env.KNOX_GUARD_RATE_LIMIT_RETRY_MS || '15000');
+// A reminder fires once and stays visible for this long before being
+// explicitly cancelled — long enough for the customer to actually see it,
+// short enough that it doesn't linger indefinitely like Knox's own repeat.
+const REMINDER_STOP_AFTER_MS = Number(process.env.KNOX_GUARD_REMINDER_STOP_AFTER_MS || String(60 * 60 * 1000));
 const KNOX_WEBHOOK_RECONCILIATION_ENABLED = getKnoxWebhookSecuritySummary().signatureCertificateConfigured;
 const prismaAny = prisma as any;
 
@@ -206,13 +211,6 @@ function computeDaysUntil(date: Date): number {
   const target = new Date(date);
   target.setHours(0, 0, 0, 0);
   return Math.round((target.getTime() - todayAtMidnight().getTime()) / 86400000);
-}
-
-function isSameCalendarDay(date: Date | null | undefined): boolean {
-  if (!date) return false;
-  const d = new Date(date);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime() === todayAtMidnight().getTime();
 }
 
 // Durable per-attempt history — see KnoxActionLog in schema.prisma for why
@@ -1007,38 +1005,6 @@ async function isDeviceAlreadyInState(
   }
 }
 
-// Knox's blink repeats hourly forever with no built-in expiry — a customer
-// who later goes overdue and gets locked can end up with a leftover reminder
-// loop that keeps firing on its own schedule and silently reverts the
-// device's status back to "Blinked", overwriting a lock that already
-// succeeded, with nothing to tell our system it happened. Rather than rely
-// on an unconfirmed Knox expiry parameter, immediately cancel the repeat
-// after every blink using the same stop-reminder call already proven to
-// work — so the customer sees it once, not every hour indefinitely.
-async function stopBlinkRepeat(
-  identifier: ReturnType<typeof getManagedDeviceIdentifier>,
-  managedDeviceId: string
-): Promise<void> {
-  try {
-    const stopResult = await unlockKnoxGuardDevice({
-      ...identifier,
-      message: 'Reminder acknowledged.',
-    });
-    if (!stopResult.success && !stopResult.dryRun) {
-      // Still actively reminding despite the failure? Queue a real retry
-      // instead of just logging — a stop that never lands is exactly what
-      // lets the hourly repeat outlive the fix meant to prevent it.
-      const stillReminding = !(await isDeviceAlreadyInState(identifier, 'UNLOCKED'));
-      if (stillReminding) {
-        console.error(`Failed to stop blink repeat for device ${identifier.deviceUid}:`, stopResult.error);
-        await queueManagedDeviceCommand(managedDeviceId, 'UNLOCK_DEVICE', { message: 'Reminder acknowledged.' });
-      }
-    }
-  } catch (error) {
-    console.error(`Failed to stop blink repeat for device ${identifier.deviceUid}:`, error);
-  }
-}
-
 function buildStandaloneInventoryLockPayload(defaults: DeviceControlEnrollmentDefaults) {
   return {
     message: 'This phone has been restricted because it is not yet linked to an active hire purchase contract. Please contact AIDOO TECH support to continue.',
@@ -1080,7 +1046,8 @@ async function getContractWithDevice(contractId: string) {
 async function queueManagedDeviceCommand(
   managedDeviceId: string,
   type: ManagedDeviceCommandType,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  delayMs: number = 0
 ) {
   const existing = await prismaAny.managedDeviceCommand.findFirst({
     where: {
@@ -1102,7 +1069,7 @@ async function queueManagedDeviceCommand(
       idempotencyKey: makeIdempotencyKey(managedDeviceId, type),
       payload: JSON.stringify(payload),
       status: 'PENDING',
-      nextAttemptAt: new Date(),
+      nextAttemptAt: new Date(Date.now() + delayMs),
     },
   });
 }
@@ -1339,6 +1306,124 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
   }
 
   return { checked, alreadyLocked, relocked, failed, details };
+}
+
+// Scans the ENTIRE Knox tenant (not just our overdue-enough population) for
+// devices currently mid-reminder (Blinked/StartingReminder/StoppingReminder)
+// and stops every one of them, then applies a lock wherever the underlying
+// contract's current overdue status actually calls for it. Uses Knox's bulk
+// /devices/list (no search filter) rather than one lookup per device — the
+// full tenant lists in ~10 paginated calls instead of ~1,900 individual ones.
+export async function stopAllActiveRemindersAndApplyLock(): Promise<{
+  onReminder: number;
+  stopped: number;
+  locked: number;
+  leftUnlocked: number;
+  noLocalContract: number;
+  failed: number;
+  details: Array<{
+    deviceUid: string;
+    contractNumber?: string;
+    customerName?: string;
+    outcome: 'STOPPED_AND_LOCKED' | 'STOPPED_NOT_OVERDUE' | 'STOPPED_NOT_ACTIVE' | 'STOPPED_NO_CONTRACT' | 'STOP_FAILED' | 'LOCK_FAILED' | 'ERROR';
+    error?: string;
+  }>;
+}> {
+  const kSettings = await getKnoxSettings();
+
+  const reminderDevices: Array<{ objectId: string | null; deviceUid: string; status: string }> = [];
+  const pageSize = 200;
+  for (let pageNum = 0; pageNum < 50; pageNum++) {
+    const page = await listKnoxGuardDevicesPage({ pageNum, pageSize });
+    if (!page.success) break;
+    const list = (page.data as any)?.deviceList || [];
+    for (const d of list) {
+      const normalized = String(d.status || '').toUpperCase();
+      if (normalized === 'BLINKED' || normalized.includes('REMINDER')) {
+        reminderDevices.push({ objectId: d.objectId || null, deviceUid: String(d.deviceUid || d.imei || ''), status: d.status });
+      }
+    }
+    if (list.length < pageSize) break;
+  }
+
+  let stopped = 0;
+  let locked = 0;
+  let leftUnlocked = 0;
+  let noLocalContract = 0;
+  let failed = 0;
+  const details: Array<{ deviceUid: string; contractNumber?: string; customerName?: string; outcome: any; error?: string }> = [];
+
+  for (const rd of reminderDevices) {
+    try {
+      const stopResult = await unlockKnoxGuardDevice({
+        objectId: rd.objectId || undefined,
+        deviceUid: rd.deviceUid,
+        message: 'Reminder acknowledged.',
+      });
+      if (!stopResult.success && !stopResult.dryRun) {
+        failed++;
+        details.push({ deviceUid: rd.deviceUid, outcome: 'STOP_FAILED', error: stopResult.error });
+        continue;
+      }
+      stopped++;
+
+      const device = await prismaAny.managedDevice.findFirst({
+        where: {
+          OR: [
+            ...(rd.objectId ? [{ knoxObjectId: rd.objectId }] : []),
+            { deviceUid: rd.deviceUid },
+          ],
+        },
+        include: {
+          contract: {
+            include: {
+              installments: true,
+              penalties: true,
+              customer: { select: { firstName: true, lastName: true } },
+            },
+          },
+        },
+      });
+
+      if (!device || !device.contract) {
+        noLocalContract++;
+        details.push({ deviceUid: rd.deviceUid, outcome: 'STOPPED_NO_CONTRACT' });
+        continue;
+      }
+
+      const contract = device.contract;
+      const customerName = `${contract.customer.firstName} ${contract.customer.lastName}`.trim();
+
+      if (contract.status !== 'ACTIVE') {
+        leftUnlocked++;
+        details.push({ deviceUid: rd.deviceUid, contractNumber: contract.contractNumber, customerName, outcome: 'STOPPED_NOT_ACTIVE' });
+        continue;
+      }
+
+      const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
+      const isOverdueEnoughToLock = metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
+
+      if (!isOverdueEnoughToLock) {
+        leftUnlocked++;
+        details.push({ deviceUid: rd.deviceUid, contractNumber: contract.contractNumber, customerName, outcome: 'STOPPED_NOT_OVERDUE' });
+        continue;
+      }
+
+      const lockResult = await requestManagedDeviceLock(contract.id);
+      if (lockResult.success || lockResult.dryRun) {
+        locked++;
+        details.push({ deviceUid: rd.deviceUid, contractNumber: contract.contractNumber, customerName, outcome: 'STOPPED_AND_LOCKED' });
+      } else {
+        failed++;
+        details.push({ deviceUid: rd.deviceUid, contractNumber: contract.contractNumber, customerName, outcome: 'LOCK_FAILED', error: lockResult.error });
+      }
+    } catch (error: any) {
+      failed++;
+      details.push({ deviceUid: rd.deviceUid, outcome: 'ERROR', error: error?.message || 'Unknown error' });
+    }
+  }
+
+  return { onReminder: reminderDevices.length, stopped, locked, leftUnlocked, noLocalContract, failed, details };
 }
 
 export async function getDeviceControlPolicySummary() {
@@ -2410,8 +2495,24 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const deviceIsBlinking = contract.managedDevice.lastKnoxAction === 'BLINK_DEVICE';
   // A contract can get evaluated more than once in a day (an event-driven
   // trigger plus the daily proactive sweep) — without this a customer could
-  // be buzzed twice in one morning for the same still-unpaid installment.
-  const alreadyBlinkedToday = deviceIsBlinking && isSameCalendarDay(contract.managedDevice.lastEvaluatedAt);
+  // be buzzed twice for the same still-unpaid installment. Checked against
+  // the durable KnoxActionLog rather than lastKnoxAction: the reminder's own
+  // scheduled stop (an hour later) flips lastKnoxAction to UNLOCK_DEVICE
+  // later the same day, so that snapshot field alone can't be trusted to
+  // remember a blink already happened today.
+  let alreadyBlinkedToday = false;
+  if (shouldBlink) {
+    const recentBlink = await prismaAny.knoxActionLog.findFirst({
+      where: {
+        managedDeviceId: contract.managedDevice.id,
+        actionType: 'BLINK_DEVICE',
+        success: true,
+        createdAt: { gte: todayAtMidnight() },
+      },
+      select: { id: true },
+    });
+    alreadyBlinkedToday = Boolean(recentBlink);
+  }
   const arrearsCleared = metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
   const shouldStopBlink = deviceIsBlinking && arrearsCleared && !hasUpcomingPaymentDue;
   const shouldUnlock = (deviceIsLockedOrPending || shouldStopBlink) && arrearsCleared;
@@ -2463,7 +2564,12 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     actionType = shouldStopBlink && actualState !== 'LOCKED' ? 'STOP_REMINDER' : 'UNLOCK_DEVICE';
     retryPayload = { message: unlockMessage };
     if (actionResult.success || actionResult.dryRun) nextActualState = 'UNLOCKED';
-  } else if (shouldBlink && contract.managedDevice.desiredState !== 'LOCKED' && !alreadyBlinkedToday) {
+  } else if (
+    shouldBlink &&
+    contract.managedDevice.desiredState !== 'LOCKED' &&
+    actualState !== 'LOCKED' &&
+    !alreadyBlinkedToday
+  ) {
     const blinkPayload = buildBlinkCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
     actionResult = await blinkKnoxGuardDevice({
       ...identifier,
@@ -2474,7 +2580,17 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     });
     actionType = 'BLINK_DEVICE';
     retryPayload = { ...blinkPayload };
-    if (actionResult.success || actionResult.dryRun) await stopBlinkRepeat(identifier, contract.managedDevice.id);
+    // Let it show for a while instead of vanishing instantly, then cancel it
+    // explicitly — via the same durable, DB-backed queue the 5-minute
+    // processor already drains, so the stop survives a restart.
+    if (actionResult.success || actionResult.dryRun) {
+      await queueManagedDeviceCommand(
+        contract.managedDevice.id,
+        'UNLOCK_DEVICE',
+        { message: 'Reminder acknowledged.' },
+        REMINDER_STOP_AFTER_MS
+      );
+    }
   } else if (!shouldLock && contract.managedDevice.actualState === 'UNKNOWN' && !contract.managedDevice.lastSyncedAt) {
     actionResult = await lookupKnoxGuardDevice(identifier);
     actionType = 'SYNC_DEVICE';
@@ -3107,7 +3223,8 @@ async function markCommandFailure(commandId: string, attempts: number, errorMess
 }
 
 export async function processPendingManagedDeviceCommands(limit: number = 10): Promise<CommandProcessSummary> {
-  const { maxCommandRetries } = await getKnoxSettings();
+  const kSettings = await getKnoxSettings();
+  const { maxCommandRetries } = kSettings;
   const commands = await prismaAny.managedDeviceCommand.findMany({
     where: {
       status: { in: ['PENDING', 'FAILED'] },
@@ -3124,6 +3241,8 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
             include: {
               customer: true,
               inventoryItem: true,
+              installments: true,
+              penalties: true,
             },
           },
         },
@@ -3156,6 +3275,51 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
     const attempts = command.attempts + 1;
     let result;
 
+    // A queued blink can go stale between when it was queued (on a failed
+    // immediate dispatch) and this retry, minutes to hours later — if the
+    // account went overdue or the device got locked in the meantime, the
+    // reminder is no longer appropriate. Re-check against current data
+    // instead of blindly firing the stale payload.
+    if (command.type === 'BLINK_DEVICE') {
+      const contract = command.managedDevice.contract;
+      const metrics = contract ? calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties) : null;
+      const stillEligible = Boolean(
+        contract?.status === 'ACTIVE' &&
+        metrics &&
+        metrics.overdueAmount === 0 &&
+        command.managedDevice.actualState !== 'LOCKED'
+      );
+      if (!stillEligible) {
+        await prismaAny.managedDeviceCommand.update({
+          where: { id: command.id },
+          data: {
+            status: 'SUCCEEDED',
+            response: JSON.stringify({ skipped: true, reason: 'No longer eligible — account is overdue, locked, or no longer active.' }),
+            completedAt: new Date(),
+            errorMessage: null,
+            nextAttemptAt: null,
+          },
+        });
+        summary.succeeded += 1;
+        summary.results.push({ commandId: command.id, type: command.type, status: 'SUCCEEDED', dryRun: false, error: null });
+        await logKnoxAction({
+          managedDeviceId: command.managedDevice.id,
+          contractId: contract?.id ?? null,
+          contractNumber: contract?.contractNumber ?? null,
+          actionType: 'BLINK_DEVICE',
+          source: 'RETRY_QUEUE',
+          success: true,
+          dryRun: false,
+          desiredState: command.managedDevice.desiredState,
+          actualStateBefore: command.managedDevice.actualState,
+          actualStateAfter: command.managedDevice.actualState,
+          error: 'Skipped — no longer eligible for a reminder (overdue/locked/inactive).',
+          transactionId: null,
+        });
+        continue;
+      }
+    }
+
     try {
       switch (command.type as ManagedDeviceCommandType) {
         case 'APPROVE_DEVICE':
@@ -3172,8 +3336,17 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
             interval: Number(payload.interval || BLINK_INTERVAL_SECONDS),
             timeLimitEnable: Boolean(payload.timeLimitEnable || false),
           });
-          // Fire once, not a repeating hourly nag — see stopBlinkRepeat.
-          if (result.success || result.dryRun) await stopBlinkRepeat(identifier, command.managedDevice.id);
+          // Let it show for a while instead of vanishing instantly, then
+          // cancel it explicitly rather than leaving Knox's own repeat to
+          // keep firing indefinitely.
+          if (result.success || result.dryRun) {
+            await queueManagedDeviceCommand(
+              command.managedDevice.id,
+              'UNLOCK_DEVICE',
+              { message: 'Reminder acknowledged.' },
+              REMINDER_STOP_AFTER_MS
+            );
+          }
           break;
         case 'LOCK_DEVICE':
           result = await lockKnoxGuardDevice({
