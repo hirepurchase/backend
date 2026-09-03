@@ -1048,6 +1048,23 @@ export async function getAgentDashboard(req: AuthenticatedRequest, res: Response
       .flatMap(c => c.installments)
       .filter(i => i.status === 'OVERDUE').length;
 
+    // Installments due tomorrow — surfaced so agents can follow up before
+    // a payment goes overdue, not just after.
+    const tomorrowStart = new Date();
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+    tomorrowStart.setHours(0, 0, 0, 0);
+    const tomorrowEnd = new Date(tomorrowStart);
+    tomorrowEnd.setHours(23, 59, 59, 999);
+
+    const upcomingDueTomorrow = contracts
+      .filter(c => c.status === 'ACTIVE')
+      .flatMap(c => c.installments)
+      .filter(i =>
+        (i.status === 'PENDING' || i.status === 'PARTIAL') &&
+        new Date(i.dueDate) >= tomorrowStart &&
+        new Date(i.dueDate) <= tomorrowEnd
+      ).length;
+
     // Next upcoming installment due across all active contracts
     const upcoming = contracts
       .filter(c => c.status === 'ACTIVE')
@@ -1098,6 +1115,7 @@ export async function getAgentDashboard(req: AuthenticatedRequest, res: Response
       },
       alerts: {
         overdueInstallments,
+        upcomingDueTomorrow,
         revisionsPending: revisionContracts,
         pendingApproval: pendingContracts,
       },
@@ -1178,5 +1196,64 @@ export async function getAgentOverdueInstallments(req: AuthenticatedRequest, res
   } catch (error) {
     console.error('Get agent overdue installments error:', error);
     res.status(500).json({ error: 'Failed to fetch overdue installments' });
+  }
+}
+
+// Agent's installments due tomorrow — one row per upcoming installment, so
+// the agent can proactively call the customer on the company's behalf before
+// the payment goes overdue rather than only after.
+export async function getAgentUpcomingInstallments(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const agentId = req.user!.id;
+
+    const tomorrowStart = new Date();
+    tomorrowStart.setDate(tomorrowStart.getDate() + 1);
+    tomorrowStart.setHours(0, 0, 0, 0);
+    const tomorrowEnd = new Date(tomorrowStart);
+    tomorrowEnd.setHours(23, 59, 59, 999);
+
+    const contracts = await prisma.hirePurchaseContract.findMany({
+      where: { createdById: agentId, status: 'ACTIVE' },
+      include: {
+        customer: { select: { id: true, firstName: true, lastName: true, membershipId: true, phone: true } },
+        inventoryItem: { include: { product: { select: { name: true } } } },
+        installments: {
+          where: {
+            status: { in: ['PENDING', 'PARTIAL'] },
+            dueDate: { gte: tomorrowStart, lte: tomorrowEnd },
+          },
+          orderBy: { dueDate: 'asc' },
+        },
+      },
+    });
+
+    const rows = contracts.flatMap((contract) =>
+      contract.installments.map((installment) => ({
+        contractId: contract.id,
+        contractNumber: contract.contractNumber,
+        installmentId: installment.id,
+        installmentNo: installment.installmentNo,
+        customer: {
+          id: contract.customer.id,
+          name: `${contract.customer.firstName} ${contract.customer.lastName}`.trim(),
+          phone: contract.customer.phone,
+          membershipId: contract.customer.membershipId,
+        },
+        product: contract.inventoryItem?.product?.name ?? null,
+        amountDue: Math.round((installment.amount - installment.paidAmount) * 100) / 100,
+        dueDate: installment.dueDate,
+      }))
+    );
+
+    rows.sort((a, b) => a.customer.name.localeCompare(b.customer.name));
+
+    res.json({
+      count: rows.length,
+      totalUpcomingAmount: Math.round(rows.reduce((sum, r) => sum + r.amountDue, 0) * 100) / 100,
+      installments: rows,
+    });
+  } catch (error) {
+    console.error('Get agent upcoming installments error:', error);
+    res.status(500).json({ error: 'Failed to fetch upcoming installments' });
   }
 }
