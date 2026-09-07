@@ -240,6 +240,14 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
             phone: true,
           },
         },
+        createdBy: {
+          select: {
+            id: true,
+            firstName: true,
+            lastName: true,
+            phone: true,
+          },
+        },
         inventoryItem: {
           include: {
             product: {
@@ -281,6 +289,11 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
           outstandingBalance: contract.outstandingBalance,
         },
         customer: contract.customer,
+        agent: {
+          id: contract.createdBy.id,
+          name: `${contract.createdBy.firstName} ${contract.createdBy.lastName}`.trim(),
+          phone: contract.createdBy.phone,
+        },
         product: contract.inventoryItem?.product,
         overdueInstallments: overdueInstallments.length,
         totalOverdueAmount,
