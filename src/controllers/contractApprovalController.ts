@@ -18,6 +18,7 @@ import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../typ
 import { calculateInstallmentSchedule, calculateEndDate } from '../utils/helpers';
 import {
   resolveContractScope,
+  resolveCustomerScope,
   applyCreatorScope,
   scopeAllows,
   CreatorScope,
@@ -912,6 +913,7 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
     const admin = req.user as AdminUserPayload;
     const { id } = req.params;
     const {
+      customerId,
       totalPrice,
       depositAmount,
       paymentFrequency,
@@ -925,6 +927,14 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
       where: { id, createdById: admin.id },
       include: {
         _count: { select: { payments: true } },
+        customer: {
+          select: {
+            id: true,
+            id_uuid: true,
+            firstName: true,
+            lastName: true,
+          },
+        },
         inventoryItem: {
           select: {
             productId: true,
@@ -950,6 +960,32 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
         error: 'This contract already has recorded payments. Resolve the payments before editing it for resubmission.',
       });
       return;
+    }
+
+    // A revision is often requested precisely because the wrong customer was
+    // picked, so allow reassigning it here. The client sends Customer.id (what
+    // the customer picker exposes); the contract FK is Customer.id_uuid.
+    let nextCustomerUuid: string | null = null;
+    if (customerId !== undefined && String(customerId) !== contract.customer.id) {
+      const nextCustomer = await prisma.customer.findUnique({
+        where: { id: String(customerId) },
+        select: { id: true, id_uuid: true, createdById: true, firstName: true, lastName: true },
+      });
+
+      if (!nextCustomer || !nextCustomer.id_uuid) {
+        res.status(400).json({ error: 'Selected customer could not be found.' });
+        return;
+      }
+
+      // Never trust the submitted id: an agent may only attach a customer
+      // their own scope covers, regardless of what the picker offered.
+      const customerScope = await resolveCustomerScope(admin);
+      if (!scopeAllows(customerScope, nextCustomer.createdById)) {
+        res.status(403).json({ error: 'You do not have access to that customer.' });
+        return;
+      }
+
+      nextCustomerUuid = nextCustomer.id_uuid;
     }
 
     // Same restriction as contract creation — otherwise resubmission is a way
@@ -1007,6 +1043,9 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
       gracePeriodDays: contract.gracePeriodDays,
       penaltyPercentage: contract.penaltyPercentage,
       startDate: contract.startDate,
+      ...(nextCustomerUuid
+        ? { customer: `${contract.customer.firstName} ${contract.customer.lastName}`.trim() }
+        : {}),
     };
 
     const updated = await prisma.$transaction(async (tx) => {
@@ -1025,6 +1064,7 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
       return tx.hirePurchaseContract.update({
         where: { id },
         data: {
+          ...(nextCustomerUuid ? { customerId_uuid: nextCustomerUuid } : {}),
           totalPrice: newTotalPrice,
           depositAmount: newDepositAmount,
           financeAmount: newFinanceAmount,
@@ -1073,6 +1113,9 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
         gracePeriodDays: newGracePeriod,
         penaltyPercentage: newPenaltyPct,
         startDate: newStartDate,
+        ...(nextCustomerUuid
+          ? { customer: `${updated.customer.firstName} ${updated.customer.lastName}`.trim() }
+          : {}),
         editedBy: admin.id,
       },
       ipAddress: req.ip,
