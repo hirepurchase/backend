@@ -220,6 +220,32 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
       return;
     }
 
+    const { startDate, endDate, agentId, productId, minDaysOverdue, maxDaysOverdue } = req.query;
+
+    // Every filter here is applied to the computed rows below rather than to
+    // the query: the date and day-count filters key off values that only exist
+    // after the per-contract rollup, and keeping agent/product with them means
+    // the unfiltered set is still available to build the dropdown options from.
+    const fromDate = startDate ? new Date(startDate as string) : null;
+    const toDate = endDate ? new Date(endDate as string) : null;
+    if (toDate) toDate.setHours(23, 59, 59, 999);
+
+    if ((fromDate && Number.isNaN(fromDate.getTime())) || (toDate && Number.isNaN(toDate.getTime()))) {
+      res.status(400).json({ error: 'Invalid date filter' });
+      return;
+    }
+
+    const minDays = minDaysOverdue !== undefined && minDaysOverdue !== '' ? Number(minDaysOverdue) : null;
+    const maxDays = maxDaysOverdue !== undefined && maxDaysOverdue !== '' ? Number(maxDaysOverdue) : null;
+
+    if ((minDays !== null && Number.isNaN(minDays)) || (maxDays !== null && Number.isNaN(maxDays))) {
+      res.status(400).json({ error: 'Days overdue filters must be numbers' });
+      return;
+    }
+
+    const agentFilter = agentId ? String(agentId) : null;
+    const productFilter = productId ? String(productId) : null;
+
     // Get all active contracts with overdue installments
     const contracts = await prisma.hirePurchaseContract.findMany({
       where: {
@@ -304,24 +330,56 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
       };
     });
 
+    // Built from the unfiltered set so the dropdowns don't lose the option the
+    // user is currently filtering by.
+    const agentOptions = Array.from(
+      new Map(defaulters.map((d) => [d.agent.id, { id: d.agent.id, name: d.agent.name }])).values()
+    ).sort((a, b) => a.name.localeCompare(b.name));
+
+    const productOptions = Array.from(
+      new Map(
+        defaulters
+          .filter((d) => d.product?.id)
+          .map((d) => [d.product!.id, { id: d.product!.id, name: d.product!.name }])
+      ).values()
+    ).sort((a, b) => a.name.localeCompare(b.name));
+
+    const filtered = defaulters.filter((d) => {
+      if (fromDate || toDate) {
+        if (!d.oldestOverdueDate) return false;
+        const began = new Date(d.oldestOverdueDate);
+        if (fromDate && began < fromDate) return false;
+        if (toDate && began > toDate) return false;
+      }
+      if (agentFilter && d.agent.id !== agentFilter) return false;
+      if (productFilter && d.product?.id !== productFilter) return false;
+      if (minDays !== null && d.daysOverdue < minDays) return false;
+      if (maxDays !== null && d.daysOverdue > maxDays) return false;
+      return true;
+    });
+
     // Sort by days overdue
-    defaulters.sort((a, b) => b.daysOverdue - a.daysOverdue);
+    filtered.sort((a, b) => b.daysOverdue - a.daysOverdue);
 
     const summary = {
-      totalDefaulters: defaulters.length,
-      totalOverdueAmount: defaulters.reduce((sum, d) => sum + d.totalOverdueAmount, 0),
-      totalPenalties: defaulters.reduce((sum, d) => sum + d.unpaidPenalties, 0),
+      totalDefaulters: filtered.length,
+      totalOverdueAmount: filtered.reduce((sum, d) => sum + d.totalOverdueAmount, 0),
+      totalPenalties: filtered.reduce((sum, d) => sum + d.unpaidPenalties, 0),
       byDaysOverdue: {
-        '1-7 days': defaulters.filter(d => d.daysOverdue >= 1 && d.daysOverdue <= 7).length,
-        '8-30 days': defaulters.filter(d => d.daysOverdue >= 8 && d.daysOverdue <= 30).length,
-        '31-60 days': defaulters.filter(d => d.daysOverdue >= 31 && d.daysOverdue <= 60).length,
-        '60+ days': defaulters.filter(d => d.daysOverdue > 60).length,
+        '1-7 days': filtered.filter(d => d.daysOverdue >= 1 && d.daysOverdue <= 7).length,
+        '8-30 days': filtered.filter(d => d.daysOverdue >= 8 && d.daysOverdue <= 30).length,
+        '31-60 days': filtered.filter(d => d.daysOverdue >= 31 && d.daysOverdue <= 60).length,
+        '60+ days': filtered.filter(d => d.daysOverdue > 60).length,
       },
     };
 
     const payload = {
       summary,
-      defaulters,
+      defaulters: filtered,
+      filterOptions: {
+        agents: agentOptions,
+        products: productOptions,
+      },
     };
 
     setCache(cacheKey, payload, REPORT_CACHE_TTL_SECONDS);
