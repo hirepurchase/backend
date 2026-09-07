@@ -582,6 +582,17 @@ function buildLockMessage(
   return buildDeviceStatusMessage({ overdueAmount, maxDaysOverdue }, customerExperience, 'LOCK');
 }
 
+// The customer is not in arrears here — their agent has not remitted the
+// deposit — so the standard "your payment is overdue" wording would be wrong
+// and would send them chasing a debt they do not owe.
+function buildAgentDepositLockMessage(customerExperience: DeviceControlCustomerExperience): string {
+  const support = customerExperience.supportPhone;
+  const message = support
+    ? `Your agent has not paid your DOWN DEPOSIT to the Company. Please contact your agent or AIDOO TECH support on ${support}.`
+    : 'Your agent has not paid your DOWN DEPOSIT to the Company. Please contact your agent or AIDOO TECH support.';
+  return message.slice(0, DEVICE_MESSAGE_MAX_LENGTH);
+}
+
 function parseJsonSafely(value: string | null | undefined): Record<string, unknown> | null {
   if (!value) return null;
 
@@ -956,12 +967,19 @@ function decorateStandaloneManagedDevice<T extends { metadata?: string | null }>
   };
 }
 
-function buildLockCommandPayload(contract: any, metrics: { overdueAmount: number; maxDaysOverdue: number }, defaults: DeviceControlEnrollmentDefaults) {
+function buildLockCommandPayload(
+  contract: any,
+  metrics: { overdueAmount: number; maxDaysOverdue: number },
+  defaults: DeviceControlEnrollmentDefaults,
+  reason: 'ARREARS' | 'AGENT_DEPOSIT' = 'ARREARS'
+) {
   const customerExperience = extractCustomerExperience(parseJsonSafely(contract.managedDevice?.metadata), defaults);
   const customerPhone = contract.customer?.phone || null;
 
   return {
-    message: buildLockMessage(contract, metrics.overdueAmount, metrics.maxDaysOverdue, customerExperience),
+    message: reason === 'AGENT_DEPOSIT'
+      ? buildAgentDepositLockMessage(customerExperience)
+      : buildLockMessage(contract, metrics.overdueAmount, metrics.maxDaysOverdue, customerExperience),
     tel: customerExperience.supportPhone || undefined,
     warningMessage: customerExperience.warningMessage,
     blockIncomingCalls: BLOCK_INCOMING_CALLS_ON_LOCK,
@@ -1031,6 +1049,7 @@ async function getContractWithDevice(contractId: string) {
       penalties: {
         where: { isPaid: false },
       },
+      agentLedger: true,
       managedDevice: {
         include: {
           commands: {
@@ -1244,8 +1263,14 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
   checked: number;
   alreadyLocked: number;
   relocked: number;
+  skippedNoLongerDue: number;
   failed: number;
-  details: Array<{ contractNumber: string; customerName: string; outcome: 'ALREADY_LOCKED' | 'RELOCKED' | 'FAILED'; error?: string }>;
+  details: Array<{
+    contractNumber: string;
+    customerName: string;
+    outcome: 'ALREADY_LOCKED' | 'RELOCKED' | 'SKIPPED_NO_LONGER_DUE' | 'FAILED';
+    error?: string;
+  }>;
 }> {
   const kSettings = await getKnoxSettings();
   const contracts = await prismaAny.hirePurchaseContract.findMany({
@@ -1256,6 +1281,7 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
     include: {
       installments: true,
       penalties: true,
+      agentLedger: true,
       customer: { select: { firstName: true, lastName: true } },
       managedDevice: true,
     },
@@ -1264,15 +1290,24 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
   let checked = 0;
   let alreadyLocked = 0;
   let relocked = 0;
+  let skippedNoLongerDue = 0;
   let failed = 0;
-  const details: Array<{ contractNumber: string; customerName: string; outcome: 'ALREADY_LOCKED' | 'RELOCKED' | 'FAILED'; error?: string }> = [];
+  const details: Array<{
+    contractNumber: string;
+    customerName: string;
+    outcome: 'ALREADY_LOCKED' | 'RELOCKED' | 'SKIPPED_NO_LONGER_DUE' | 'FAILED';
+    error?: string;
+  }> = [];
 
   for (const contract of contracts) {
     if (!contract.managedDevice) continue;
 
     const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
     const isOverdueEnoughToLock = metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
-    if (!isOverdueEnoughToLock) continue;
+    // An unremitted agent deposit holds the device on its own, so these belong
+    // in the sweep even when the customer owes nothing.
+    const agentDepositUnpaid = !!contract.agentLedger && contract.agentLedger.outstandingBalance > 0;
+    if (!isOverdueEnoughToLock && !agentDepositUnpaid) continue;
 
     checked++;
     const customerName = `${contract.customer.firstName} ${contract.customer.lastName}`.trim();
@@ -1286,6 +1321,34 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
     }
 
     try {
+      // The contract list above is a snapshot taken when the sweep started,
+      // and a full pass takes many minutes. Customers pay during that window —
+      // evaluate then correctly unlocks them, and locking off the stale
+      // snapshot would put a paid-up customer straight back behind a lock
+      // screen (confirmed: three were wrongly locked this way on 2026-09-05).
+      // Re-read the arrears immediately before acting on them.
+      const fresh = await prismaAny.hirePurchaseContract.findUnique({
+        where: { id: contract.id },
+        include: { installments: true, penalties: true, agentLedger: true },
+      });
+
+      if (!fresh || fresh.status !== 'ACTIVE') {
+        skippedNoLongerDue++;
+        details.push({ contractNumber: contract.contractNumber, customerName, outcome: 'SKIPPED_NO_LONGER_DUE' });
+        continue;
+      }
+
+      const freshMetrics = calculateOverdueMetrics(fresh, kSettings.blockOnUnpaidPenalties);
+      const freshDepositUnpaid = !!fresh.agentLedger && fresh.agentLedger.outstandingBalance > 0;
+      const stillOverdue =
+        freshDepositUnpaid ||
+        (freshMetrics.overdueAmount > 0 && freshMetrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays);
+      if (!stillOverdue) {
+        skippedNoLongerDue++;
+        details.push({ contractNumber: contract.contractNumber, customerName, outcome: 'SKIPPED_NO_LONGER_DUE' });
+        continue;
+      }
+
       // Explicitly stop any active reminder before locking — the same
       // sequence confirmed to fix the zombie case, rather than relying on
       // a lock command to implicitly cancel a reminder it may not touch.
@@ -1305,7 +1368,7 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
     }
   }
 
-  return { checked, alreadyLocked, relocked, failed, details };
+  return { checked, alreadyLocked, relocked, skippedNoLongerDue, failed, details };
 }
 
 // Scans the ENTIRE Knox tenant (not just our overdue-enough population) for
@@ -1379,6 +1442,7 @@ export async function stopAllActiveRemindersAndApplyLock(): Promise<{
             include: {
               installments: true,
               penalties: true,
+              agentLedger: true,
               customer: { select: { firstName: true, lastName: true } },
             },
           },
@@ -1401,7 +1465,10 @@ export async function stopAllActiveRemindersAndApplyLock(): Promise<{
       }
 
       const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
-      const isOverdueEnoughToLock = metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays;
+      const agentDepositUnpaid = !!contract.agentLedger && contract.agentLedger.outstandingBalance > 0;
+      const isOverdueEnoughToLock =
+        agentDepositUnpaid ||
+        (metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= kSettings.lockAfterOverdueDays);
 
       if (!isOverdueEnoughToLock) {
         leftUnlocked++;
@@ -2486,7 +2553,14 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   // and the daily proactive evaluate will retry once enrollment progresses.
   const deviceCanAcceptControlCommand = ['PENDING', 'APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(enrollmentStatus);
   const deviceIsLockedOrPending = ['LOCKED', 'PENDING'].includes(actualState);
-  const shouldLock = isOverdueEnoughToLock;
+  // An unremitted agent deposit holds the device regardless of the customer's
+  // own standing. Without this the hold was released by the first evaluation
+  // that ran — the deposit hold is only expressed as desiredState at
+  // enrollment, and evaluate recomputes desiredState from customer arrears
+  // alone, so a contract with nothing overdue unlocked itself the next morning.
+  const agentDepositUnpaid =
+    isActive && !!contract.agentLedger && contract.agentLedger.outstandingBalance > 0;
+  const shouldLock = isOverdueEnoughToLock || agentDepositUnpaid;
   const shouldBlink = PAYMENT_REMINDER_ENABLED && hasUpcomingPaymentDue && !isOverdueEnoughToLock;
   // A blinking reminder keeps showing until Knox is told to stop, and unlock is
   // the command that stops it. Without this, a customer who cleared their
@@ -2513,11 +2587,15 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     });
     alreadyBlinkedToday = Boolean(recentBlink);
   }
-  const arrearsCleared = metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0;
+  const arrearsCleared =
+    metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0 && !agentDepositUnpaid;
   const shouldStopBlink = deviceIsBlinking && arrearsCleared && !hasUpcomingPaymentDue;
   const shouldUnlock = (deviceIsLockedOrPending || shouldStopBlink) && arrearsCleared;
-  // Also unlock if admin explicitly set desiredState=UNLOCKED but device is still locked
-  const pendingAdminUnlock = contract.managedDevice.desiredState === 'UNLOCKED' && actualState === 'LOCKED';
+  // Also unlock if admin explicitly set desiredState=UNLOCKED but device is still
+  // locked — but never while the deposit hold stands, or a stale desiredState
+  // would quietly release it again.
+  const pendingAdminUnlock =
+    contract.managedDevice.desiredState === 'UNLOCKED' && actualState === 'LOCKED' && !agentDepositUnpaid;
   const needsLockCommand = shouldLock
     && deviceCanAcceptControlCommand
     && !['LOCKED', 'PENDING'].includes(actualState);
@@ -2537,7 +2615,14 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   let retryPayload: Record<string, unknown> | null = null;
 
   if (needsLockCommand) {
-    const lockPayload = buildLockCommandPayload(contract, metrics, kSettings as DeviceControlEnrollmentDefaults);
+    // Only when the deposit is the sole reason — if the customer is genuinely
+    // in arrears too, the arrears wording is the one they can act on.
+    const lockPayload = buildLockCommandPayload(
+      contract,
+      metrics,
+      kSettings as DeviceControlEnrollmentDefaults,
+      !isOverdueEnoughToLock && agentDepositUnpaid ? 'AGENT_DEPOSIT' : 'ARREARS'
+    );
     actionResult = await lockKnoxGuardDevice({
       ...identifier,
       message: lockPayload.message,
@@ -2864,8 +2949,21 @@ export async function requestManagedDeviceLock(contractId: string, message?: str
   }
 
   const lockDefaults = await getDeviceControlEnrollmentDefaults();
-  const metrics = calculateOverdueMetrics(contract, (await getKnoxSettings()).blockOnUnpaidPenalties);
-  const lockPayload = buildLockCommandPayload(contract, metrics, lockDefaults);
+  const lockSettings = await getKnoxSettings();
+  const metrics = calculateOverdueMetrics(contract, lockSettings.blockOnUnpaidPenalties);
+  // Whatever triggered this lock, the wording has to match the real reason —
+  // telling a customer who owes nothing that their payment is overdue sends
+  // them chasing a debt that is actually their agent's.
+  const depositIsSoleReason =
+    !!contract.agentLedger &&
+    contract.agentLedger.outstandingBalance > 0 &&
+    !(metrics.overdueAmount > 0 && metrics.maxDaysOverdue >= lockSettings.lockAfterOverdueDays);
+  const lockPayload = buildLockCommandPayload(
+    contract,
+    metrics,
+    lockDefaults,
+    depositIsSoleReason ? 'AGENT_DEPOSIT' : 'ARREARS'
+  );
   const identifier = getManagedDeviceIdentifier(contract.managedDevice);
 
   let result = await lockKnoxGuardDevice({
