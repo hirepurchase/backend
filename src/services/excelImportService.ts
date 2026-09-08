@@ -7,6 +7,7 @@ import {
   generateContractNumber,
   sanitizePhoneNumber,
   validatePhoneNumber,
+  validateCustomerDateOfBirth,
 } from "../utils/helpers";
 
 interface ImportResult {
@@ -94,6 +95,15 @@ export async function importCustomers(
           );
           result.failed++;
           continue;
+        }
+
+        if (row.dateOfBirth) {
+          const dobError = validateCustomerDateOfBirth(row.dateOfBirth);
+          if (dobError) {
+            result.errors.push(`Row ${i + 2}: ${dobError}`);
+            result.failed++;
+            continue;
+          }
         }
 
         // Check if phone already exists

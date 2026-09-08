@@ -147,3 +147,38 @@ export function validatePhoneNumber(phone: string): boolean {
   // Ghana phone numbers are 10 digits starting with 0
   return /^0[235]\d{8}$/.test(sanitized);
 }
+
+export const MINIMUM_CUSTOMER_AGE_YEARS = 20;
+
+/** Whole years completed between `dob` and `at`. */
+export function calculateAge(dob: Date, at: Date = new Date()): number {
+  let age = at.getFullYear() - dob.getFullYear();
+  const monthDiff = at.getMonth() - dob.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && at.getDate() < dob.getDate())) {
+    age--;
+  }
+  return age;
+}
+
+/**
+ * Returns an error message when the date of birth is unusable or puts the
+ * customer under the minimum age, otherwise null. Also rejects unparseable
+ * and future dates, which is how most of the bad rows got in — a date of
+ * birth equal to the registration date, or a mistyped year.
+ */
+export function validateCustomerDateOfBirth(value: unknown): string | null {
+  const dob = new Date(value as string);
+  if (Number.isNaN(dob.getTime())) {
+    return 'Invalid date of birth';
+  }
+
+  const age = calculateAge(dob);
+  if (age < 0) {
+    return 'Date of birth cannot be in the future';
+  }
+  if (age < MINIMUM_CUSTOMER_AGE_YEARS) {
+    return `Customer must be at least ${MINIMUM_CUSTOMER_AGE_YEARS} years old. This date of birth gives an age of ${age}.`;
+  }
+
+  return null;
+}

@@ -5,7 +5,7 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { sendWelcomeNotification } from '../services/notificationService';
 import { AuthenticatedRequest, AdminUserPayload, CustomerPayload } from '../types';
-import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
+import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber, validateCustomerDateOfBirth } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase, ImageCompressionOptions } from '../services/storageService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { resolveCustomerScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
@@ -60,6 +60,14 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
     if (!validatePhoneNumber(normalizedPhone)) {
       res.status(400).json({ error: 'Invalid phone number format' });
       return;
+    }
+
+    if (dateOfBirth) {
+      const dobError = validateCustomerDateOfBirth(dateOfBirth);
+      if (dobError) {
+        res.status(400).json({ error: dobError });
+        return;
+      }
     }
 
     // Check if phone already exists
@@ -378,6 +386,25 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
         res.status(400).json({ error: 'Invalid phone number format' });
         return;
       }
+
+      // Gated separately from UPDATE_CUSTOMER: the phone is the customer's
+      // login and their mobile-money identity, so changing it can redirect
+      // both account access and payment matching. Agents keep the rest of the
+      // edit form. Checked only on an actual change so resubmitting the form
+      // with the phone untouched still works for them.
+      const caller = req.user as AdminUserPayload;
+      const isChangingPhone = normalizedPhone !== existingCustomer.phone;
+      const mayChangePhone =
+        caller.role === 'SUPER_ADMIN' ||
+        hasPermission(caller.permissions, PERMISSIONS.UPDATE_CUSTOMER_PHONE);
+
+      if (isChangingPhone && !mayChangePhone) {
+        res.status(403).json({
+          error: 'You are not permitted to change a customer phone number. Ask an admin or customer service to make this change.',
+        });
+        return;
+      }
+
       const existingPhone = await prisma.customer.findFirst({
         where: { phone: normalizedPhone, NOT: { id } },
       });
@@ -398,7 +425,18 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
     }
     if (address !== undefined) updateData.address = address;
     if (nationalId !== undefined) updateData.nationalId = nationalId;
-    if (dateOfBirth !== undefined) updateData.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : null;
+    if (dateOfBirth !== undefined) {
+      // Enforced on edit too, or the rule would only ever hold until someone
+      // changed the date afterwards.
+      if (dateOfBirth) {
+        const dobError = validateCustomerDateOfBirth(dateOfBirth);
+        if (dobError) {
+          res.status(400).json({ error: dobError });
+          return;
+        }
+      }
+      updateData.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : null;
+    }
     if (guarantorName !== undefined) updateData.guarantorName = guarantorName ? String(guarantorName).trim() : null;
     if (guarantorPhone !== undefined) updateData.guarantorPhone = guarantorPhone ? String(guarantorPhone).trim() : null;
 
@@ -925,6 +963,21 @@ export async function resetCustomerAccount(req: AuthenticatedRequest, res: Respo
 
     // If the phone differs from what's on record, check for conflicts then update it too
     if (phone !== customer.phone) {
+      // Same restriction as updateCustomer — this endpoint writes the phone
+      // too, so without the check it is simply another way for an agent to
+      // change one.
+      const caller = req.user as AdminUserPayload;
+      const mayChangePhone =
+        caller.role === 'SUPER_ADMIN' ||
+        hasPermission(caller.permissions, PERMISSIONS.UPDATE_CUSTOMER_PHONE);
+
+      if (!mayChangePhone) {
+        res.status(403).json({
+          error: 'You are not permitted to change a customer phone number. Ask an admin or customer service to make this change.',
+        });
+        return;
+      }
+
       const conflict = await prisma.customer.findFirst({ where: { phone, NOT: { id } } });
       if (conflict) {
         res.status(409).json({ error: 'That phone number is already registered to another customer' });
