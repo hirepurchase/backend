@@ -1407,6 +1407,7 @@ export async function transferOwnership(req: AuthenticatedRequest, res: Response
       data: {
         ownershipTransferred: true,
         status: 'COMPLETED',
+        completedAt: contract.completedAt ?? new Date(),
       },
     });
 
@@ -2521,6 +2522,7 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
           totalPaid,
           outstandingBalance: Math.max(0, isFullyPaid ? 0 : outstandingBalance),
           status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
+          completedAt: isFullyPaid ? (contract.completedAt ?? new Date()) : null,
         },
       });
     }

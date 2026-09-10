@@ -1328,3 +1328,144 @@ export async function getAgentUpcomingInstallments(req: AuthenticatedRequest, re
     res.status(500).json({ error: 'Failed to fetch upcoming installments' });
   }
 }
+
+/**
+ * Resolves a `YYYY-MM` query param to that calendar month's bounds, defaulting
+ * to the current month. Returns null when the value is unparseable.
+ */
+function resolveMonthRange(value: unknown): { start: Date; end: Date; label: string } | null {
+  const now = new Date();
+  const raw = typeof value === 'string' && value.trim() ? value.trim() : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const match = /^(\d{4})-(\d{2})$/.exec(raw);
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+
+  const start = new Date(year, month - 1, 1, 0, 0, 0, 0);
+  const end = new Date(year, month, 0, 23, 59, 59, 999);
+  return { start, end, label: raw };
+}
+
+// Agent's own completed contracts for a month — the basis for their completion bonus.
+export async function getAgentCompletedContracts(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const agentId = req.user!.id;
+    const range = resolveMonthRange(req.query.month);
+    if (!range) {
+      res.status(400).json({ error: 'Invalid month. Use YYYY-MM.' });
+      return;
+    }
+
+    const contracts = await prisma.hirePurchaseContract.findMany({
+      where: {
+        createdById: agentId,
+        status: 'COMPLETED',
+        completedAt: { gte: range.start, lte: range.end },
+      },
+      include: {
+        customer: { select: { id: true, firstName: true, lastName: true, phone: true, membershipId: true } },
+        inventoryItem: { include: { product: { select: { name: true } } } },
+      },
+      orderBy: { completedAt: 'desc' },
+    });
+
+    res.json({
+      month: range.label,
+      count: contracts.length,
+      totalValue: Math.round(contracts.reduce((sum, c) => sum + c.totalPrice, 0) * 100) / 100,
+      contracts: contracts.map((c) => ({
+        id: c.id,
+        contractNumber: c.contractNumber,
+        customer: {
+          id: c.customer.id,
+          name: `${c.customer.firstName} ${c.customer.lastName}`.trim(),
+          phone: c.customer.phone,
+          membershipId: c.customer.membershipId,
+        },
+        product: c.inventoryItem?.product?.name ?? null,
+        totalPrice: c.totalPrice,
+        startDate: c.startDate,
+        completedAt: c.completedAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Get agent completed contracts error:', error);
+    res.status(500).json({ error: 'Failed to fetch completed contracts' });
+  }
+}
+
+// Admin report — completions per agent for a month, for paying completion bonuses.
+export async function getAgentCompletionsReport(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const range = resolveMonthRange(req.query.month);
+    if (!range) {
+      res.status(400).json({ error: 'Invalid month. Use YYYY-MM.' });
+      return;
+    }
+
+    const contracts = await prisma.hirePurchaseContract.findMany({
+      where: {
+        status: 'COMPLETED',
+        completedAt: { gte: range.start, lte: range.end },
+      },
+      include: {
+        customer: { select: { firstName: true, lastName: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        inventoryItem: { include: { product: { select: { name: true } } } },
+      },
+      orderBy: { completedAt: 'desc' },
+    });
+
+    const byAgent = new Map<string, {
+      agent: { id: string; name: string; phone: string | null };
+      completedCount: number;
+      totalValue: number;
+      contracts: Array<Record<string, unknown>>;
+    }>();
+
+    for (const c of contracts) {
+      const key = c.createdBy.id;
+      if (!byAgent.has(key)) {
+        byAgent.set(key, {
+          agent: {
+            id: c.createdBy.id,
+            name: `${c.createdBy.firstName} ${c.createdBy.lastName}`.trim(),
+            phone: c.createdBy.phone,
+          },
+          completedCount: 0,
+          totalValue: 0,
+          contracts: [],
+        });
+      }
+      const entry = byAgent.get(key)!;
+      entry.completedCount += 1;
+      entry.totalValue = Math.round((entry.totalValue + c.totalPrice) * 100) / 100;
+      entry.contracts.push({
+        contractNumber: c.contractNumber,
+        customerName: `${c.customer.firstName} ${c.customer.lastName}`.trim(),
+        product: c.inventoryItem?.product?.name ?? null,
+        totalPrice: c.totalPrice,
+        completedAt: c.completedAt,
+      });
+    }
+
+    const agents = Array.from(byAgent.values()).sort(
+      (a, b) => b.completedCount - a.completedCount || a.agent.name.localeCompare(b.agent.name)
+    );
+
+    res.json({
+      month: range.label,
+      summary: {
+        totalCompleted: contracts.length,
+        agentsWithCompletions: agents.length,
+        totalValue: Math.round(contracts.reduce((sum, c) => sum + c.totalPrice, 0) * 100) / 100,
+      },
+      agents,
+    });
+  } catch (error) {
+    console.error('Get agent completions report error:', error);
+    res.status(500).json({ error: 'Failed to generate agent completions report' });
+  }
+}

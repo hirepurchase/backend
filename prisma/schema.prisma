@@ -219,6 +219,10 @@ model HirePurchaseContract {
   totalPaid           Float               @default(0)
   outstandingBalance  Float
   ownershipTransferred Boolean            @default(false)
+  // When the contract was actually paid off. Agent completion bonuses are
+  // counted per month, and updatedAt shifts on any later edit, so completion
+  // needs a date of its own.
+  completedAt         DateTime?
   writeOffReason      String?             // Reason provided when contract is written off
   writtenOffAt        DateTime?           // When the write-off was recorded
   writtenOffById      String?             // Admin who performed the write-off

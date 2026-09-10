@@ -453,6 +453,8 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
     if (newOutstandingBalance <= 0.005) {
       contractUpdate.status = 'COMPLETED';
       contractUpdate.outstandingBalance = 0;
+      // Keep the original completion date if it was already completed
+      contractUpdate.completedAt = contract.completedAt ?? new Date();
     }
 
     await tx.hirePurchaseContract.update({
@@ -666,6 +668,9 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
             totalPaid: newTotalPaid,
             outstandingBalance: Math.max(0, isFullyPaid ? 0 : newOutstandingBalance),
             status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
+            // Cleared again by an edit that drops it below the total, so the
+            // month's completion count stays honest.
+            completedAt: isFullyPaid ? (payment.contract.completedAt ?? new Date()) : null,
           },
         });
 
@@ -770,6 +775,7 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
           totalPaid: newTotalPaid,
           outstandingBalance: Math.max(0, isFullyPaid ? 0 : newOutstandingBalance),
           status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
+          completedAt: isFullyPaid ? (payment.contract.completedAt ?? new Date()) : null,
         },
       });
 

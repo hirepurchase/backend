@@ -12,6 +12,8 @@ import {
   getAgentDashboard,
   getAgentOverdueInstallments,
   getAgentUpcomingInstallments,
+  getAgentCompletedContracts,
+  getAgentCompletionsReport,
 } from '../controllers/reportController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { DASHBOARD_ACCESS_PERMISSIONS, DAILY_PAYMENTS_ACCESS_PERMISSIONS, PERMISSIONS } from '../constants/permissions';
@@ -26,6 +28,7 @@ router.get('/dashboard', authenticateAdmin, requireAnyPermission(...DASHBOARD_AC
 router.get('/agent-dashboard', authenticateAdmin, requireAnyPermission(...DASHBOARD_ACCESS_PERMISSIONS), getAgentDashboard);
 router.get('/agent-dashboard/overdue-installments', authenticateAdmin, requireAnyPermission(...DASHBOARD_ACCESS_PERMISSIONS), getAgentOverdueInstallments);
 router.get('/agent-dashboard/upcoming-installments', authenticateAdmin, requireAnyPermission(...DASHBOARD_ACCESS_PERMISSIONS), getAgentUpcomingInstallments);
+router.get('/agent-dashboard/completed-contracts', authenticateAdmin, requireAnyPermission(...DASHBOARD_ACCESS_PERMISSIONS), getAgentCompletedContracts);
 
 // Standard reports (require VIEW_REPORTS permission)
 router.get('/sales', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getSalesReport);
@@ -35,6 +38,8 @@ router.get('/inventory', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIE
 router.get('/preapprovals', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getPreapprovalsReport);
 router.get('/income', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getIncomeReport);
 router.get('/agents', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getAgentReport);
+// Per-agent completions for a month — the basis for completion bonuses
+router.get('/agent-completions', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getAgentCompletionsReport);
 router.get('/daily-payments', authenticateAdmin, requireAnyPermission(...DAILY_PAYMENTS_ACCESS_PERMISSIONS), getDailyPayments);
 
 export default router;
