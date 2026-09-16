@@ -37,6 +37,7 @@ export async function updateKnoxGuardSettings(req: AuthenticatedRequest, res: Re
     const {
       supportPhone,
       lockAfterOverdueDays,
+      temporaryUnlockMaxWeeks,
       blockOnUnpaidPenalties,
       maxCommandRetries,
       commandCron,
@@ -60,6 +61,12 @@ export async function updateKnoxGuardSettings(req: AuthenticatedRequest, res: Re
       res.status(400).json({ error: 'lockAfterOverdueDays must be between 1 and 365' });
       return;
     }
+    // A window longer than a couple of months stops being a supervised
+    // exception and becomes an unsecured loan.
+    if (temporaryUnlockMaxWeeks !== undefined && (temporaryUnlockMaxWeeks < 1 || temporaryUnlockMaxWeeks > 12)) {
+      res.status(400).json({ error: 'temporaryUnlockMaxWeeks must be between 1 and 12' });
+      return;
+    }
     if (maxCommandRetries !== undefined && (maxCommandRetries < 0 || maxCommandRetries > 10)) {
       res.status(400).json({ error: 'maxCommandRetries must be between 0 and 10' });
       return;
@@ -74,6 +81,7 @@ export async function updateKnoxGuardSettings(req: AuthenticatedRequest, res: Re
       data: {
         ...(supportPhone !== undefined ? { supportPhone: supportPhone || null } : {}),
         ...(lockAfterOverdueDays !== undefined ? { lockAfterOverdueDays: Number(lockAfterOverdueDays) } : {}),
+        ...(temporaryUnlockMaxWeeks !== undefined ? { temporaryUnlockMaxWeeks: Number(temporaryUnlockMaxWeeks) } : {}),
         ...(blockOnUnpaidPenalties !== undefined ? { blockOnUnpaidPenalties: Boolean(blockOnUnpaidPenalties) } : {}),
         ...(maxCommandRetries !== undefined ? { maxCommandRetries: Number(maxCommandRetries) } : {}),
         ...(commandCron !== undefined ? { commandCron } : {}),
