@@ -363,6 +363,13 @@ export async function handlePaymentWebhook(req: Request, res: Response): Promise
 }
 
 // Process successful payment
+// Exported so the allocation order can be tested against a real contract
+// rather than a reimplementation of it — the order is what strands customers
+// behind a lock screen when it is wrong.
+export async function processSuccessfulPaymentForTest(paymentId: string): Promise<void> {
+  return processSuccessfulPayment(paymentId);
+}
+
 async function processSuccessfulPayment(paymentId: string): Promise<void> {
   const payment = await prisma.paymentTransaction.findUnique({
     where: { id: paymentId },

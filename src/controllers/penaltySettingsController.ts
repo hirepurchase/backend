@@ -15,6 +15,14 @@ export async function getPenaltyConfig(_req: AuthenticatedRequest, res: Response
   try {
     const settings = await getPenaltySettings();
 
+    // "Hold the device while penalties are unpaid" already exists as
+    // KnoxGuardSettings.blockOnUnpaidPenalties and is what the lock decision
+    // actually reads. Surfaced here rather than duplicated, so the two cannot
+    // disagree about the same question.
+    const knox = await prismaAny.knoxGuardSettings.findFirst({
+      select: { blockOnUnpaidPenalties: true },
+    });
+
     // How much is currently sitting unpaid, so the page shows the consequence
     // of the switch rather than only its position.
     const [unpaid, pastTerm] = await Promise.all([
@@ -27,7 +35,7 @@ export async function getPenaltyConfig(_req: AuthenticatedRequest, res: Response
     ]);
 
     res.json({
-      settings,
+      settings: { ...settings, blockUnlockOnPenalty: knox?.blockOnUnpaidPenalties ?? false },
       stats: {
         unpaidPenaltyTotal:
           Math.round(((unpaid._sum.amount ?? 0) - (unpaid._sum.paidAmount ?? 0)) * 100) / 100,
@@ -95,13 +103,26 @@ export async function updatePenaltyConfig(req: AuthenticatedRequest, res: Respon
         ...(expiryPenaltyRate !== undefined ? { expiryPenaltyRate: Number(expiryPenaltyRate) } : {}),
         ...(expiryGraceDays !== undefined ? { expiryGraceDays: Number(expiryGraceDays) } : {}),
         ...(maxPenaltyPercentage !== undefined ? { maxPenaltyPercentage: Number(maxPenaltyPercentage) } : {}),
-        ...(blockUnlockOnPenalty !== undefined ? { blockUnlockOnPenalty: Boolean(blockUnlockOnPenalty) } : {}),
+
         // Stamped once, the first time it is switched on, and never moved
         // afterwards — it is the line before which nothing can be charged.
         ...(turningOn && !current.activatedAt ? { activatedAt: new Date() } : {}),
         updatedById: admin.id,
       },
     });
+
+    // Written through to the Knox setting the lock decision reads, so this
+    // page stays the single place an admin manages penalty behaviour without
+    // a second flag that could disagree with it.
+    if (blockUnlockOnPenalty !== undefined) {
+      const knox = await prismaAny.knoxGuardSettings.findFirst({ select: { id: true } });
+      if (knox) {
+        await prismaAny.knoxGuardSettings.update({
+          where: { id: knox.id },
+          data: { blockOnUnpaidPenalties: Boolean(blockUnlockOnPenalty) },
+        });
+      }
+    }
 
     await createAuditLog({
       userId: admin.id,
@@ -112,7 +133,12 @@ export async function updatePenaltyConfig(req: AuthenticatedRequest, res: Respon
       newValues: updated as unknown as Record<string, unknown>,
     });
 
-    res.json({ settings: updated });
+    res.json({
+      settings: {
+        ...updated,
+        ...(blockUnlockOnPenalty !== undefined ? { blockUnlockOnPenalty: Boolean(blockUnlockOnPenalty) } : {}),
+      },
+    });
   } catch (error) {
     console.error('Update penalty settings error:', error);
     res.status(500).json({ error: 'Failed to update penalty settings' });

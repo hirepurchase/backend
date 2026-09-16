@@ -43,3 +43,4 @@ FROM (
     GROUP BY "contractId"
 ) sub
 WHERE c."id" = sub."contractId";
+

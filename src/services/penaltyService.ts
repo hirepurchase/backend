@@ -20,7 +20,6 @@ export interface PenaltySettings {
   expiryGraceDays: number;
   maxPenaltyPercentage: number;
   activatedAt: Date | null;
-  blockUnlockOnPenalty: boolean;
 }
 
 const DEFAULTS = {
@@ -30,7 +29,6 @@ const DEFAULTS = {
   expiryGraceDays: 0,
   maxPenaltyPercentage: 50,
   activatedAt: null,
-  blockUnlockOnPenalty: false,
 };
 
 function roundMoney(value: number): number {
