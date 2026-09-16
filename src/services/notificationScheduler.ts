@@ -4,6 +4,7 @@ import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { isOverdue, calculatePenalty } from '../utils/helpers';
 import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices, relockDriftedWrittenOffDevices, runDailyDeviceAudit } from './deviceControlPolicyService';
+import { closeExpiredTemporaryUnlocks, releaseSettledDefaultedUnlocks } from './temporaryUnlockService';
 
 // Mark past-due installments as OVERDUE and apply penalties
 export async function markOverdueInstallments(): Promise<{ updated: number; penalties: number }> {
@@ -272,6 +273,27 @@ export function initializeNotificationScheduler(): void {
     }
   });
 
+  // Close out temporary unlock windows at 8:05 AM — after overdue marking at
+  // 8:00, so a window that ended overnight is judged against installments
+  // whose status reflects today, and before the 8:32 proactive evaluate, which
+  // then applies the relock as part of its ordinary pass.
+  cron.schedule('5 8 * * *', () => {
+    const enqueued = enqueueSingletonJob('temporary-unlock-expiry', async () => {
+      console.log('Running temporary unlock expiry sweep...');
+      const result = await closeExpiredTemporaryUnlocks();
+      console.log(
+        `Temporary unlocks: ${result.examined} expired — ${result.fulfilled} fulfilled, ${result.defaulted} defaulted, ${result.relocked} relocked, ${result.errors} errors`
+      );
+      const settled = await releaseSettledDefaultedUnlocks();
+      if (settled.released > 0) {
+        console.log(`Temporary unlocks: ${settled.released} defaulted guarantee(s) cleared by payment — agent bar lifted`);
+      }
+    });
+    if (!enqueued) {
+      console.log('Skipping temporary unlock expiry - previous job still running');
+    }
+  });
+
   // Run upcoming payment check every day at 9:00 AM
   cron.schedule('0 9 * * *', () => {
     const enqueued = enqueueSingletonJob('notifications-upcoming', async () => {
@@ -297,6 +319,7 @@ export function initializeNotificationScheduler(): void {
   console.log('Notification scheduler initialized');
   console.log('- Overdue installment marking: Daily at 8:00 AM');
   console.log('- Knox proactive device evaluate: Daily at 8:32 AM');
+  console.log('- Temporary unlock expiry sweep: Daily at 8:05 AM');
   console.log('- Knox daily full-fleet device audit: Daily at 8:41 AM');
   console.log('- Upcoming payments check: Daily at 9:00 AM');
   console.log('- Overdue payments check: Daily at 10:00 AM');

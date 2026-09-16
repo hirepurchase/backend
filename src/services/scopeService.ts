@@ -19,13 +19,40 @@ export type CreatorScope =
   | { mode: 'assigned'; agentIds: string[] }
   | { mode: 'none' };
 
-/** Agent ids assigned to a customer service officer. Empty when none are assigned. */
-export async function getAssignedAgentIds(csoId: string): Promise<string[]> {
-  const rows = await prisma.csoAgentAssignment.findMany({
-    where: { csoId },
-    select: { agentId: true },
-  });
-  return rows.map((row) => row.agentId);
+/**
+ * Agent ids a supervisor is responsible for. Empty when none are assigned.
+ *
+ * Covers both supervision lines: customer service officers (CsoAgentAssignment)
+ * and cluster agents (ClusterAgentAssignment). A user only ever appears in one
+ * of the two — each assignment endpoint validates the supervisor's role, and a
+ * user holds exactly one role — so the union cannot mix the two hierarchies.
+ *
+ * A cluster agent also sells, and the list is otherwise a list of *other*
+ * people, so their own id is added: without it the assigned scope would win
+ * over the own scope and hide their own customers and contracts from them.
+ */
+export async function getAssignedAgentIds(supervisorId: string): Promise<string[]> {
+  const [csoRows, clusterRows] = await Promise.all([
+    prisma.csoAgentAssignment.findMany({
+      where: { csoId: supervisorId },
+      select: { agentId: true },
+    }),
+    prisma.clusterAgentAssignment.findMany({
+      where: { clusterAgentId: supervisorId },
+      select: { agentId: true },
+    }),
+  ]);
+
+  const agentIds = new Set<string>([
+    ...csoRows.map((row) => row.agentId),
+    ...clusterRows.map((row) => row.agentId),
+  ]);
+
+  if (clusterRows.length > 0) {
+    agentIds.add(supervisorId);
+  }
+
+  return Array.from(agentIds);
 }
 
 async function resolveScope(
@@ -53,8 +80,16 @@ async function resolveScope(
 
   if (hasPermission(permissions, viewAssigned)) {
     const agentIds = await getAssignedAgentIds(admin.id);
-    // An officer with no assigned agents must see nothing, not everything.
-    return agentIds.length > 0 ? { mode: 'assigned', agentIds } : { mode: 'none' };
+    if (agentIds.length > 0) {
+      return { mode: 'assigned', agentIds };
+    }
+    // Nobody assigned yet. A supervisor who also sells still owns their own
+    // records, so fall back to that rather than blanking their portfolio; a
+    // pure supervisor holds no own-scope permission and still sees nothing.
+    if (hasPermission(permissions, viewOwn)) {
+      return { mode: 'own', userId: admin.id };
+    }
+    return { mode: 'none' };
   }
 
   if (hasPermission(permissions, viewOwn)) {

@@ -53,6 +53,12 @@ model AdminUser {
   csoAssignments        CsoAgentAssignment[]   @relation("CsoAssignments")
   agentAssignedCsos     CsoAgentAssignment[]   @relation("AgentAssignedCsos")
   csoAssignmentsCreated CsoAgentAssignment[]   @relation("CsoAssignmentCreatedBy")
+  clusterAssignments    ClusterAgentAssignment[] @relation("ClusterAssignments")
+  agentCluster          ClusterAgentAssignment?  @relation("AgentCluster")
+  clusterAssignmentsCreated ClusterAgentAssignment[] @relation("ClusterAssignmentCreatedBy")
+  temporaryUnlocksAsAgent   TemporaryUnlockRequest[] @relation("TemporaryUnlockAgent")
+  temporaryUnlocksRequested TemporaryUnlockRequest[] @relation("TemporaryUnlockRequestedBy")
+  temporaryUnlocksReviewed  TemporaryUnlockRequest[] @relation("TemporaryUnlockReviewedBy")
   contactAttempts       ContactAttempt[]       @relation("ContactAttemptOfficer")
   announcementsPosted   StaffAnnouncement[]    @relation("AnnouncementCreatedBy")
   createdAt             DateTime              @default(now())
@@ -76,6 +82,53 @@ model CsoAgentAssignment {
   @@unique([csoId, agentId])
   @@index([csoId])
   @@index([agentId])
+}
+
+// A supervised exception to the arrears lock: a cluster agent asks for a
+// customer's phone to be opened for a fixed window so they can clear what they
+// owe. Whether the override is live is derived from status + expiresAt rather
+// than written onto the device, so it lapses on time even if a job is late.
+model TemporaryUnlockRequest {
+  id                String   @id @default(uuid())
+  contractId        String
+  contract          HirePurchaseContract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  agentId           String   // contract.createdById — barred from new contracts if this defaults
+  agent             AdminUser @relation("TemporaryUnlockAgent", fields: [agentId], references: [id])
+  requestedById     String
+  requestedBy       AdminUser @relation("TemporaryUnlockRequestedBy", fields: [requestedById], references: [id])
+  requestedWeeks    Int
+  reason            String
+  status            String   @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED | FULFILLED | DEFAULTED
+  approvedWeeks     Int?
+  expiresAt         DateTime?
+  arrearsAtApproval Float?
+  reviewedById      String?
+  reviewedBy        AdminUser? @relation("TemporaryUnlockReviewedBy", fields: [reviewedById], references: [id])
+  reviewedAt        DateTime?
+  reviewNote        String?
+  resolvedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([status, expiresAt])
+  @@index([contractId, status])
+  @@index([agentId, status])
+}
+
+// Which agents a cluster agent supervises. Unlike the CSO relation above this
+// is a management line, so an agent belongs to exactly one cluster agent —
+// hence the unique on agentId rather than a composite.
+model ClusterAgentAssignment {
+  id             String    @id @default(uuid())
+  clusterAgentId String
+  clusterAgent   AdminUser @relation("ClusterAssignments", fields: [clusterAgentId], references: [id], onDelete: Cascade)
+  agentId        String    @unique
+  agent          AdminUser @relation("AgentCluster", fields: [agentId], references: [id], onDelete: Cascade)
+  assignedById   String
+  assignedBy     AdminUser @relation("ClusterAssignmentCreatedBy", fields: [assignedById], references: [id])
+  createdAt      DateTime  @default(now())
+
+  @@index([clusterAgentId])
 }
 
 // A phone call to a customer — verification before approval, or collections
@@ -245,6 +298,7 @@ model HirePurchaseContract {
   penalties           Penalty[]
   contactAttempts     ContactAttempt[]
   agentLedger         AgentDepositLedger?
+  temporaryUnlocks    TemporaryUnlockRequest[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
@@ -509,6 +563,7 @@ model KnoxGuardSettings {
   supportPhone                 String?
   lockAfterOverdueDays         Int      @default(1)
   blockOnUnpaidPenalties       Boolean  @default(false)
+  temporaryUnlockMaxWeeks      Int      @default(4)
   maxCommandRetries            Int      @default(3)
   commandCron                  String   @default("*/5 * * * *")
   commandBatchSize             Int      @default(10)

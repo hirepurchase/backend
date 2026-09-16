@@ -23,6 +23,7 @@ import {
   scopeAllows,
   CreatorScope,
 } from '../services/scopeService';
+import { isSellingAgentRole } from '../constants/roles';
 
 const PRIORITY_RANK: Record<string, number> = {
   HIGH: 3,
@@ -992,7 +993,7 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
     // around it. Only blocks an agent switching TO monthly; an approver editing
     // a pending contract is unaffected.
     if (
-      admin.role === 'AGENT' &&
+      isSellingAgentRole(admin.role) &&
       (paymentFrequency ?? contract.paymentFrequency) === 'MONTHLY' &&
       contract.paymentFrequency !== 'MONTHLY'
     ) {

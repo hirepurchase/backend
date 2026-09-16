@@ -1,5 +1,7 @@
 import prisma from '../config/database';
 import { sanitizePhoneNumber } from '../utils/helpers';
+import { isSellingAgentRole } from '../constants/roles';
+import { getAgentDefaultedTemporaryUnlocks } from './temporaryUnlockService';
 
 export type ApprovalPriority = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -188,6 +190,7 @@ function assessContractContext(input: {
   mobileMoneyNumber?: string | null;
   excludeContractId?: string;
   agentOutstandingDeposits?: { count: number; total: number } | null;
+  defaultedTemporaryUnlocks?: Array<{ contractNumber: string; customerName: string }> | null;
 }): ContractGuardrailAssessment {
   const {
     customer,
@@ -200,6 +203,7 @@ function assessContractContext(input: {
     mobileMoneyNumber,
     excludeContractId,
     agentOutstandingDeposits,
+    defaultedTemporaryUnlocks,
   } = input;
 
   const blockers: string[] = [];
@@ -214,6 +218,20 @@ function assessContractContext(input: {
     const depositWord = agentOutstandingDeposits.count === 1 ? 'deposit remittance' : 'deposit remittances';
     blockers.push(
       `You have ${agentOutstandingDeposits.count} unpaid ${depositWord} (GHS ${agentOutstandingDeposits.total.toFixed(2)}) outstanding. Pay your outstanding deposit before you can create another contract.`
+    );
+  }
+
+  // A cluster agent vouched for one of this agent's customers, an admin
+  // granted the unlock window on the strength of it, and the customer still
+  // did not pay. The bar lifts by itself the moment that customer is square —
+  // see releaseSettledDefaultedUnlocks.
+  if (defaultedTemporaryUnlocks && defaultedTemporaryUnlocks.length > 0) {
+    riskFlags.push('DEFAULTED_TEMPORARY_UNLOCK');
+    const names = defaultedTemporaryUnlocks
+      .map((row) => `${row.customerName} (${row.contractNumber})`)
+      .join(', ');
+    blockers.push(
+      `A temporary unlock guaranteed for ${names} expired with the overdue payments still unpaid. You cannot create another contract until that customer clears their arrears.`
     );
   }
 
@@ -368,7 +386,7 @@ export async function evaluateContractSubmissionGuardrails(input: {
     agentRole,
   } = input;
 
-  const [customer, inventoryItem, agentLedgerEntries] = await Promise.all([
+  const [customer, inventoryItem, agentLedgerEntries, defaultedUnlocks] = await Promise.all([
     prisma.customer.findUnique({
       where: { id: customerId },
       select: {
@@ -388,11 +406,14 @@ export async function evaluateContractSubmissionGuardrails(input: {
         productId: true,
       },
     }),
-    agentRole === 'AGENT' && agentId
+    isSellingAgentRole(agentRole) && agentId
       ? prisma.agentDepositLedger.findMany({
           where: { agentId, outstandingBalance: { gt: 0 } },
           select: { outstandingBalance: true },
         })
+      : Promise.resolve([]),
+    isSellingAgentRole(agentRole) && agentId
+      ? getAgentDefaultedTemporaryUnlocks(agentId)
       : Promise.resolve([]),
   ]);
 
@@ -414,6 +435,10 @@ export async function evaluateContractSubmissionGuardrails(input: {
     mobileMoneyNumber,
     excludeContractId,
     agentOutstandingDeposits,
+    defaultedTemporaryUnlocks: defaultedUnlocks.map((row) => ({
+      contractNumber: row.contractNumber,
+      customerName: row.customerName,
+    })),
   });
 }
 

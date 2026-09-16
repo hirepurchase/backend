@@ -48,6 +48,10 @@ export const PERMISSIONS = {
   MANAGE_CONTACT_ATTEMPTS: 'MANAGE_CONTACT_ATTEMPTS',
   SEND_SMS: 'SEND_SMS',
   MANAGE_CSO_ASSIGNMENTS: 'MANAGE_CSO_ASSIGNMENTS',
+  MANAGE_CLUSTER_ASSIGNMENTS: 'MANAGE_CLUSTER_ASSIGNMENTS',
+  REQUEST_TEMPORARY_UNLOCK: 'REQUEST_TEMPORARY_UNLOCK',
+  APPROVE_TEMPORARY_UNLOCK: 'APPROVE_TEMPORARY_UNLOCK',
+  VIEW_TEMPORARY_UNLOCKS: 'VIEW_TEMPORARY_UNLOCKS',
   MANAGE_ANNOUNCEMENTS: 'MANAGE_ANNOUNCEMENTS',
 } as const;
 
@@ -121,6 +125,10 @@ export const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
   { name: PERMISSIONS.MANAGE_CONTACT_ATTEMPTS, description: 'Log and view customer call attempts', category: 'Customers', scope: 'action' },
   { name: PERMISSIONS.SEND_SMS, description: 'Send SMS messages to customers', category: 'Communication', scope: 'action' },
   { name: PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, description: 'Assign agents to customer service officers', category: 'Administration', scope: 'action' },
+  { name: PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS, description: 'Assign agents to cluster agents who supervise them', category: 'Administration', scope: 'action' },
+  { name: PERMISSIONS.REQUEST_TEMPORARY_UNLOCK, description: 'Request a temporary unlock for an overdue customer of a supervised agent', category: 'Contracts', scope: 'action' },
+  { name: PERMISSIONS.APPROVE_TEMPORARY_UNLOCK, description: 'Approve or reject temporary unlock requests', category: 'Contracts', scope: 'action' },
+  { name: PERMISSIONS.VIEW_TEMPORARY_UNLOCKS, description: 'View temporary unlock requests and their outcomes', category: 'Contracts', scope: 'all' },
   { name: PERMISSIONS.MANAGE_ANNOUNCEMENTS, description: 'Post and manage staff announcements shown to agents and CSOs on login', category: 'Administration', scope: 'action' },
 ];
 
@@ -154,6 +162,12 @@ export const DAILY_PAYMENTS_ACCESS_PERMISSIONS = [
   PERMISSIONS.VIEW_DAILY_PAYMENTS,
   PERMISSIONS.VIEW_PAYMENTS,
   PERMISSIONS.VIEW_REPORTS,
+] as const;
+
+export const TEMPORARY_UNLOCK_ACCESS_PERMISSIONS = [
+  PERMISSIONS.VIEW_TEMPORARY_UNLOCKS,
+  PERMISSIONS.APPROVE_TEMPORARY_UNLOCK,
+  PERMISSIONS.REQUEST_TEMPORARY_UNLOCK,
 ] as const;
 
 export const ROLE_DIRECTORY_ACCESS_PERMISSIONS = [

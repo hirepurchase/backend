@@ -26,6 +26,7 @@ import {
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
 import { hasAnyPermission, hasPermission, PERMISSIONS } from '../constants/permissions';
 import { resolveContractScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
+import { isSellingAgentRole } from '../constants/roles';
 
 async function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCreatedById: string | null | undefined): Promise<boolean> {
   const scope = await resolveContractScope(adminUser);
@@ -341,13 +342,13 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
 
     // Agents sell on daily or weekly collections only. The form hides monthly
     // for them, but the form is bypassable — this is what enforces it.
-    if (creatorRole === 'AGENT' && paymentFrequency === 'MONTHLY') {
+    if (isSellingAgentRole(creatorRole) && paymentFrequency === 'MONTHLY') {
       res.status(403).json({ error: 'Agents cannot create monthly contracts. Choose daily or weekly collections.' });
       return;
     }
 
     // Enforce agent assignment: admins can use any device; only the assigned agent is restricted
-    if (creatorRole === 'AGENT' && inventoryItem.assignedAgentId && inventoryItem.assignedAgentId !== req.user!.id) {
+    if (isSellingAgentRole(creatorRole) && inventoryItem.assignedAgentId && inventoryItem.assignedAgentId !== req.user!.id) {
       res.status(403).json({ error: 'This device is assigned to a different agent and cannot be used for this contract.' });
       return;
     }
@@ -356,7 +357,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     const unlockRequested = isTruthyFormValue(unlockOnContract);
     // Agents cannot unlock a pre-locked device at contract creation — the device stays locked
     // until the agent has remitted the deposit amount to the company.
-    const shouldUnlockLockedDeviceOnCreate = unlockRequested && inventoryWasLocked && creatorRole !== 'AGENT';
+    const shouldUnlockLockedDeviceOnCreate = unlockRequested && inventoryWasLocked && !isSellingAgentRole(creatorRole);
 
     const guardrails = await evaluateContractSubmissionGuardrails({
       customerId,
@@ -436,7 +437,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     const hashedPhonePassword = shouldSetPassword ? await bcrypt.hash(normalizedPhone, 12) : null;
 
     // Agents create contracts that require approval before going ACTIVE
-    const requiresApproval = creatorRole === 'AGENT';
+    const requiresApproval = isSellingAgentRole(creatorRole);
     const initialStatus = requiresApproval ? 'PENDING_APPROVAL' : 'ACTIVE';
 
     // Create contract and update inventory in a transaction

@@ -5,6 +5,7 @@ import { initiateHubtelReceiveMoney, formatPhoneForHubtel, HUBTEL_AGENT_DEPOSIT_
 import { generateTransactionRef } from '../utils/helpers';
 import { requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
 import { unlockKnoxGuardDevice } from '../services/knoxGuardService';
+import { SELLING_AGENT_ROLES } from '../constants/roles';
 
 // Unlock the device for a contract after agent deposit is fully paid.
 // Priority order:
@@ -547,7 +548,7 @@ export async function getAdminSummary(req: AuthenticatedRequest, res: Response):
 
     // Get list of agents for filter
     const agents = await prisma.adminUser.findMany({
-      where: { role: { name: 'AGENT' } },
+      where: { role: { name: { in: [...SELLING_AGENT_ROLES] } } },
       select: { id: true, firstName: true, lastName: true, email: true },
       orderBy: { firstName: 'asc' },
     });

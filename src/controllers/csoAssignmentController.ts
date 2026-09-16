@@ -3,9 +3,7 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 
-/** Roles whose created records a customer service officer can be assigned to. */
-const ASSIGNABLE_AGENT_ROLES = ['AGENT', 'SALES_AGENT'];
-const CSO_ROLE = 'CUSTOMER_SERVICE';
+import { ASSIGNABLE_AGENT_ROLES, CUSTOMER_SERVICE_ROLE as CSO_ROLE } from '../constants/roles';
 
 // GET /admin-users/:id/assigned-agents
 export async function getAssignedAgents(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -40,7 +38,7 @@ export async function getAssignedAgents(req: AuthenticatedRequest, res: Response
         orderBy: { createdAt: 'asc' },
       }),
       prisma.adminUser.findMany({
-        where: { isActive: true, role: { name: { in: ASSIGNABLE_AGENT_ROLES } } },
+        where: { isActive: true, role: { name: { in: [...ASSIGNABLE_AGENT_ROLES] } } },
         select: {
           id: true,
           firstName: true,
@@ -122,7 +120,7 @@ export async function setAssignedAgents(req: AuthenticatedRequest, res: Response
     // end up with a narrower portfolio than whoever set it intended.
     if (uniqueAgentIds.length > 0) {
       const agents = await prisma.adminUser.findMany({
-        where: { id: { in: uniqueAgentIds }, isActive: true, role: { name: { in: ASSIGNABLE_AGENT_ROLES } } },
+        where: { id: { in: uniqueAgentIds }, isActive: true, role: { name: { in: [...ASSIGNABLE_AGENT_ROLES] } } },
         select: { id: true },
       });
 
@@ -273,7 +271,7 @@ export async function getCustomerServiceChart(
         },
       }),
       prisma.adminUser.findMany({
-        where: { isActive: true, role: { name: { in: ASSIGNABLE_AGENT_ROLES } } },
+        where: { isActive: true, role: { name: { in: [...ASSIGNABLE_AGENT_ROLES] } } },
         select: { id: true, firstName: true, lastName: true, email: true, phone: true },
         orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
       }),

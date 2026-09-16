@@ -9,6 +9,7 @@ import {
   requestStandaloneInventoryDeviceUnlock,
 } from '../services/deviceControlPolicyService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
+import { isSellingAgentRole } from '../constants/roles';
 
 const KNOX_UPLOAD_POLL_ATTEMPTS = 5;
 const KNOX_UPLOAD_POLL_DELAY_MS = 2000;
@@ -575,8 +576,8 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
         res.status(400).json({ error: 'Assigned agent not found' });
         return;
       }
-      if (agent.role.name !== 'AGENT') {
-        res.status(400).json({ error: 'Assigned user must have the AGENT role' });
+      if (!isSellingAgentRole(agent.role.name)) {
+        res.status(400).json({ error: 'Assigned user must be an agent or cluster agent' });
         return;
       }
     }
@@ -826,8 +827,8 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
         res.status(400).json({ error: 'Assigned agent not found' });
         return;
       }
-      if (agent.role.name !== 'AGENT') {
-        res.status(400).json({ error: 'Assigned user must have the AGENT role' });
+      if (!isSellingAgentRole(agent.role.name)) {
+        res.status(400).json({ error: 'Assigned user must be an agent or cluster agent' });
         return;
       }
     }
@@ -1089,7 +1090,7 @@ export async function getAvailableInventory(req: AuthenticatedRequest, res: Resp
   try {
     const { productId } = req.params;
     const caller = req.user as AdminUserPayload;
-    const isAgent = caller.role === 'AGENT';
+    const isAgent = isSellingAgentRole(caller.role);
 
     const where: Record<string, unknown> = { productId, status: 'AVAILABLE' };
 
@@ -1124,7 +1125,7 @@ export async function getAllInventoryItems(req: AuthenticatedRequest, res: Respo
   try {
     const { page = 1, limit = 50, productId, status, search, lockStatus, knoxUploadStatus } = req.query;
     const caller = req.user as AdminUserPayload;
-    const isAgent = caller.role === 'AGENT';
+    const isAgent = isSellingAgentRole(caller.role);
 
     const where: Record<string, unknown> = {};
 

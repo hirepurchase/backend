@@ -10,6 +10,7 @@ type SeedRoles = {
   adminRole: { id: string; name: string };
   salesRole: { id: string; name: string };
   agentRole: { id: string; name: string };
+  clusterAgentRole: { id: string; name: string };
   customerServiceRole: { id: string; name: string };
 };
 
@@ -61,6 +62,8 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     PERMISSIONS.DELETE_INVENTORY,
     // Assigning agents to officers is a super-admin function.
     PERMISSIONS.MANAGE_CSO_ASSIGNMENTS,
+    PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS,
+    PERMISSIONS.REQUEST_TEMPORARY_UNLOCK,
     // ADMIN already sees every customer/contract via VIEW_CUSTOMERS and
     // VIEW_CONTRACTS; granting the assigned-scope permissions too would be
     // dead weight that only muddies the role editor.
@@ -159,6 +162,38 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     select: { id: true, name: true },
   });
 
+  // Cluster agents supervise a set of agents and also sell, so they get the
+  // full agent permission set plus assigned-scope visibility over their agents.
+  const clusterAgentPermissionNames = new Set<string>([
+    ...agentPermissionNames,
+    PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS,
+    PERMISSIONS.VIEW_ASSIGNED_CONTRACTS,
+    PERMISSIONS.VIEW_DASHBOARD,
+    PERMISSIONS.REQUEST_TEMPORARY_UNLOCK,
+  ]);
+
+  const clusterAgentPermissions = allPermissions
+    .filter((permission) => clusterAgentPermissionNames.has(String(permission.name)))
+    .map((permission) => ({ id: permission.id }));
+
+  const clusterAgentRole = await prisma.role.upsert({
+    where: { name: 'CLUSTER_AGENT' },
+    update: {
+      permissions: {
+        set: clusterAgentPermissions,
+      },
+    },
+    create: {
+      name: 'CLUSTER_AGENT',
+      description: 'Supervises a cluster of agents and their portfolio, and also registers customers and creates contracts',
+      isSystem: true,
+      permissions: {
+        connect: clusterAgentPermissions,
+      },
+    },
+    select: { id: true, name: true },
+  });
+
   const customerServicePermissionNames = new Set<string>([
     PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS,
     PERMISSIONS.VIEW_ASSIGNED_CONTRACTS,
@@ -171,6 +206,7 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     PERMISSIONS.VIEW_DAILY_PAYMENTS,
     PERMISSIONS.SEND_SMS,
     PERMISSIONS.VIEW_DASHBOARD,
+    PERMISSIONS.VIEW_TEMPORARY_UNLOCKS,
   ]);
 
   const customerServicePermissions = allPermissions
@@ -200,6 +236,7 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     adminRole,
     salesRole,
     agentRole,
+    clusterAgentRole,
     customerServiceRole,
   };
 }

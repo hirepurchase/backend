@@ -16,7 +16,8 @@
     "customers:activate-from-contracts": "ts-node src/scripts/activateCustomersFromContracts.ts",
     "customers:normalize-phones": "ts-node src/scripts/normalizeCustomerPhones.ts",
     "customers:resolve-duplicate-phones": "ts-node src/scripts/resolveDuplicatePhones.ts",
-    "knox:diagnose": "ts-node src/scripts/diagnoseStuckDevices.ts"
+    "knox:diagnose": "ts-node src/scripts/diagnoseStuckDevices.ts",
+    "report:missing-guarantors": "ts-node src/scripts/reportMissingGuarantors.ts"
   },
   "keywords": [
     "hirepurchase",

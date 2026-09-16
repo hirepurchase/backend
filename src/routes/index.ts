@@ -18,6 +18,8 @@ import commissionSettingsRoutes from './commissionSettings';
 import agentDepositRoutes from './agentDeposits';
 import contactAttemptRoutes from './contactAttempts';
 import customerServiceRoutes from './customerService';
+import clusterRoutes from './cluster';
+import temporaryUnlockRoutes from './temporaryUnlocks';
 import announcementRoutes from './announcements';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -44,6 +46,8 @@ router.use('/commission-settings', commissionSettingsRoutes);
 router.use('/agent-deposits', agentDepositRoutes);
 router.use('/contact-attempts', contactAttemptRoutes);
 router.use('/customer-service', customerServiceRoutes);
+router.use('/cluster', clusterRoutes);
+router.use('/temporary-unlocks', temporaryUnlockRoutes);
 router.use('/announcements', announcementRoutes);
 
 // Health check

@@ -13,6 +13,10 @@ import {
   getMyCustomerServiceOfficers,
   getCustomerServiceChart,
 } from '../controllers/csoAssignmentController';
+import {
+  getClusterAgents,
+  setClusterAgents,
+} from '../controllers/clusterAssignmentController';
 import { authenticateAdmin, requireAnyPermission, requireSuperAdmin } from '../middleware/auth';
 import {
   PERMISSIONS,
@@ -47,6 +51,18 @@ router.put(
   '/:id/assigned-agents',
   requireAnyPermission(PERMISSIONS.MANAGE_CSO_ASSIGNMENTS),
   setAssignedAgents
+);
+
+// Cluster agent -> agent assignments (also before /:id)
+router.get(
+  '/:id/cluster-agents',
+  requireAnyPermission(PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS, PERMISSIONS.MANAGE_USERS),
+  getClusterAgents
+);
+router.put(
+  '/:id/cluster-agents',
+  requireAnyPermission(PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS),
+  setClusterAgents
 );
 
 router.put('/:id', requireAnyPermission(PERMISSIONS.MANAGE_USERS), updateAdminUser);

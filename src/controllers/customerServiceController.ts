@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { buildApprovalSnapshots } from '../services/contractReviewService';
+import { getLiveTemporaryUnlockDetails } from '../services/temporaryUnlockService';
 import {
   resolveContractScope,
   resolveCustomerScope,
@@ -192,6 +193,7 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
           promiseToPayDate: null as Date | null,
           isUrgent: false,
           urgentReason: null as string | null,
+          temporaryUnlock: null as { expiresAt: Date; daysRemaining: number; arrearsAtApproval: number | null } | null,
           contracts: [] as any[],
         };
         byCustomer.set(key, row);
@@ -281,12 +283,14 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
           promiseToPayDate: null,
           isUrgent: false,
           urgentReason: null,
+          temporaryUnlock: null,
           contracts: [],
         };
         byCustomer.set(issue.customerId, row);
       }
       row.isUrgent = true;
       row.urgentReason = issue.reason;
+      contractIdToRow.set(issue.contractId, row);
       row.contracts.push({
         contractId: issue.contractId,
         contractNumber: issue.contractNumber,
@@ -299,7 +303,34 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
       });
     }
 
+    // A customer inside an approved unlock window outranks everything else on
+    // the list. The window has a fixed end date and the phone relocks if the
+    // arrears are still there when it closes — and the agent who sold the
+    // contract is barred from new business at that point. These are the calls
+    // where a CSO's time actually changes the outcome.
+    const liveUnlocks = await getLiveTemporaryUnlockDetails(Array.from(contractIdToRow.keys()));
+    for (const [contractId, unlock] of liveUnlocks) {
+      const row = contractIdToRow.get(contractId);
+      if (!row) continue;
+      row.isUrgent = true;
+      row.temporaryUnlock = {
+        expiresAt: unlock.expiresAt,
+        daysRemaining: unlock.daysRemaining,
+        arrearsAtApproval: unlock.arrearsAtApproval,
+      };
+      row.urgentReason =
+        unlock.daysRemaining <= 1
+          ? 'Temporary unlock ends today — phone relocks unless arrears are cleared'
+          : `Temporary unlock ends in ${unlock.daysRemaining} days — phone relocks unless arrears are cleared`;
+    }
+
     const rows = Array.from(byCustomer.values()).sort((a, b) => {
+      // Unlock windows first (soonest to close first), then other urgent rows,
+      // then by how far behind the customer is.
+      const aWindow = a.temporaryUnlock ? 1 : 0;
+      const bWindow = b.temporaryUnlock ? 1 : 0;
+      if (aWindow !== bWindow) return bWindow - aWindow;
+      if (aWindow && bWindow) return a.temporaryUnlock.daysRemaining - b.temporaryUnlock.daysRemaining;
       if (a.isUrgent !== b.isUrgent) return a.isUrgent ? -1 : 1;
       return b.daysOverdue - a.daysOverdue;
     });
@@ -307,6 +338,7 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
     res.json({
       count: rows.length,
       urgentCount: rows.filter((row) => row.isUrgent).length,
+      temporaryUnlockCount: rows.filter((row) => row.temporaryUnlock).length,
       overdueInstallmentCount: rows.reduce((sum, row) => sum + row.overdueCount, 0),
       totalOverdueAmount: Math.round(rows.reduce((sum, row) => sum + row.amountOverdue, 0) * 100) / 100,
       customers: rows,
