@@ -188,6 +188,45 @@ export async function updateAdminUser(req: AuthenticatedRequest, res: Response):
       },
     });
 
+    // Deactivation and role changes both break supervision silently: the
+    // assignment rows survive (cascade fires on delete, not on deactivation),
+    // so supervised agents keep pointing at someone who can no longer log in
+    // and appear covered when they are not. Same class of bug as the stale CSO
+    // assignments found on this database earlier.
+    const wasDeactivated = isActive === false && existingUser.isActive === true;
+    const roleChanged = Boolean(roleId) && roleId !== existingUser.roleId;
+
+    if (wasDeactivated || roleChanged) {
+      const [clusterCleared, csoCleared, supervisorCleared] = await Promise.all([
+        // They supervised agents — those agents now have no cluster agent.
+        prisma.clusterAgentAssignment.deleteMany({ where: { clusterAgentId: id } }),
+        prisma.csoAgentAssignment.deleteMany({ where: { csoId: id } }),
+        // They were themselves supervised — drop the row pointing at them.
+        prisma.clusterAgentAssignment.deleteMany({ where: { agentId: id } }),
+      ]);
+
+      const total = clusterCleared.count + csoCleared.count + supervisorCleared.count;
+      if (total > 0) {
+        await createAuditLog({
+          userId: req.user!.id,
+          action: 'CLEAR_ASSIGNMENTS_ON_USER_CHANGE',
+          entity: 'AdminUser',
+          entityId: id,
+          newValues: {
+            reason: wasDeactivated ? 'deactivated' : 'role changed',
+            clusterAgentsUnassigned: clusterCleared.count,
+            csoAgentsUnassigned: csoCleared.count,
+            supervisorLinksRemoved: supervisorCleared.count,
+          },
+        });
+        console.warn(
+          `Assignments cleared for ${existingUser.firstName} ${existingUser.lastName}: ` +
+          `${clusterCleared.count} cluster, ${csoCleared.count} CSO, ${supervisorCleared.count} supervisor link(s). ` +
+          `Those agents now need reassigning.`
+        );
+      }
+    }
+
     await createAuditLog({
       userId: req.user!.id,
       action: 'UPDATE_ADMIN_USER',

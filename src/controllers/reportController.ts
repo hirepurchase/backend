@@ -313,6 +313,11 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
           contractNumber: contract.contractNumber,
           totalPrice: contract.totalPrice,
           outstandingBalance: contract.outstandingBalance,
+          // Penalties sit outside outstandingBalance (which is
+          // totalPrice - totalPaid), so a collections list that omits them
+          // understates what the customer actually has to pay to be clear.
+          penaltyOutstanding: contract.penaltyOutstanding ?? 0,
+          totalDue: Math.round((contract.outstandingBalance + (contract.penaltyOutstanding ?? 0)) * 100) / 100,
         },
         customer: contract.customer,
         agent: {

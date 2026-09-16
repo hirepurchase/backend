@@ -104,9 +104,13 @@ export async function updatePenaltyConfig(req: AuthenticatedRequest, res: Respon
         ...(expiryGraceDays !== undefined ? { expiryGraceDays: Number(expiryGraceDays) } : {}),
         ...(maxPenaltyPercentage !== undefined ? { maxPenaltyPercentage: Number(maxPenaltyPercentage) } : {}),
 
-        // Stamped once, the first time it is switched on, and never moved
-        // afterwards — it is the line before which nothing can be charged.
-        ...(turningOn && !current.activatedAt ? { activatedAt: new Date() } : {}),
+        // Re-stamped on every enable, not only the first. Stamping once meant
+        // switching the feature off for a month to review it and back on again
+        // silently backfilled that whole month in DAILY mode — the exact
+        // retroactive charge this field exists to prevent. Each activation
+        // starts its own floor; charges already written keep their dedupe keys,
+        // so nothing is double-charged.
+        ...(turningOn ? { activatedAt: new Date() } : {}),
         updatedById: admin.id,
       },
     });

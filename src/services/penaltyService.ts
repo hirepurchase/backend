@@ -105,6 +105,34 @@ interface AccrualContract {
   endDate: Date;
   outstandingBalance: number;
   status: string;
+  totalPrice?: number;
+  depositAmount?: number;
+}
+
+/**
+ * What the customer still owed at the end of a given day.
+ *
+ * A daily charge is for a particular day, so it has to be priced on that day's
+ * balance. Pricing every backfilled day at today's figure is wrong in both
+ * directions — too high if the customer has since paid, too low if a
+ * subsequent charge inflated the balance — and produces a schedule nobody can
+ * reconcile against the payment history.
+ */
+function balanceOnDay(
+  contract: AccrualContract,
+  payments: Array<{ amount: number; paymentDate: Date }>,
+  day: Date
+): number {
+  if (contract.totalPrice === undefined || contract.depositAmount === undefined) {
+    // Caller did not supply the history; fall back to the current balance.
+    return contract.outstandingBalance;
+  }
+  const endOfDay = new Date(day);
+  endOfDay.setHours(23, 59, 59, 999);
+  const paidBy = payments
+    .filter((row) => new Date(row.paymentDate).getTime() <= endOfDay.getTime())
+    .reduce((sum, row) => sum + row.amount, 0);
+  return Math.max(0, roundMoney(contract.totalPrice - (contract.depositAmount + paidBy)));
 }
 
 /**
@@ -123,7 +151,10 @@ export async function planExpiryPenaltiesForContract(
    * query per contract, which across 477 past-term contracts meant hundreds of
    * round trips to a remote pooler on every run.
    */
-  existingCharges?: Array<{ dedupeKey: string | null; amount: number }>
+  existingCharges?: Array<{ dedupeKey: string | null; amount: number }>,
+  /** Successful payments on this contract, so a backfilled day can be priced
+   *  on the balance that actually stood on it. */
+  paymentHistory?: Array<{ amount: number; paymentDate: Date }>
 ): Promise<Array<{ dedupeKey: string; periodDate: Date; amount: number; reason: string }>> {
   if (!settings.expiryPenaltyEnabled || settings.expiryPenaltyRate <= 0) return [];
   if (contract.status !== 'ACTIVE') return [];
@@ -179,7 +210,10 @@ export async function planExpiryPenaltiesForContract(
   while (cursor <= cutoff && days < MAX_DAYS_PER_RUN) {
     const key = `expiry:${contract.id}:${dayKey(cursor)}`;
     if (!alreadyCharged.has(key)) {
-      const amount = roundMoney((contract.outstandingBalance * settings.expiryPenaltyRate) / 100);
+      const dayBalance = paymentHistory
+        ? balanceOnDay(contract, paymentHistory, cursor)
+        : contract.outstandingBalance;
+      const amount = roundMoney((dayBalance * settings.expiryPenaltyRate) / 100);
       if (amount > 0) {
         const room = roundMoney(ceiling - chargedSoFar);
         if (room <= 0) break;
@@ -188,7 +222,7 @@ export async function planExpiryPenaltiesForContract(
           dedupeKey: key,
           periodDate: new Date(cursor),
           amount: charge,
-          reason: `Daily penalty for ${dayKey(cursor)} — contract past term with ${roundMoney(contract.outstandingBalance)} outstanding`,
+          reason: `Daily penalty for ${dayKey(cursor)} — contract past term with ${dayBalance} outstanding`,
         });
         chargedSoFar = roundMoney(chargedSoFar + charge);
       }
@@ -248,6 +282,8 @@ export async function accrueExpiryPenalties(options: {
       endDate: true,
       outstandingBalance: true,
       status: true,
+      totalPrice: true,
+      depositAmount: true,
     },
   });
 
@@ -264,6 +300,24 @@ export async function accrueExpiryPenalties(options: {
     const list = chargesByContract.get(row.contractId) ?? [];
     list.push({ dedupeKey: row.dedupeKey, amount: row.amount });
     chargesByContract.set(row.contractId, list);
+  }
+
+  // Only DAILY prices per-day, so only DAILY pays for the payment history —
+  // again as one query for the whole book rather than one per contract.
+  const paymentsByContract = new Map<string, Array<{ amount: number; paymentDate: Date }>>();
+  if (settings.expiryPenaltyMode === PENALTY_MODE.DAILY) {
+    const payments = await prismaAny.paymentTransaction.findMany({
+      where: {
+        status: 'SUCCESS',
+        contractId: { in: contracts.map((c: AccrualContract) => c.id) },
+      },
+      select: { contractId: true, amount: true, paymentDate: true },
+    });
+    for (const row of payments) {
+      const list = paymentsByContract.get(row.contractId) ?? [];
+      list.push({ amount: row.amount, paymentDate: row.paymentDate });
+      paymentsByContract.set(row.contractId, list);
+    }
   }
 
   let contractsCharged = 0;
@@ -286,7 +340,8 @@ export async function accrueExpiryPenalties(options: {
       contract,
       effective,
       today,
-      chargesByContract.get(contract.id) ?? []
+      chargesByContract.get(contract.id) ?? [],
+      paymentsByContract.get(contract.id) ?? (settings.expiryPenaltyMode === PENALTY_MODE.DAILY ? [] : undefined)
     );
     if (planned.length === 0) continue;
 
@@ -385,4 +440,35 @@ export async function allocateToPenalties(
   }
 
   return { applied, remaining };
+}
+
+/**
+ * Rebuilds penalty allocation from scratch for a contract whose payment
+ * history has been edited.
+ *
+ * Editing or deleting a payment rebuilds the installment schedule from the new
+ * total, but left penalty rows exactly as they were — so money that no longer
+ * exists stayed credited against penalties, and a contract could show penalties
+ * paid out of a payment that had since been reduced or deleted. Resets every
+ * penalty, then re-applies whatever is left after the installments.
+ *
+ * Returns the new penalty outstanding so the caller can re-test completion:
+ * a rebuild can revive penalties and must therefore be able to un-complete a
+ * contract, not only complete one.
+ */
+export async function rebuildPenaltyAllocation(
+  contractId: string,
+  leftoverAfterInstallments: number,
+  tx: any = prismaAny
+): Promise<number> {
+  await tx.penalty.updateMany({
+    where: { contractId },
+    data: { paidAmount: 0, isPaid: false, paidAt: null },
+  });
+
+  if (leftoverAfterInstallments > 0) {
+    await allocateToPenalties(contractId, leftoverAfterInstallments, tx);
+  }
+
+  return recomputePenaltyOutstanding(contractId, tx);
 }

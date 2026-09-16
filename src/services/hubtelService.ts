@@ -828,7 +828,14 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
       outstandingBalance: Math.max(0, newOutstandingBalance),
     };
 
-    if (newOutstandingBalance <= 0.005) {
+    // Same rule as the manual path: unpaid penalties block completion, because
+    // completing releases the device and with it any means of collecting them.
+    const penaltyDue = (await tx.hirePurchaseContract.findUnique({
+      where: { id: contract.id },
+      select: { penaltyOutstanding: true },
+    }))?.penaltyOutstanding ?? 0;
+
+    if (newOutstandingBalance <= 0.005 && penaltyDue <= 0.005) {
       contractUpdate.status = 'COMPLETED';
       contractUpdate.outstandingBalance = 0;
     }

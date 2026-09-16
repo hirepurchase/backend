@@ -3,6 +3,7 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { PERMISSIONS, hasPermission } from '../constants/permissions';
+import { resolveContractScope } from '../services/scopeService';
 import { isOverdue } from '../utils/helpers';
 import {
   TEMPORARY_UNLOCK_STATUS,
@@ -10,8 +11,11 @@ import {
   computeExpiry,
 } from '../services/temporaryUnlockService';
 import { evaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
+import { sendSMS } from '../services/notificationService';
 
 const prismaAny = prisma as any;
+
+const LIST_CAP = 500;
 
 function getCaller(req: AuthenticatedRequest): AdminUserPayload {
   return req.user as AdminUserPayload;
@@ -115,6 +119,40 @@ const LIST_INCLUDE = {
   reviewedBy: { select: { firstName: true, lastName: true } },
 };
 
+/**
+ * Tells the cluster agent what was decided. They are field staff who raised
+ * this on someone else's behalf and have already told a customer to expect an
+ * answer — leaving them to poll a page for it is how a customer ends up being
+ * told the wrong thing.
+ */
+async function notifyRequester(
+  request: any,
+  outcome: 'APPROVED' | 'REJECTED',
+  warning: string | null
+): Promise<void> {
+  try {
+    const requester = await prismaAny.adminUser.findUnique({
+      where: { id: request.requestedById },
+      select: { phone: true },
+    });
+    if (!requester?.phone) return;
+
+    const customer = request.contract?.customer
+      ? `${request.contract.customer.firstName} ${request.contract.customer.lastName}`.trim()
+      : 'the customer';
+
+    const message =
+      outcome === 'APPROVED'
+        ? `AIDOO TECH: Temporary unlock APPROVED for ${customer} (${request.contract?.contractNumber ?? ''}) for ${request.approvedWeeks} week(s), until ${new Date(request.expiresAt).toLocaleDateString()}.${warning ? ' NOTE: ' + warning : ' The phone has been opened.'} If the arrears are not cleared by then the phone relocks.`
+        : `AIDOO TECH: Temporary unlock REJECTED for ${customer} (${request.contract?.contractNumber ?? ''}).${request.reviewNote ? ' Reason: ' + request.reviewNote : ''} The phone stays locked.`;
+
+    await sendSMS({ to: requester.phone, message });
+  } catch (error) {
+    // Never let a failed SMS undo a decision that has already been applied.
+    console.error('Failed to notify temporary unlock requester:', error);
+  }
+}
+
 // POST /temporary-unlocks
 export async function createTemporaryUnlockRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
@@ -205,17 +243,28 @@ export async function createTemporaryUnlockRequest(req: AuthenticatedRequest, re
       return;
     }
 
-    const created = await prismaAny.temporaryUnlockRequest.create({
-      data: {
-        contractId,
-        agentId: contract.createdById,
-        requestedById: caller.id,
-        requestedWeeks: weeks,
-        reason: reason.trim(),
-        status: TEMPORARY_UNLOCK_STATUS.PENDING,
-      },
-      include: LIST_INCLUDE,
-    });
+    let created;
+    try {
+      created = await prismaAny.temporaryUnlockRequest.create({
+        data: {
+          contractId,
+          agentId: contract.createdById,
+          requestedById: caller.id,
+          requestedWeeks: weeks,
+          reason: reason.trim(),
+          status: TEMPORARY_UNLOCK_STATUS.PENDING,
+        },
+        include: LIST_INCLUDE,
+      });
+    } catch (error: any) {
+      // The partial unique index caught a request that slipped past the check
+      // above — a double-click, or two people asking at once.
+      if (error?.code === 'P2002') {
+        res.status(409).json({ error: 'A request for this contract already exists' });
+        return;
+      }
+      throw error;
+    }
 
     await createAuditLog({
       userId: caller.id,
@@ -319,20 +368,47 @@ export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, r
       });
     }
 
-    let deviceResult: { action: string | null; success: boolean } | null = null;
+    let deviceResult: { action: string | null; success: boolean; warning: string | null } = {
+      action: null,
+      success: false,
+      warning: null,
+    };
     try {
       const evaluation: any = await evaluateManagedDeviceForContract(request.contractId);
       deviceResult = {
         action: evaluation?.actionType ?? evaluation?.action ?? null,
         success: Boolean(evaluation?.actionSuccess ?? evaluation?.success ?? evaluation?.actionDryRun),
+        warning: null,
       };
+
+      // An approval that cannot reach the handset is worse than a rejection:
+      // the cluster agent tells the customer their phone is open, and it is
+      // not. Read the device back and say so plainly rather than letting
+      // "it will open on the next run" stand for a device that will never
+      // receive the command.
+      const device = await prismaAny.managedDevice.findUnique({
+        where: { contractId: request.contractId },
+        select: { actualState: true, enrollmentStatus: true, isActive: true },
+      });
+      if (!device || !device.isActive) {
+        deviceResult.warning =
+          'This contract has no active managed device, so nothing was sent to the handset.';
+      } else if (!['PENDING', 'APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(device.enrollmentStatus)) {
+        deviceResult.warning = `The device is ${device.enrollmentStatus} in Knox and cannot accept an unlock. It must be re-enrolled before the phone will open.`;
+      } else if (!deviceResult.success && device.actualState === 'LOCKED') {
+        deviceResult.warning =
+          'The unlock command did not succeed. The phone is still locked — the scheduler will retry, but check the device before telling the customer.';
+      }
     } catch (error: any) {
-      // The approval itself stands — the five-minute scheduler will pick the
-      // device up. Surfaced so the approver is not told the phone is open when
-      // it may not be yet.
       console.error('Temporary unlock approved but device evaluation failed:', error?.message);
-      deviceResult = { action: null, success: false };
+      deviceResult = {
+        action: null,
+        success: false,
+        warning: `The unlock could not be sent (${error?.message || 'unknown error'}). The approval stands and the scheduler will retry.`,
+      };
     }
+
+    await notifyRequester(updated, 'APPROVED', deviceResult.warning);
 
     await createAuditLog({
       userId: caller.id,
@@ -386,6 +462,8 @@ export async function rejectTemporaryUnlockRequest(req: AuthenticatedRequest, re
       },
       include: LIST_INCLUDE,
     });
+
+    await notifyRequester(updated, 'REJECTED', null);
 
     await createAuditLog({
       userId: caller.id,
@@ -457,16 +535,29 @@ export async function listTemporaryUnlockRequests(req: AuthenticatedRequest, res
       where.status = String(status).toUpperCase();
     }
 
-    // Approvers and viewers see everything; a cluster agent sees only what
-    // concerns the agents they supervise, plus anything they raised.
+    // Only approvers see the whole book. VIEW_TEMPORARY_UNLOCKS gates access to
+    // the feature, not its scope — granting it to CSOs had been letting every
+    // officer see every request company-wide, which no other CSO endpoint does.
+    // Everyone else is scoped exactly as they are everywhere else, through
+    // resolveContractScope: it already unions CSO and cluster assignments, so
+    // one branch covers both.
     const canSeeAll =
-      caller.role === 'SUPER_ADMIN' ||
-      callerCan(req, PERMISSIONS.APPROVE_TEMPORARY_UNLOCK) ||
-      callerCan(req, PERMISSIONS.VIEW_TEMPORARY_UNLOCKS);
+      caller.role === 'SUPER_ADMIN' || callerCan(req, PERMISSIONS.APPROVE_TEMPORARY_UNLOCK);
 
+    let scopeFilter: any = null;
     if (!canSeeAll) {
-      const supervised = await getSupervisedAgentIds(caller.id);
-      where.OR = [{ agentId: { in: supervised } }, { requestedById: caller.id }];
+      const scope = await resolveContractScope(caller);
+      if (scope.mode === 'assigned') {
+        scopeFilter = { OR: [{ agentId: { in: scope.agentIds } }, { requestedById: caller.id }] };
+      } else if (scope.mode === 'own') {
+        scopeFilter = { OR: [{ agentId: caller.id }, { requestedById: caller.id }] };
+      } else if (scope.mode === 'none') {
+        // Nothing assigned and no own-scope permission — show nothing rather
+        // than falling through to an unfiltered query.
+        res.json({ requests: [], counts: {} });
+        return;
+      }
+      if (scopeFilter) Object.assign(where, scopeFilter);
     }
 
     const rows = await prismaAny.temporaryUnlockRequest.findMany({
@@ -476,10 +567,12 @@ export async function listTemporaryUnlockRequests(req: AuthenticatedRequest, res
       take: 300,
     });
 
+    // Counts must respect the same scope, or the badges would describe a book
+    // the caller cannot actually see.
     const counts = await prismaAny.temporaryUnlockRequest.groupBy({
       by: ['status'],
       _count: { _all: true },
-      where: canSeeAll ? {} : where,
+      where: canSeeAll ? {} : (scopeFilter ?? {}),
     });
 
     res.json({
@@ -536,7 +629,10 @@ export async function getEligibleContracts(req: AuthenticatedRequest, res: Respo
           select: { id: true, status: true },
         },
       },
-      take: 500,
+      // Ordered at the database, not only after the fact: the cap below would
+      // otherwise drop an arbitrary 500 rather than keeping the most urgent.
+      orderBy: { outstandingBalance: 'desc' },
+      take: LIST_CAP + 1,
     });
 
     const rows = contracts
@@ -560,7 +656,13 @@ export async function getEligibleContracts(req: AuthenticatedRequest, res: Respo
       .filter((row: any) => row.overdueAmount > 0)
       .sort((a: any, b: any) => b.maxDaysOverdue - a.maxDaysOverdue);
 
-    res.json({ contracts: rows });
+    res.json({
+      contracts: rows.slice(0, LIST_CAP),
+      // Silent truncation in a collections list means customers quietly
+      // missing from it, so the client is told rather than left to assume.
+      truncated: rows.length > LIST_CAP,
+      totalMatching: rows.length > LIST_CAP ? null : rows.length,
+    });
   } catch (error) {
     console.error('Eligible contracts error:', error);
     res.status(500).json({ error: 'Failed to load contracts' });

@@ -17,6 +17,7 @@ import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types
 import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber, roundMoney, isMoneyGte } from '../utils/helpers';
 import { allocatePaymentAcrossContract } from '../services/paymentAllocationService';
+import { rebuildPenaltyAllocation } from '../services/penaltyService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 
@@ -422,8 +423,18 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
       outstandingBalance: Math.max(0, newOutstandingBalance),
     };
 
+    // Penalties are part of what the customer owes, but they are not part of
+    // totalPrice, so a contract could reach a zero balance and complete with
+    // them still unpaid — releasing the device and transferring ownership,
+    // which is the only leverage to collect them. Read after allocation, which
+    // may have just cleared them.
+    const penaltyOutstanding = (await tx.hirePurchaseContract.findUnique({
+      where: { id: contract.id },
+      select: { penaltyOutstanding: true },
+    }))?.penaltyOutstanding ?? 0;
+
     // Check if fully paid (within half a cent, to absorb rounding drift)
-    if (newOutstandingBalance <= 0.005) {
+    if (newOutstandingBalance <= 0.005 && penaltyOutstanding <= 0.005) {
       contractUpdate.status = 'COMPLETED';
       contractUpdate.outstandingBalance = 0;
       // Keep the original completion date if it was already completed
@@ -633,7 +644,11 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
         const contract = payment.contract;
         const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
         const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
-        const isFullyPaid = newOutstandingBalance <= 0.005;
+        const penaltyDue = (await tx.hirePurchaseContract.findUnique({
+          where: { id: payment.contractId },
+          select: { penaltyOutstanding: true },
+        }))?.penaltyOutstanding ?? 0;
+        const isFullyPaid = newOutstandingBalance <= 0.005 && penaltyDue <= 0.005;
 
         await tx.hirePurchaseContract.update({
           where: { id: payment.contractId },
@@ -682,6 +697,19 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
             });
             remaining = 0;
           }
+        }
+
+        // Penalties are credited from whatever survives the installments, so a
+        // reduced payment has to give them back too.
+        const penaltyNowDue = await rebuildPenaltyAllocation(payment.contractId, remaining, tx);
+
+        // The completion decision above was taken before penalties were
+        // rebuilt; a revived penalty must be able to reopen the contract.
+        if (isFullyPaid && penaltyNowDue > 0.005) {
+          await tx.hirePurchaseContract.update({
+            where: { id: payment.contractId },
+            data: { status: 'ACTIVE', completedAt: null },
+          });
         }
       }
     });
@@ -740,7 +768,11 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
       const contract = payment.contract;
       const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
       const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
-      const isFullyPaid = newOutstandingBalance <= 0.005;
+      const penaltyDue = (await tx.hirePurchaseContract.findUnique({
+        where: { id: payment.contractId },
+        select: { penaltyOutstanding: true },
+      }))?.penaltyOutstanding ?? 0;
+      const isFullyPaid = newOutstandingBalance <= 0.005 && penaltyDue <= 0.005;
 
       await tx.hirePurchaseContract.update({
         where: { id: payment.contractId },
@@ -782,6 +814,14 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
           });
           remaining = 0;
         }
+      }
+
+      const penaltyNowDue = await rebuildPenaltyAllocation(payment.contractId, remaining, tx);
+      if (isFullyPaid && penaltyNowDue > 0.005) {
+        await tx.hirePurchaseContract.update({
+          where: { id: payment.contractId },
+          data: { status: 'ACTIVE', completedAt: null },
+        });
       }
     });
 
