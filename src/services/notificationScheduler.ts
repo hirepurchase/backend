@@ -5,6 +5,7 @@ import { enqueueSingletonJob } from './backgroundJobService';
 import { isOverdue, calculatePenalty } from '../utils/helpers';
 import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices, relockDriftedWrittenOffDevices, runDailyDeviceAudit } from './deviceControlPolicyService';
 import { closeExpiredTemporaryUnlocks, releaseSettledDefaultedUnlocks } from './temporaryUnlockService';
+import { PENALTY_KIND, recomputePenaltyOutstanding, accrueExpiryPenalties } from './penaltyService';
 
 // Mark past-due installments as OVERDUE and apply penalties
 export async function markOverdueInstallments(): Promise<{ updated: number; penalties: number }> {
@@ -54,12 +55,16 @@ export async function markOverdueInstallments(): Promise<{ updated: number; pena
                   contractId: contract.id,
                   amount: penaltyAmount,
                   reason: penaltyReason,
+                  kind: PENALTY_KIND.LATE_INSTALLMENT,
+                  dedupeKey: `late:${contract.id}:${installment.id}`,
+                  periodDate: installment.dueDate,
                 },
               });
-              await prisma.hirePurchaseContract.update({
-                where: { id: contract.id },
-                data: { outstandingBalance: { increment: penaltyAmount } },
-              });
+              // Deliberately not added to outstandingBalance. That field is
+              // recomputed as totalPrice - totalPaid on every payment, so the
+              // increment here was silently erased by the customer's next
+              // payment — the penalty looked charged and then wasn't.
+              await recomputePenaltyOutstanding(contract.id);
               penalties++;
               requiresManagedDeviceEvaluation = true;
             }
@@ -294,6 +299,22 @@ export function initializeNotificationScheduler(): void {
     }
   });
 
+  // Expiry penalties at 8:15 AM — after overdue marking, before the device
+  // sweeps, so a penalty raised today is visible to the lock decision that
+  // follows it rather than a day late. A no-op while the feature is off.
+  cron.schedule('15 8 * * *', () => {
+    const enqueued = enqueueSingletonJob('expiry-penalty-accrual', async () => {
+      const result = await accrueExpiryPenalties();
+      if (!result.enabled) return;
+      console.log(
+        `Expiry penalties: ${result.contractsExamined} past-term contracts examined, ${result.contractsCharged} charged, ${result.penaltiesCreated} penalties, GHS ${result.totalCharged.toFixed(2)}`
+      );
+    });
+    if (!enqueued) {
+      console.log('Skipping expiry penalty accrual - previous job still running');
+    }
+  });
+
   // Run upcoming payment check every day at 9:00 AM
   cron.schedule('0 9 * * *', () => {
     const enqueued = enqueueSingletonJob('notifications-upcoming', async () => {
@@ -320,6 +341,7 @@ export function initializeNotificationScheduler(): void {
   console.log('- Overdue installment marking: Daily at 8:00 AM');
   console.log('- Knox proactive device evaluate: Daily at 8:32 AM');
   console.log('- Temporary unlock expiry sweep: Daily at 8:05 AM');
+  console.log('- Expiry penalty accrual: Daily at 8:15 AM');
   console.log('- Knox daily full-fleet device audit: Daily at 8:41 AM');
   console.log('- Upcoming payments check: Daily at 9:00 AM');
   console.log('- Overdue payments check: Daily at 10:00 AM');

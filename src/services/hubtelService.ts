@@ -5,6 +5,7 @@ import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService'
 import { appendWebhookToken } from '../utils/callbackSecurity';
 import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
 import { roundMoney, isMoneyGte } from '../utils/helpers';
+import { allocateToPenalties } from './penaltyService';
 
 // Hubtel API Configuration
 const HUBTEL_POS_SALES_ID = process.env.HUBTEL_POS_SALES_ID || '';
@@ -806,21 +807,18 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
   let remainingAmount = roundMoney(payment.amount);
 
   await prisma.$transaction(async (tx) => {
-    // First, apply to unpaid penalties
-    for (const penalty of contract.penalties) {
-      if (remainingAmount <= 0) break;
+    // Same order as the manual payment path: overdue installments, then
+    // penalties, then anything paid ahead. Clearing the arrears is what
+    // releases the device, so it has to come first.
+    const overdue = contract.installments.filter((i: any) => i.status === 'OVERDUE');
+    const rest = contract.installments.filter((i: any) => i.status !== 'OVERDUE');
+    const ordered = [...overdue, ...rest];
 
-      if (isMoneyGte(remainingAmount, penalty.amount)) {
-        await tx.penalty.update({
-          where: { id: penalty.id },
-          data: { isPaid: true, paidAt: new Date() },
-        });
-        remainingAmount = roundMoney(remainingAmount - penalty.amount);
+    for (const [index, installment] of ordered.entries()) {
+      if (index === overdue.length) {
+        const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
+        remainingAmount = penaltyResult.remaining;
       }
-    }
-
-    // Then, apply to installments
-    for (const installment of contract.installments) {
       if (remainingAmount <= 0) break;
 
       const installmentRemaining = roundMoney(installment.amount - installment.paidAmount);
@@ -845,6 +843,11 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
         });
         remainingAmount = 0;
       }
+    }
+
+    if (overdue.length === ordered.length && remainingAmount > 0) {
+      const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
+      remainingAmount = penaltyResult.remaining;
     }
 
     // Recalculate totals from all successful payments to prevent drift

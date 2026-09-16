@@ -20,6 +20,7 @@ import contactAttemptRoutes from './contactAttempts';
 import customerServiceRoutes from './customerService';
 import clusterRoutes from './cluster';
 import temporaryUnlockRoutes from './temporaryUnlocks';
+import penaltySettingsRoutes from './penaltySettings';
 import announcementRoutes from './announcements';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -48,6 +49,7 @@ router.use('/contact-attempts', contactAttemptRoutes);
 router.use('/customer-service', customerServiceRoutes);
 router.use('/cluster', clusterRoutes);
 router.use('/temporary-unlocks', temporaryUnlockRoutes);
+router.use('/settings/penalties', penaltySettingsRoutes);
 router.use('/announcements', announcementRoutes);
 
 // Health check

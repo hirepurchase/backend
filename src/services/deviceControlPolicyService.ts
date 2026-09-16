@@ -1160,7 +1160,12 @@ function calculateOverdueMetrics(contract: any, blockOnUnpaidPenalties: boolean)
     (sum: number, installment: any) => sum + (installment.amount - installment.paidAmount),
     0
   );
-  const unpaidPenaltyAmount = contract.penalties.reduce((sum: number, penalty: any) => sum + penalty.amount, 0);
+  // Part payment counts: a customer who has cleared most of a penalty should
+  // not be held as though they had paid none of it.
+  const unpaidPenaltyAmount = contract.penalties.reduce(
+    (sum: number, penalty: any) => sum + Math.max(0, penalty.amount - (penalty.paidAmount ?? 0)),
+    0
+  );
   const maxDaysOverdue = overdueInstallments.reduce((max: number, installment: any) => {
     return Math.max(max, computeDaysOverdue(installment.dueDate, contract.gracePeriodDays));
   }, 0);

@@ -266,6 +266,10 @@ model HirePurchaseContract {
   totalInstallments   Int
   gracePeriodDays     Int                 @default(0)
   penaltyPercentage   Float               @default(0)
+  // Held separately from outstandingBalance, which is recomputed as
+  // totalPrice - totalPaid on every payment and therefore erases anything
+  // added to it. Penalties are not part of the purchase price.
+  penaltyOutstanding  Float               @default(0)
   startDate           DateTime
   endDate             DateTime
   status              String              @default("ACTIVE") // ACTIVE, COMPLETED, DEFAULTED, CANCELLED, PENDING_APPROVAL, REVISION_REQUESTED, WRITTEN_OFF
@@ -381,7 +385,20 @@ model Penalty {
   contractId  String
   contract    HirePurchaseContract @relation(fields: [contractId], references: [id])
   amount      Float
+  // Penalties can be part-paid: a customer clearing arrears rarely has the
+  // exact total to hand. Before this, allocation was all-or-nothing and a
+  // payment smaller than the penalty simply skipped it.
+  paidAmount  Float                @default(0)
   reason      String
+  // LATE_INSTALLMENT (per missed installment) | CONTRACT_EXPIRY (contract ran
+  // past its term still owing).
+  kind        String               @default("LATE_INSTALLMENT")
+  // Identifies the exact thing being charged for, so a re-run of the accrual
+  // job cannot double-charge. For daily expiry accrual this is one key per
+  // calendar day.
+  dedupeKey   String?              @unique
+  // The day the charge is *for*, which is not always the day it was written.
+  periodDate  DateTime?
   appliedDate DateTime             @default(now())
   isPaid      Boolean              @default(false)
   paidAt      DateTime?
@@ -389,6 +406,7 @@ model Penalty {
   updatedAt   DateTime             @updatedAt
 
   @@index([contractId, isPaid])
+  @@index([contractId, kind])
 }
 
 model HubtelPreapproval {
@@ -556,6 +574,31 @@ model RetrySettings {
   failureSMSTemplate      String?  @default("Dear {customerName}, your payment of GHS {amount} failed due to insufficient funds. Please ensure you have enough balance for the next retry.")
   createdAt               DateTime @default(now())
   updatedAt               DateTime @updatedAt
+}
+
+// How penalties are charged when a contract runs past its term still owing.
+// Off by default and never retroactive — see activatedAt.
+model PenaltySettings {
+  id                   String   @id @default(uuid())
+  expiryPenaltyEnabled Boolean  @default(false)
+  // FIXED: charged once on the outstanding balance.
+  // DAILY: charged each day the contract stays past term, on that day's balance.
+  expiryPenaltyMode    String   @default("FIXED")
+  expiryPenaltyRate    Float    @default(0)
+  expiryGraceDays      Int      @default(0)
+  // Ceiling on total expiry penalties per contract, as a percentage of the
+  // balance they are charged against. Without it, daily accrual on a long-
+  // abandoned contract grows without limit.
+  maxPenaltyPercentage Float    @default(50)
+  // Stamped the first time the feature is switched on. Accrual never reaches
+  // back before this date: 477 live contracts are already past term, and
+  // backdating to their real expiry would invent six figures of charges
+  // against customers who were never told this rule existed.
+  activatedAt          DateTime?
+  blockUnlockOnPenalty Boolean  @default(false)
+  updatedById          String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
 }
 
 model KnoxGuardSettings {

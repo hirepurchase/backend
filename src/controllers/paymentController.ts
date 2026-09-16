@@ -16,6 +16,7 @@ import {
 import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types';
 import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber, roundMoney, isMoneyGte } from '../utils/helpers';
+import { allocateToPenalties } from '../services/penaltyService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 
@@ -388,21 +389,23 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
   const contract = payment.contract;
 
   await prisma.$transaction(async (tx) => {
-    // First, apply to unpaid penalties
-    for (const penalty of contract.penalties) {
-      if (remainingAmount <= 0) break;
+    // Overdue installments first, then penalties, then installments not yet
+    // due. Penalties used to come first, which meant a customer who paid
+    // exactly what they were asked for still had an unpaid overdue
+    // installment afterwards — and so stayed locked out of their phone.
+    const overdueFirst = [
+      ...contract.installments.filter((i) => i.status === 'OVERDUE'),
+      ...contract.installments.filter((i) => i.status !== 'OVERDUE'),
+    ];
+    const overdueCount = contract.installments.filter((i) => i.status === 'OVERDUE').length;
 
-      if (isMoneyGte(remainingAmount, penalty.amount)) {
-        await tx.penalty.update({
-          where: { id: penalty.id },
-          data: { isPaid: true, paidAt: new Date() },
-        });
-        remainingAmount = roundMoney(remainingAmount - penalty.amount);
+    for (const [index, installment] of overdueFirst.entries()) {
+      // Penalties are settled once the arrears are cleared and before anything
+      // is paid ahead of schedule.
+      if (index === overdueCount) {
+        const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
+        remainingAmount = penaltyResult.remaining;
       }
-    }
-
-    // Then, apply to installments
-    for (const installment of contract.installments) {
       if (remainingAmount <= 0) break;
 
       const installmentRemaining = roundMoney(installment.amount - installment.paidAmount);
@@ -429,6 +432,12 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
         });
         remainingAmount = 0;
       }
+    }
+
+    // Nothing was due — everything the customer sent goes to penalties.
+    if (overdueCount === overdueFirst.length && remainingAmount > 0) {
+      const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
+      remainingAmount = penaltyResult.remaining;
     }
 
     // Update contract totals
