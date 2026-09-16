@@ -16,7 +16,7 @@ import {
 import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types';
 import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber, roundMoney, isMoneyGte } from '../utils/helpers';
-import { allocateToPenalties } from '../services/penaltyService';
+import { allocatePaymentAcrossContract } from '../services/paymentAllocationService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 
@@ -396,56 +396,13 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
   const contract = payment.contract;
 
   await prisma.$transaction(async (tx) => {
-    // Overdue installments first, then penalties, then installments not yet
-    // due. Penalties used to come first, which meant a customer who paid
-    // exactly what they were asked for still had an unpaid overdue
-    // installment afterwards — and so stayed locked out of their phone.
-    const overdueFirst = [
-      ...contract.installments.filter((i) => i.status === 'OVERDUE'),
-      ...contract.installments.filter((i) => i.status !== 'OVERDUE'),
-    ];
-    const overdueCount = contract.installments.filter((i) => i.status === 'OVERDUE').length;
-
-    for (const [index, installment] of overdueFirst.entries()) {
-      // Penalties are settled once the arrears are cleared and before anything
-      // is paid ahead of schedule.
-      if (index === overdueCount) {
-        const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
-        remainingAmount = penaltyResult.remaining;
-      }
-      if (remainingAmount <= 0) break;
-
-      const installmentRemaining = roundMoney(installment.amount - installment.paidAmount);
-
-      if (isMoneyGte(remainingAmount, installmentRemaining)) {
-        // Fully pay this installment
-        await tx.installmentSchedule.update({
-          where: { id: installment.id },
-          data: {
-            paidAmount: installment.amount,
-            status: 'PAID',
-            paidAt: new Date(),
-          },
-        });
-        remainingAmount = roundMoney(remainingAmount - installmentRemaining);
-      } else {
-        // Partial payment
-        await tx.installmentSchedule.update({
-          where: { id: installment.id },
-          data: {
-            paidAmount: roundMoney(installment.paidAmount + remainingAmount),
-            status: 'PARTIAL',
-          },
-        });
-        remainingAmount = 0;
-      }
-    }
-
-    // Nothing was due — everything the customer sent goes to penalties.
-    if (overdueCount === overdueFirst.length && remainingAmount > 0) {
-      const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
-      remainingAmount = penaltyResult.remaining;
-    }
+    const allocation = await allocatePaymentAcrossContract({
+      contractId: contract.id,
+      installments: contract.installments,
+      amount: remainingAmount,
+      tx,
+    });
+    remainingAmount = allocation.remaining;
 
     // Update contract totals
     // CORRECTED LOGIC: totalPaid = deposit + sum of all successful payments

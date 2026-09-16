@@ -5,7 +5,7 @@ import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService'
 import { appendWebhookToken } from '../utils/callbackSecurity';
 import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
 import { roundMoney, isMoneyGte } from '../utils/helpers';
-import { allocateToPenalties } from './penaltyService';
+import { allocatePaymentAcrossContract } from './paymentAllocationService';
 
 // Hubtel API Configuration
 const HUBTEL_POS_SALES_ID = process.env.HUBTEL_POS_SALES_ID || '';
@@ -807,48 +807,13 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
   let remainingAmount = roundMoney(payment.amount);
 
   await prisma.$transaction(async (tx) => {
-    // Same order as the manual payment path: overdue installments, then
-    // penalties, then anything paid ahead. Clearing the arrears is what
-    // releases the device, so it has to come first.
-    const overdue = contract.installments.filter((i: any) => i.status === 'OVERDUE');
-    const rest = contract.installments.filter((i: any) => i.status !== 'OVERDUE');
-    const ordered = [...overdue, ...rest];
-
-    for (const [index, installment] of ordered.entries()) {
-      if (index === overdue.length) {
-        const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
-        remainingAmount = penaltyResult.remaining;
-      }
-      if (remainingAmount <= 0) break;
-
-      const installmentRemaining = roundMoney(installment.amount - installment.paidAmount);
-
-      if (isMoneyGte(remainingAmount, installmentRemaining)) {
-        await tx.installmentSchedule.update({
-          where: { id: installment.id },
-          data: {
-            paidAmount: installment.amount,
-            status: 'PAID',
-            paidAt: new Date(),
-          },
-        });
-        remainingAmount = roundMoney(remainingAmount - installmentRemaining);
-      } else {
-        await tx.installmentSchedule.update({
-          where: { id: installment.id },
-          data: {
-            paidAmount: roundMoney(installment.paidAmount + remainingAmount),
-            status: 'PARTIAL',
-          },
-        });
-        remainingAmount = 0;
-      }
-    }
-
-    if (overdue.length === ordered.length && remainingAmount > 0) {
-      const penaltyResult = await allocateToPenalties(contract.id, remainingAmount, tx);
-      remainingAmount = penaltyResult.remaining;
-    }
+    const allocation = await allocatePaymentAcrossContract({
+      contractId: contract.id,
+      installments: contract.installments,
+      amount: remainingAmount,
+      tx,
+    });
+    remainingAmount = allocation.remaining;
 
     // Recalculate totals from all successful payments to prevent drift
     const allSuccessfulPayments = await tx.paymentTransaction.findMany({

@@ -11,6 +11,7 @@ import {
   requestStandaloneInventoryDeviceLock,
 } from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
+import { PENALTY_KIND, recomputePenaltyOutstanding } from '../services/penaltyService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
 import {
@@ -958,12 +959,12 @@ export async function updateOverdueInstallments(req: AuthenticatedRequest, res: 
             const penaltyAmount = calculatePenalty(remainingAmount, contract.penaltyPercentage);
             const penaltyReason = `Late payment penalty for installment #${installment.installmentNo}`;
 
+            // Same dedupe key as the scheduled job in notificationScheduler,
+            // which does this identical work — either path can run first and
+            // the unique index stops the second from charging twice.
+            const dedupeKey = `late:${contract.id}:${installment.id}`;
             const existingPenalty = await prisma.penalty.findFirst({
-              where: {
-                contractId: contract.id,
-                isPaid: false,
-                reason: penaltyReason,
-              },
+              where: { contractId: contract.id, isPaid: false, OR: [{ dedupeKey }, { reason: penaltyReason }] },
             });
 
             if (existingPenalty) {
@@ -975,18 +976,16 @@ export async function updateOverdueInstallments(req: AuthenticatedRequest, res: 
                 contractId: contract.id,
                 amount: penaltyAmount,
                 reason: penaltyReason,
+                kind: PENALTY_KIND.LATE_INSTALLMENT,
+                dedupeKey,
+                periodDate: installment.dueDate,
               },
             });
 
-            // Update contract outstanding balance
-            await prisma.hirePurchaseContract.update({
-              where: { id: contract.id },
-              data: {
-                outstandingBalance: {
-                  increment: penaltyAmount,
-                },
-              },
-            });
+            // Not added to outstandingBalance: that field is recomputed as
+            // totalPrice - totalPaid on every payment, so the increment this
+            // used to do was wiped out by the customer's next payment.
+            await recomputePenaltyOutstanding(contract.id);
 
             penaltiesApplied++;
           }
