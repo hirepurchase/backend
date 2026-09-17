@@ -202,6 +202,17 @@ export async function createTemporaryUnlockRequest(req: AuthenticatedRequest, re
     // agents they supervise.
     if (caller.role !== 'SUPER_ADMIN') {
       const supervised = await getSupervisedAgentIds(caller.id);
+      if (contract.createdById === caller.id) {
+        // Cluster agents sell as well as supervise. The guarantee only means
+        // something if someone other than the seller is staking their name on
+        // it, so stating the rule beats silently omitting their own customers
+        // from the picker and letting them think it is a bug.
+        res.status(403).json({
+          error:
+            'You cannot request an unlock for your own customer. The guarantee has to come from someone other than the agent who sold the contract — ask an administrator.',
+        });
+        return;
+      }
       if (!contract.createdById || !supervised.includes(contract.createdById)) {
         res.status(403).json({ error: 'You can only request an unlock for customers of agents you supervise' });
         return;

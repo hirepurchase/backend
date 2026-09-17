@@ -2,7 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
-import { ASSIGNABLE_AGENT_ROLES, CLUSTER_AGENT_ROLE } from '../constants/roles';
+import { CLUSTER_SUPERVISABLE_ROLES, CLUSTER_AGENT_ROLE } from '../constants/roles';
 
 // GET /admin-users/:id/cluster-agents
 export async function getClusterAgents(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -30,7 +30,7 @@ export async function getClusterAgents(req: AuthenticatedRequest, res: Response)
         orderBy: { createdAt: 'asc' },
       }),
       prisma.adminUser.findMany({
-        where: { isActive: true, role: { name: { in: [...ASSIGNABLE_AGENT_ROLES] } } },
+        where: { isActive: true, role: { name: { in: [...CLUSTER_SUPERVISABLE_ROLES] } } },
         select: {
           id: true,
           firstName: true,
@@ -117,6 +117,14 @@ export async function setClusterAgents(req: AuthenticatedRequest, res: Response)
       return;
     }
 
+    // Assignments are cleared when a user is deactivated; without this they
+    // could be handed straight back to someone who can no longer log in, and
+    // their agents would look supervised by nobody.
+    if (!clusterAgent.isActive && uniqueAgentIds.length > 0) {
+      res.status(400).json({ error: 'This cluster agent is deactivated. Reactivate them before assigning agents.' });
+      return;
+    }
+
     if (uniqueAgentIds.includes(id)) {
       res.status(400).json({ error: 'A cluster agent cannot supervise themselves' });
       return;
@@ -124,7 +132,7 @@ export async function setClusterAgents(req: AuthenticatedRequest, res: Response)
 
     if (uniqueAgentIds.length > 0) {
       const agents = await prisma.adminUser.findMany({
-        where: { id: { in: uniqueAgentIds }, isActive: true, role: { name: { in: [...ASSIGNABLE_AGENT_ROLES] } } },
+        where: { id: { in: uniqueAgentIds }, isActive: true, role: { name: { in: [...CLUSTER_SUPERVISABLE_ROLES] } } },
         select: {
           id: true,
           firstName: true,
@@ -141,7 +149,7 @@ export async function setClusterAgents(req: AuthenticatedRequest, res: Response)
       if (agents.length !== uniqueAgentIds.length) {
         const found = new Set(agents.map((a) => a.id));
         res.status(400).json({
-          error: 'One or more agents are invalid, inactive, or not an agent role',
+          error: 'One or more agents are invalid, inactive, or cannot be supervised. Cluster agents supervise agents, not other cluster agents.',
           invalidAgentIds: uniqueAgentIds.filter((agentId) => !found.has(agentId)),
         });
         return;
@@ -232,26 +240,40 @@ export async function getMyClusterAgents(req: AuthenticatedRequest, res: Respons
       orderBy: { createdAt: 'asc' },
     });
 
+    // A cluster agent sells as well as supervises, so their own contracts are
+    // part of the portfolio they answer for. Querying only the supervised ids
+    // left the dashboard disagreeing with their own contract list, which does
+    // include their book (scopeService.getAssignedAgentIds adds self).
     const agentIds = assignments.map((a) => a.agentId);
+    const bookIds = [...agentIds, admin.id];
 
-    const [pendingByAgent, activeContracts] = await Promise.all([
-      agentIds.length
-        ? prisma.hirePurchaseContract.groupBy({
-            by: ['createdById'],
-            where: { createdById: { in: agentIds }, status: 'PENDING_APPROVAL' },
-            _count: { _all: true },
-          })
-        : Promise.resolve([] as { createdById: string; _count: { _all: number } }[]),
-      agentIds.length
-        ? prisma.hirePurchaseContract.findMany({
-            where: { createdById: { in: agentIds }, status: 'ACTIVE' },
-            select: {
-              createdById: true,
-              outstandingBalance: true,
-              installments: { where: { status: 'OVERDUE' }, select: { id: true }, take: 1 },
-            },
-          })
-        : Promise.resolve([] as { createdById: string; outstandingBalance: number; installments: { id: string }[] }[]),
+    const [pendingByAgent, activeContracts, self] = await Promise.all([
+      prisma.hirePurchaseContract.groupBy({
+        by: ['createdById'],
+        where: { createdById: { in: bookIds }, status: 'PENDING_APPROVAL' },
+        _count: { _all: true },
+      }),
+      prisma.hirePurchaseContract.findMany({
+        where: { createdById: { in: bookIds }, status: 'ACTIVE' },
+        select: {
+          createdById: true,
+          outstandingBalance: true,
+          installments: { where: { status: 'OVERDUE' }, select: { id: true }, take: 1 },
+        },
+      }),
+      prisma.adminUser.findUnique({
+        where: { id: admin.id },
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+          phone: true,
+          isActive: true,
+          createdAt: true,
+          _count: { select: { customersCreated: true, contractsCreated: true } },
+        },
+      }),
     ]);
 
     const pendingMap = new Map(pendingByAgent.map((row) => [row.createdById, row._count._all]));
@@ -288,24 +310,122 @@ export async function getMyClusterAgents(req: AuthenticatedRequest, res: Respons
       };
     });
 
-    const totalOutstanding = agents.reduce((sum, a) => sum + a.outstanding, 0);
-    const totalAtRisk = agents.reduce((sum, a) => sum + a.amountAtRisk, 0);
+    // Their own row, flagged so the page can label it rather than pass the
+    // supervisor off as one of their own agents.
+    const selfRisk = riskMap.get(admin.id) ?? { overdueContracts: 0, atRisk: 0, total: 0 };
+    const ownBook = self
+      ? {
+          id: self.id,
+          name: `${self.firstName} ${self.lastName}`.trim(),
+          email: self.email,
+          phone: self.phone,
+          isActive: self.isActive,
+          assignedAt: self.createdAt,
+          customers: self._count.customersCreated,
+          contracts: self._count.contractsCreated,
+          pendingVerification: pendingMap.get(admin.id) ?? 0,
+          contractsOverdue: selfRisk.overdueContracts,
+          outstanding: Math.round(selfRisk.total * 100) / 100,
+          amountAtRisk: Math.round(selfRisk.atRisk * 100) / 100,
+          portfolioAtRisk: selfRisk.total > 0 ? Math.round((selfRisk.atRisk / selfRisk.total) * 1000) / 10 : 0,
+          isSelf: true,
+        }
+      : null;
+
+    // Totals cover the whole book the supervisor answers for, their own
+    // contracts included — a cluster agent carrying arrears of their own
+    // should not see a clean dashboard.
+    const portfolio = ownBook ? [...agents, ownBook] : agents;
+    const totalOutstanding = portfolio.reduce((sum, a) => sum + a.outstanding, 0);
+    const totalAtRisk = portfolio.reduce((sum, a) => sum + a.amountAtRisk, 0);
 
     res.json({
       count: agents.length,
       summary: {
+        // Headcount is the team; every money figure is the whole book.
         agents: agents.length,
-        customers: agents.reduce((sum, a) => sum + a.customers, 0),
-        contractsOverdue: agents.reduce((sum, a) => sum + a.contractsOverdue, 0),
-        pendingVerification: agents.reduce((sum, a) => sum + a.pendingVerification, 0),
+        customers: portfolio.reduce((sum, a) => sum + a.customers, 0),
+        contractsOverdue: portfolio.reduce((sum, a) => sum + a.contractsOverdue, 0),
+        pendingVerification: portfolio.reduce((sum, a) => sum + a.pendingVerification, 0),
         outstanding: Math.round(totalOutstanding * 100) / 100,
         amountAtRisk: Math.round(totalAtRisk * 100) / 100,
         portfolioAtRisk: totalOutstanding > 0 ? Math.round((totalAtRisk / totalOutstanding) * 1000) / 10 : 0,
       },
       agents,
+      ownBook,
     });
   } catch (error) {
     console.error('getMyClusterAgents error:', error);
     res.status(500).json({ error: 'Failed to fetch your agents' });
+  }
+}
+
+// GET /cluster/coverage
+// Who supervises whom, and — the point of it — who supervises nobody.
+export async function getClusterCoverage(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const [clusterAgents, assignments, allAgents] = await Promise.all([
+      prisma.adminUser.findMany({
+        where: { isActive: true, role: { name: CLUSTER_AGENT_ROLE } },
+        select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+      }),
+      prisma.clusterAgentAssignment.findMany({
+        include: {
+          agent: { select: { id: true, firstName: true, lastName: true, email: true, phone: true, isActive: true } },
+        },
+      }),
+      prisma.adminUser.findMany({
+        where: { isActive: true, role: { name: { in: [...CLUSTER_SUPERVISABLE_ROLES] } } },
+        select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+      }),
+    ]);
+
+    const byCluster = new Map<string, typeof assignments>();
+    const coveredAgentIds = new Set<string>();
+    for (const assignment of assignments) {
+      if (!assignment.agent.isActive) continue;
+      coveredAgentIds.add(assignment.agentId);
+      const list = byCluster.get(assignment.clusterAgentId) ?? [];
+      list.push(assignment);
+      byCluster.set(assignment.clusterAgentId, list);
+    }
+
+    res.json({
+      clusterAgents: clusterAgents.map((cluster) => {
+        const agents = (byCluster.get(cluster.id) ?? [])
+          .map((a) => ({
+            id: a.agent.id,
+            name: `${a.agent.firstName} ${a.agent.lastName}`.trim(),
+            email: a.agent.email,
+            phone: a.agent.phone,
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+        return {
+          id: cluster.id,
+          name: `${cluster.firstName} ${cluster.lastName}`.trim(),
+          email: cluster.email,
+          phone: cluster.phone,
+          agentCount: agents.length,
+          agents,
+        };
+      }),
+      // The reason this endpoint exists. Deactivating a supervisor now clears
+      // their assignments, so orphans appear on their own and would otherwise
+      // have to be hunted by hand — which is exactly how the stale CSO
+      // assignments on this database were found.
+      unassignedAgents: allAgents
+        .filter((agent) => !coveredAgentIds.has(agent.id))
+        .map((agent) => ({
+          id: agent.id,
+          name: `${agent.firstName} ${agent.lastName}`.trim(),
+          email: agent.email,
+          phone: agent.phone,
+        })),
+    });
+  } catch (error) {
+    console.error('getClusterCoverage error:', error);
+    res.status(500).json({ error: 'Failed to load cluster coverage' });
   }
 }

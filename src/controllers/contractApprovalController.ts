@@ -546,6 +546,17 @@ export async function approveContract(req: AuthenticatedRequest, res: Response):
       return;
     }
 
+    // Nobody approves their own sale. This matters for cluster agents, who both
+    // sell and supervise: their assigned scope includes their own id, so
+    // scopeAllows above passes for contracts they wrote themselves. They do not
+    // hold APPROVE_CONTRACT today, but granting it to a selling supervisor is an
+    // obvious thing to do later, and the check belongs here rather than in a
+    // permission nobody remembers is load-bearing.
+    if (contract.createdById === admin.id && admin.role !== 'SUPER_ADMIN') {
+      res.status(403).json({ error: 'You cannot approve a contract you created. Another approver must review it.' });
+      return;
+    }
+
     // Customer service officers must speak to the customer before approving.
     // Deliberately scoped to 'assigned' — applying this to every approver would
     // block admins from approving the contracts already in flight.

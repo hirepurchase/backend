@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getMyClusterAgents } from '../controllers/clusterAssignmentController';
+import { getMyClusterAgents, getClusterCoverage } from '../controllers/clusterAssignmentController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
 
@@ -10,5 +10,9 @@ router.use(authenticateAdmin);
 // The signed-in cluster agent's own team. Scoped to the caller, so the
 // assigned-contracts permission the role already carries is the right gate.
 router.get('/my-agents', requireAnyPermission(PERMISSIONS.VIEW_ASSIGNED_CONTRACTS), getMyClusterAgents);
+
+// Who supervises nobody. Gated like the assignment screens, since it is an
+// administrative view of the whole hierarchy rather than one supervisor's team.
+router.get('/coverage', requireAnyPermission(PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS, PERMISSIONS.MANAGE_USERS), getClusterCoverage);
 
 export default router;
