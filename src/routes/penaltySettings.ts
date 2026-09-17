@@ -4,6 +4,7 @@ import {
   updatePenaltyConfig,
   previewExpiryPenalties,
   runExpiryPenalties,
+  waivePenaltyCharge,
 } from '../controllers/penaltySettingsController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -18,5 +19,10 @@ router.put('/', requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), updatePenalty
 // before agreeing to it.
 router.post('/preview', requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), previewExpiryPenalties);
 router.post('/run', requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), runExpiryPenalties);
+
+// Cancelling a charge is a higher bar than changing the rate: it touches one
+// named customer's account, so it is gated on contract-value editing rather
+// than general settings access.
+router.post('/:penaltyId/waive', requireAnyPermission(PERMISSIONS.EDIT_CONTRACT_VALUES, PERMISSIONS.MANAGE_SETTINGS), waivePenaltyCharge);
 
 export default router;

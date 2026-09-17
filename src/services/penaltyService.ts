@@ -1,4 +1,5 @@
 import prisma from '../config/database';
+import { createAuditLog } from './auditService';
 
 const prismaAny = prisma as any;
 
@@ -20,6 +21,7 @@ export interface PenaltySettings {
   expiryGraceDays: number;
   maxPenaltyPercentage: number;
   activatedAt: Date | null;
+  notifyCustomer: boolean;
 }
 
 const DEFAULTS = {
@@ -29,19 +31,31 @@ const DEFAULTS = {
   expiryGraceDays: 0,
   maxPenaltyPercentage: 50,
   activatedAt: null,
+  notifyCustomer: true,
 };
 
 function roundMoney(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
+// Day arithmetic is UTC throughout. dayKey already wrote UTC dates into the
+// dedupe keys while atMidnight cut days in local time; on a server outside UTC
+// the two disagree and a day is silently skipped or keyed twice. The production
+// server runs GMT today, which is exactly the kind of dependency nobody
+// remembers when moving a box.
 function dayKey(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
 function atMidnight(date: Date): Date {
   const copy = new Date(date);
-  copy.setHours(0, 0, 0, 0);
+  copy.setUTCHours(0, 0, 0, 0);
+  return copy;
+}
+
+function atEndOfDay(date: Date): Date {
+  const copy = new Date(date);
+  copy.setUTCHours(23, 59, 59, 999);
   return copy;
 }
 
@@ -68,10 +82,10 @@ export function firstChargeableDay(
   if (!settings.activatedAt) return null;
 
   const afterTerm = new Date(contractEndDate);
-  afterTerm.setDate(afterTerm.getDate() + settings.expiryGraceDays + 1);
+  afterTerm.setUTCDate(afterTerm.getUTCDate() + settings.expiryGraceDays + 1);
 
   const afterActivation = new Date(settings.activatedAt);
-  afterActivation.setDate(afterActivation.getDate() + 1);
+  afterActivation.setUTCDate(afterActivation.getUTCDate() + 1);
 
   return atMidnight(afterTerm > afterActivation ? afterTerm : afterActivation);
 }
@@ -86,7 +100,8 @@ export async function recomputePenaltyOutstanding(
   tx: any = prismaAny
 ): Promise<number> {
   const rows = await tx.penalty.findMany({
-    where: { contractId, isPaid: false },
+    // A waived charge is cancelled, not outstanding.
+    where: { contractId, isPaid: false, isWaived: false },
     select: { amount: true, paidAmount: true },
   });
   const total = roundMoney(
@@ -127,8 +142,7 @@ function balanceOnDay(
     // Caller did not supply the history; fall back to the current balance.
     return contract.outstandingBalance;
   }
-  const endOfDay = new Date(day);
-  endOfDay.setHours(23, 59, 59, 999);
+  const endOfDay = atEndOfDay(day);
   const paidBy = payments
     .filter((row) => new Date(row.paymentDate).getTime() <= endOfDay.getTime())
     .reduce((sum, row) => sum + row.amount, 0);
@@ -175,9 +189,17 @@ export async function planExpiryPenaltiesForContract(
   const alreadyCharged = new Set(existing.map((row: any) => row.dedupeKey));
   let chargedSoFar = existing.reduce((sum: number, row: any) => sum + row.amount, 0);
 
-  // The cap is on the total ever charged for running past term, measured
-  // against the balance it is charged on.
-  const ceiling = roundMoney((contract.outstandingBalance * settings.maxPenaltyPercentage) / 100);
+  // The cap is measured against what the customer owed on the day the contract
+  // ran out of term, not against today's balance. A moving ceiling meant
+  // accrual could stop because the customer was paying, and charges already
+  // written could exceed a ceiling that had since dropped — behaviour nobody
+  // would predict from the setting's name, and impossible to explain to the
+  // person being charged. Fixed at the basis, it is one sentence: "penalties
+  // never exceed X% of what you owed when your contract expired."
+  const capBasis = paymentHistory
+    ? balanceOnDay(contract, paymentHistory, start)
+    : contract.outstandingBalance;
+  const ceiling = roundMoney((capBasis * settings.maxPenaltyPercentage) / 100);
   if (chargedSoFar >= ceiling) return [];
 
   const planned: Array<{ dedupeKey: string; periodDate: Date; amount: number; reason: string }> = [];
@@ -187,7 +209,7 @@ export async function planExpiryPenaltiesForContract(
     const key = `expiry:${contract.id}:fixed`;
     if (alreadyCharged.has(key)) return [];
     const amount = Math.min(
-      roundMoney((contract.outstandingBalance * settings.expiryPenaltyRate) / 100),
+      roundMoney((capBasis * settings.expiryPenaltyRate) / 100),
       ceiling
     );
     if (amount <= 0) return [];
@@ -195,7 +217,7 @@ export async function planExpiryPenaltiesForContract(
       dedupeKey: key,
       periodDate: start,
       amount,
-      reason: `Contract term expired with ${roundMoney(contract.outstandingBalance)} still outstanding`,
+      reason: `Contract term expired with ${roundMoney(capBasis)} still outstanding`,
     });
     return planned;
   }
@@ -227,11 +249,50 @@ export async function planExpiryPenaltiesForContract(
         chargedSoFar = roundMoney(chargedSoFar + charge);
       }
     }
-    cursor.setDate(cursor.getDate() + 1);
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
     days++;
   }
 
   return planned;
+}
+
+/**
+ * Tells the customer the first time their contract is charged for running past
+ * term. Silence here means they find out when their phone will not unlock, or
+ * when a CSO reads it off a screen — which is how a legitimate charge turns
+ * into a dispute.
+ */
+async function notifyCustomerOfPenalty(
+  contractId: string,
+  amount: number,
+  settings: PenaltySettings
+): Promise<void> {
+  try {
+    const { sendSMS } = await import('./notificationService');
+    const contract = await prismaAny.hirePurchaseContract.findUnique({
+      where: { id: contractId },
+      select: {
+        contractNumber: true,
+        customer: { select: { firstName: true, phone: true } },
+      },
+    });
+    if (!contract?.customer?.phone) return;
+
+    const recurring =
+      settings.expiryPenaltyMode === PENALTY_MODE.DAILY
+        ? ' A further charge applies for each day the balance remains unpaid.'
+        : '';
+
+    await sendSMS({
+      to: contract.customer.phone,
+      message:
+        `AIDOO TECH: Hello ${contract.customer.firstName}, your contract ${contract.contractNumber} has passed its agreed end date with a balance still owing, ` +
+        `so a late charge of GHS ${amount.toFixed(2)} has been added.${recurring} Please pay to clear your account.`,
+    });
+  } catch (error) {
+    // A failed SMS must never undo a charge that has already been written.
+    console.error('Failed to notify customer of penalty:', error);
+  }
 }
 
 /**
@@ -251,6 +312,7 @@ export async function accrueExpiryPenalties(options: {
   contractsExamined: number;
   contractsCharged: number;
   penaltiesCreated: number;
+  skippedUnderUnlock: number;
   totalCharged: number;
   dryRun: boolean;
   details: Array<{ contractNumber: string; charges: number; amount: number }>;
@@ -265,6 +327,7 @@ export async function accrueExpiryPenalties(options: {
     contractsExamined: 0,
     contractsCharged: 0,
     penaltiesCreated: 0,
+    skippedUnderUnlock: 0,
     totalCharged: 0,
     dryRun,
     details: [] as Array<{ contractNumber: string; charges: number; amount: number }>,
@@ -286,6 +349,16 @@ export async function accrueExpiryPenalties(options: {
       depositAmount: true,
     },
   });
+
+  // A customer inside an approved temporary unlock has been granted time by an
+  // administrator. Charging them daily for the time they were given undoes the
+  // bargain the unlock represents, so they are excluded until the window closes
+  // — at which point, if they still owe, accrual resumes from that day.
+  const { getActiveTemporaryUnlockContractIds } = await import('./temporaryUnlockService');
+  const underUnlock = await getActiveTemporaryUnlockContractIds(
+    contracts.map((c: AccrualContract) => c.id),
+    today
+  );
 
   // One query for the whole book instead of one per contract.
   const priorCharges = await prismaAny.penalty.findMany({
@@ -322,10 +395,15 @@ export async function accrueExpiryPenalties(options: {
 
   let contractsCharged = 0;
   let penaltiesCreated = 0;
+  let skippedUnderUnlock = 0;
   let totalCharged = 0;
   const details: Array<{ contractNumber: string; charges: number; amount: number }> = [];
 
   for (const contract of contracts) {
+    if (underUnlock.has(contract.id)) {
+      skippedUnderUnlock++;
+      continue;
+    }
     // In a dry run the enabled flag is bypassed above, so it has to be
     // satisfied here for the plan to be produced at all.
     // A preview of a feature not yet switched on anchors activation to
@@ -353,6 +431,11 @@ export async function accrueExpiryPenalties(options: {
 
     if (dryRun) continue;
 
+    // Whether this contract has ever been charged for running past term. Used
+    // below to decide whether the customer is hearing about it for the first
+    // time — DAILY mode must not send an SMS every morning.
+    const isFirstCharge = (chargesByContract.get(contract.id) ?? []).length === 0;
+
     // skipDuplicates leans on the dedupeKey unique index: a concurrent run
     // that already wrote a charge is the constraint doing its job, not an error.
     const written = await prismaAny.penalty.createMany({
@@ -376,6 +459,37 @@ export async function accrueExpiryPenalties(options: {
     }
 
     await recomputePenaltyOutstanding(contract.id);
+
+    if (isFirstCharge && settings.notifyCustomer) {
+      await notifyCustomerOfPenalty(contract.id, amount, settings);
+    }
+  }
+
+  // Money moved against customers with nothing recorded but the rows
+  // themselves — no who, no when, no settings in force. The manual button
+  // audited; the cron that does this every morning did not.
+  if (!dryRun && penaltiesCreated > 0) {
+    try {
+      await createAuditLog({
+        action: 'ACCRUE_EXPIRY_PENALTIES',
+        entity: 'PenaltySettings',
+        entityId: settings.id,
+        newValues: {
+          trigger: 'scheduled',
+          mode: settings.expiryPenaltyMode,
+          rate: settings.expiryPenaltyRate,
+          graceDays: settings.expiryGraceDays,
+          capPercentage: settings.maxPenaltyPercentage,
+          contractsExamined: contracts.length,
+          contractsCharged,
+          skippedUnderUnlock,
+          penaltiesCreated,
+          totalCharged,
+        },
+      });
+    } catch (error) {
+      console.error('Failed to audit expiry penalty accrual:', error);
+    }
   }
 
   return {
@@ -383,6 +497,7 @@ export async function accrueExpiryPenalties(options: {
     contractsExamined: contracts.length,
     contractsCharged,
     penaltiesCreated,
+    skippedUnderUnlock,
     totalCharged,
     dryRun,
     details: details.sort((a, b) => b.amount - a.amount),
@@ -407,7 +522,7 @@ export async function allocateToPenalties(
   if (available <= 0) return { applied: 0, remaining: 0 };
 
   const penalties = await tx.penalty.findMany({
-    where: { contractId, isPaid: false },
+    where: { contractId, isPaid: false, isWaived: false },
     orderBy: [{ periodDate: 'asc' }, { appliedDate: 'asc' }],
   });
 
@@ -461,8 +576,10 @@ export async function rebuildPenaltyAllocation(
   leftoverAfterInstallments: number,
   tx: any = prismaAny
 ): Promise<number> {
+  // Waived rows stay waived — reversing a payment must not resurrect a charge
+  // an administrator deliberately cancelled.
   await tx.penalty.updateMany({
-    where: { contractId },
+    where: { contractId, isWaived: false },
     data: { paidAmount: 0, isPaid: false, paidAt: null },
   });
 
@@ -471,4 +588,80 @@ export async function rebuildPenaltyAllocation(
   }
 
   return recomputePenaltyOutstanding(contractId, tx);
+}
+
+/**
+ * Cancels a penalty without erasing it.
+ *
+ * Completion is blocked while any penalty stands, so a charge raised in error
+ * would otherwise trap a contract permanently — the device never released and
+ * the only remedy was editing the database by hand. The row survives with who
+ * cancelled it and why, because a charge that was wrong is still something
+ * that happened to a customer.
+ */
+export async function waivePenalty(params: {
+  penaltyId: string;
+  adminUserId: string;
+  reason: string;
+}): Promise<{ penalty: any; penaltyOutstanding: number }> {
+  const existing = await prismaAny.penalty.findUnique({
+    where: { id: params.penaltyId },
+    include: { contract: { select: { contractNumber: true } } },
+  });
+  if (!existing) throw new Error('Penalty not found');
+  if (existing.isWaived) throw new Error('This penalty has already been waived');
+
+  const penalty = await prismaAny.penalty.update({
+    where: { id: params.penaltyId },
+    data: {
+      isWaived: true,
+      waivedAt: new Date(),
+      waivedById: params.adminUserId,
+      waiveReason: params.reason,
+    },
+  });
+
+  const penaltyOutstanding = await recomputePenaltyOutstanding(existing.contractId);
+
+  await createAuditLog({
+    userId: params.adminUserId,
+    action: 'WAIVE_PENALTY',
+    entity: 'Penalty',
+    entityId: params.penaltyId,
+    oldValues: { amount: existing.amount, paidAmount: existing.paidAmount, reason: existing.reason },
+    newValues: {
+      contractNumber: existing.contract?.contractNumber,
+      waiveReason: params.reason,
+      penaltyOutstandingAfter: penaltyOutstanding,
+    },
+  });
+
+  return { penalty, penaltyOutstanding };
+}
+
+/**
+ * A contract that is written off or cancelled is no longer being collected, so
+ * its penalties stop being outstanding. Without this the cached total kept
+ * reporting money owed on a dead contract, which then surfaced in the
+ * defaulters report.
+ */
+export async function clearPenaltiesOnContractClose(
+  contractId: string,
+  adminUserId: string | null,
+  reason: string,
+  tx: any = prismaAny
+): Promise<void> {
+  await tx.penalty.updateMany({
+    where: { contractId, isPaid: false, isWaived: false },
+    data: {
+      isWaived: true,
+      waivedAt: new Date(),
+      ...(adminUserId ? { waivedById: adminUserId } : {}),
+      waiveReason: reason,
+    },
+  });
+  await tx.hirePurchaseContract.update({
+    where: { id: contractId },
+    data: { penaltyOutstanding: 0 },
+  });
 }

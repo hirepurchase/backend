@@ -4,6 +4,7 @@ import { createAuditLog } from '../services/auditService';
 import {
   getPenaltySettings,
   accrueExpiryPenalties,
+  waivePenalty,
   PENALTY_MODE,
 } from '../services/penaltyService';
 import prisma from '../config/database';
@@ -61,6 +62,7 @@ export async function updatePenaltyConfig(req: AuthenticatedRequest, res: Respon
       expiryPenaltyRate,
       expiryGraceDays,
       maxPenaltyPercentage,
+      notifyCustomer,
       blockUnlockOnPenalty,
     } = req.body ?? {};
 
@@ -103,6 +105,7 @@ export async function updatePenaltyConfig(req: AuthenticatedRequest, res: Respon
         ...(expiryPenaltyRate !== undefined ? { expiryPenaltyRate: Number(expiryPenaltyRate) } : {}),
         ...(expiryGraceDays !== undefined ? { expiryGraceDays: Number(expiryGraceDays) } : {}),
         ...(maxPenaltyPercentage !== undefined ? { maxPenaltyPercentage: Number(maxPenaltyPercentage) } : {}),
+        ...(notifyCustomer !== undefined ? { notifyCustomer: Boolean(notifyCustomer) } : {}),
 
         // Re-stamped on every enable, not only the first. Stamping once meant
         // switching the feature off for a month to review it and back on again
@@ -189,5 +192,38 @@ export async function runExpiryPenalties(req: AuthenticatedRequest, res: Respons
   } catch (error) {
     console.error('Run expiry penalties error:', error);
     res.status(500).json({ error: 'Failed to run the accrual' });
+  }
+}
+
+// POST /settings/penalties/:penaltyId/waive
+export async function waivePenaltyCharge(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const admin = req.user as AdminUserPayload;
+    const { penaltyId } = req.params;
+    const { reason } = req.body ?? {};
+
+    // Cancelling a charge against a customer is not a thing to do silently, and
+    // the audit entry is worthless without a stated reason.
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+      res.status(400).json({ error: 'Give a reason for waiving this charge (at least 5 characters)' });
+      return;
+    }
+
+    const result = await waivePenalty({
+      penaltyId,
+      adminUserId: admin.id,
+      reason: reason.trim(),
+    });
+
+    res.json({
+      message: 'Penalty waived',
+      penalty: result.penalty,
+      penaltyOutstanding: result.penaltyOutstanding,
+    });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to waive the penalty';
+    const known = /not found|already been waived/i.test(message);
+    console.error('Waive penalty error:', error);
+    res.status(known ? 400 : 500).json({ error: message });
   }
 }

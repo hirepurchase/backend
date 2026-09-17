@@ -11,7 +11,7 @@ import {
   requestStandaloneInventoryDeviceLock,
 } from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
-import { PENALTY_KIND, recomputePenaltyOutstanding } from '../services/penaltyService';
+import { PENALTY_KIND, recomputePenaltyOutstanding, clearPenaltiesOnContractClose } from '../services/penaltyService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
 import {
@@ -1244,6 +1244,11 @@ export async function cancelContract(req: AuthenticatedRequest, res: Response): 
         where: { contractId: id, status: 'PENDING' },
         data: { status: 'CANCELLED' },
       });
+
+      // Nothing is being collected on a cancelled contract, so its penalties
+      // stop being owed. Left standing, the cached total kept reporting money
+      // due on a dead contract and surfaced in the defaulters report.
+      await clearPenaltiesOnContractClose(id, req.user!.id, 'Contract cancelled', tx);
     });
 
     // Unenroll device from Knox Guard (non-blocking — same pattern as write-off)
@@ -1320,6 +1325,10 @@ export async function writeOffContract(req: AuthenticatedRequest, res: Response)
         },
         data: { status: 'WRITTEN_OFF' },
       });
+
+      // Writing off the principal while still carrying the late charges on it
+      // would be incoherent.
+      await clearPenaltiesOnContractClose(id, req.user!.id, 'Contract written off', tx);
 
       // Detach the Knox-managed device — the customer defaulted, this isn't a
       // completed sale, so it must not be treated like one. Deleting it (rather

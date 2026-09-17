@@ -525,6 +525,7 @@ function formatDeviceAmount(amount: number): string {
 export interface DeviceMessageMetrics {
   overdueAmount: number;
   maxDaysOverdue: number;
+  blockingPenaltyAmount?: number;
   nextPayment?: { installmentNo: number; dueDate: Date; amount: number } | null;
 }
 
@@ -555,9 +556,27 @@ function buildDeviceStatusMessage(
   // locks and the lock screen carries the amount due.
   if (metrics.overdueAmount > 0) {
     const support = customerExperience.supportPhone || FALLBACK_SUPPORT_PHONE;
+    // Both figures when both are owed, so the customer knows what actually
+    // clears the lock rather than paying the installments and staying shut out.
+    const penaltyPart =
+      metrics.blockingPenaltyAmount && metrics.blockingPenaltyAmount > 0
+        ? ` + late charges ${formatDeviceAmount(metrics.blockingPenaltyAmount)}`
+        : '';
     return withinLimit(
       'Your phone has been restricted because your payment is overdue.',
-      `Amount due: ${formatDeviceAmount(metrics.overdueAmount)}. ${payVia} Support: ${support}`
+      `Amount due: ${formatDeviceAmount(metrics.overdueAmount)}${penaltyPart}. ${payVia} Support: ${support}`
+    );
+  }
+
+  // Installments are current but late charges are still holding the device.
+  // Without this the screen kept the wording from when they were in arrears —
+  // naming a figure the customer had already paid, which is the most
+  // infuriating possible thing for a lock screen to say.
+  if (metrics.blockingPenaltyAmount && metrics.blockingPenaltyAmount > 0) {
+    const support = customerExperience.supportPhone || FALLBACK_SUPPORT_PHONE;
+    return withinLimit(
+      'Your installments are up to date, but late charges on your account are still unpaid.',
+      `Late charges due: ${formatDeviceAmount(metrics.blockingPenaltyAmount)}. ${payVia} Support: ${support}`
     );
   }
 
@@ -582,9 +601,14 @@ function buildLockMessage(
   contract: any,
   overdueAmount: number,
   maxDaysOverdue: number,
-  customerExperience: DeviceControlCustomerExperience
+  customerExperience: DeviceControlCustomerExperience,
+  blockingPenaltyAmount: number = 0
 ): string {
-  return buildDeviceStatusMessage({ overdueAmount, maxDaysOverdue }, customerExperience, 'LOCK');
+  return buildDeviceStatusMessage(
+    { overdueAmount, maxDaysOverdue, blockingPenaltyAmount },
+    customerExperience,
+    'LOCK'
+  );
 }
 
 // The customer is not in arrears here — their agent has not remitted the
@@ -974,7 +998,7 @@ function decorateStandaloneManagedDevice<T extends { metadata?: string | null }>
 
 function buildLockCommandPayload(
   contract: any,
-  metrics: { overdueAmount: number; maxDaysOverdue: number },
+  metrics: { overdueAmount: number; maxDaysOverdue: number; blockingPenaltyAmount?: number },
   defaults: DeviceControlEnrollmentDefaults,
   reason: 'ARREARS' | 'AGENT_DEPOSIT' = 'ARREARS'
 ) {
@@ -984,7 +1008,13 @@ function buildLockCommandPayload(
   return {
     message: reason === 'AGENT_DEPOSIT'
       ? buildAgentDepositLockMessage(customerExperience)
-      : buildLockMessage(contract, metrics.overdueAmount, metrics.maxDaysOverdue, customerExperience),
+      : buildLockMessage(
+          contract,
+          metrics.overdueAmount,
+          metrics.maxDaysOverdue,
+          customerExperience,
+          metrics.blockingPenaltyAmount
+        ),
     tel: customerExperience.supportPhone || undefined,
     warningMessage: customerExperience.warningMessage,
     blockIncomingCalls: BLOCK_INCOMING_CALLS_ON_LOCK,
@@ -2596,6 +2626,19 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   // the device does not show up in getDeviceLockIssues as a lock that failed
   // — and it lapses on the clock, so nothing has to remember to revoke it.
   const temporaryUnlockActive = isActive && hasLiveTemporaryUnlock(contract);
+  // Late charges never cause a lock — only overdue installments and the agent
+  // deposit do that. What they do is hold a lock that is already in place, via
+  // arrearsGenuinelyCleared below. That leaves a case with no command of its
+  // own: the customer clears the arrears, stays locked on charges alone, and
+  // the screen keeps the wording from when they were in arrears — naming a
+  // figure they have already paid.
+  const penaltyHoldOnly =
+    isActive &&
+    !isOverdueEnoughToLock &&
+    !agentDepositUnpaid &&
+    !temporaryUnlockActive &&
+    metrics.overdueAmount === 0 &&
+    metrics.blockingPenaltyAmount > 0;
   const shouldLock = (isOverdueEnoughToLock || agentDepositUnpaid) && !temporaryUnlockActive;
   const shouldBlink = PAYMENT_REMINDER_ENABLED && hasUpcomingPaymentDue && !isOverdueEnoughToLock;
   // A blinking reminder keeps showing until Knox is told to stop, and unlock is
@@ -2634,17 +2677,43 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   const pendingAdminUnlock =
     contract.managedDevice.desiredState === 'UNLOCKED'
     && actualState === 'LOCKED'
-    && (!agentDepositUnpaid || temporaryUnlockActive);
+    && (!agentDepositUnpaid || temporaryUnlockActive)
+    // An admin's stale desiredState must not release a penalty hold either.
+    && !penaltyHoldOnly;
   const needsLockCommand = shouldLock
     && deviceCanAcceptControlCommand
     && !['LOCKED', 'PENDING'].includes(actualState);
+  // Re-issue the lock purely to correct the message the customer is reading.
+  // Guarded on the text actually differing, so this cannot turn into a command
+  // every five minutes against a device that is already saying the right thing.
+  let needsMessageRefresh = false;
+  if (penaltyHoldOnly && deviceCanAcceptControlCommand && actualState === 'LOCKED') {
+    const intended = buildLockCommandPayload(
+      contract,
+      metrics,
+      kSettings as DeviceControlEnrollmentDefaults,
+      'ARREARS'
+    ).message;
+    // Compared against what was actually pushed, recorded on the device. A
+    // successful dispatch creates no command row, so reading command history
+    // here would find nothing and refresh on every single evaluation.
+    needsMessageRefresh = Boolean(
+      contract.managedDevice.lastLockMessage && contract.managedDevice.lastLockMessage !== intended
+    );
+  }
   const needsUnlockCommand = (shouldUnlock || pendingAdminUnlock)
     && deviceCanAcceptControlCommand
     // A blinking device reports UNLOCKED, so that state must not veto the
     // command that stops the blink.
     && (shouldStopBlink || !['UNLOCKED', 'PENDING'].includes(actualState));
 
-  const desiredState: ManagedDeviceState = shouldLock ? 'LOCKED' : 'UNLOCKED';
+  // A penalty hold is a lock we intend to keep. Without penaltyHoldOnly here
+  // desiredState computed to UNLOCKED while the device sat LOCKED, which both
+  // flagged the device as drifted in getDeviceLockIssues and — worse — made
+  // pendingAdminUnlock true on the next evaluation, releasing the very hold
+  // blockOnUnpaidPenalties exists to apply. The setting delayed an unlock by
+  // one tick rather than preventing it.
+  const desiredState: ManagedDeviceState = shouldLock || penaltyHoldOnly ? 'LOCKED' : 'UNLOCKED';
   const identifier = getManagedDeviceIdentifier(contract.managedDevice);
   let actionResult: Awaited<ReturnType<typeof lockKnoxGuardDevice>> | null = null;
   let actionType: string | null = null;
@@ -2652,8 +2721,11 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   // Populated alongside actionType so a failed command can be requeued below
   // with the exact same payload, instead of being silently dropped.
   let retryPayload: Record<string, unknown> | null = null;
+  // Recorded on the device below so a later evaluation can tell whether the
+  // customer is already reading the right thing.
+  let lockMessageSent: string | null = null;
 
-  if (needsLockCommand) {
+  if (needsLockCommand || needsMessageRefresh) {
     // Only when the deposit is the sole reason — if the customer is genuinely
     // in arrears too, the arrears wording is the one they can act on.
     const lockPayload = buildLockCommandPayload(
@@ -2672,7 +2744,10 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     });
     actionType = 'LOCK_DEVICE';
     retryPayload = { ...lockPayload };
-    if (actionResult.success || actionResult.dryRun) nextActualState = 'LOCKED';
+    if (actionResult.success || actionResult.dryRun) {
+      nextActualState = 'LOCKED';
+      lockMessageSent = lockPayload.message;
+    }
   } else if (needsUnlockCommand) {
     // Checked before blink: a device that has cleared its arrears must be
     // unlocked first, even if the next installment is already due soon. Blink
@@ -2764,6 +2839,9 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     deviceUpdate.actualState = 'LOCKED';
     deviceUpdate.enrollmentStatus = 'ACTIVE';
     deviceUpdate.lastLockedAt = new Date();
+    // What the customer is now reading, so a later evaluation can tell whether
+    // the screen still matches the reason they are locked.
+    if (lockMessageSent) deviceUpdate.lastLockMessage = lockMessageSent;
   } else if (actionType === 'UNLOCK_DEVICE' && (actionResult?.success || actionResult?.dryRun)) {
     deviceUpdate.actualState = 'UNLOCKED';
     deviceUpdate.enrollmentStatus = 'ACTIVE';

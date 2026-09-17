@@ -59,6 +59,7 @@ model AdminUser {
   temporaryUnlocksAsAgent   TemporaryUnlockRequest[] @relation("TemporaryUnlockAgent")
   temporaryUnlocksRequested TemporaryUnlockRequest[] @relation("TemporaryUnlockRequestedBy")
   temporaryUnlocksReviewed  TemporaryUnlockRequest[] @relation("TemporaryUnlockReviewedBy")
+  penaltiesWaived           Penalty[]                @relation("PenaltyWaivedBy")
   contactAttempts       ContactAttempt[]       @relation("ContactAttemptOfficer")
   announcementsPosted   StaffAnnouncement[]    @relation("AnnouncementCreatedBy")
   createdAt             DateTime              @default(now())
@@ -402,11 +403,21 @@ model Penalty {
   appliedDate DateTime             @default(now())
   isPaid      Boolean              @default(false)
   paidAt      DateTime?
+  // Waived, not deleted: a charge that was wrong is still something that
+  // happened, and a contract cannot complete while a penalty stands — so
+  // without a way to cancel one, a single bad charge would trap a contract
+  // forever with a direct database edit as the only remedy.
+  isWaived    Boolean              @default(false)
+  waivedAt    DateTime?
+  waivedById  String?
+  waivedBy    AdminUser?           @relation("PenaltyWaivedBy", fields: [waivedById], references: [id])
+  waiveReason String?
   createdAt   DateTime             @default(now())
   updatedAt   DateTime             @updatedAt
 
   @@index([contractId, isPaid])
   @@index([contractId, kind])
+  @@index([kind, periodDate])
 }
 
 model HubtelPreapproval {
@@ -450,6 +461,11 @@ model ManagedDevice {
   desiredState      String                @default("UNLOCKED") // LOCKED, UNLOCKED
   actualState       String                @default("UNKNOWN") // UNKNOWN, LOCKED, UNLOCKED, PENDING
   isActive          Boolean               @default(true)
+  // The exact text last pushed to the lock screen. A successful direct dispatch
+  // writes no ManagedDeviceCommand row — those exist only for retries — so
+  // without this there is no durable record to compare against, and a
+  // message-refresh check would re-lock the device on every evaluation.
+  lastLockMessage   String?
   lastLockedAt      DateTime?
   lastUnlockedAt    DateTime?
   lastEvaluatedAt   DateTime?
@@ -595,6 +611,9 @@ model PenaltySettings {
   // backdating to their real expiry would invent six figures of charges
   // against customers who were never told this rule existed.
   activatedAt          DateTime?
+  // Tells the customer the first time a contract is charged. Deliberately not
+  // per charge: DAILY mode would otherwise send one SMS per customer per day.
+  notifyCustomer       Boolean  @default(true)
   updatedById          String?
   createdAt            DateTime @default(now())
   updatedAt            DateTime @updatedAt
