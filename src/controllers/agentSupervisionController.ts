@@ -324,3 +324,141 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
     res.status(500).json({ error: 'Failed to update settings' });
   }
 }
+
+// PUT /admin-users/agent-supervision/bulk
+//
+// Assigns many agents at once.
+//
+// There are three officers and ninety-odd agents, so doing this one row at a
+// time is ninety saves for what is really one decision — "these people are
+// LOVINA's". Per-agent saves stay for corrections; this is for the initial
+// distribution.
+export async function bulkSetAgentSupervision(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const admin = req.user as AdminUserPayload;
+    const { agentIds, clusterAgentId, csoId } = req.body ?? {};
+
+    if (!Array.isArray(agentIds) || agentIds.length === 0) {
+      res.status(400).json({ error: 'Select at least one agent' });
+      return;
+    }
+    if (clusterAgentId === undefined && csoId === undefined) {
+      res.status(400).json({ error: 'Choose a cluster agent or an officer to assign' });
+      return;
+    }
+
+    const ids = Array.from(new Set(agentIds.map((v: unknown) => String(v))));
+    const agents = await prismaAny.adminUser.findMany({
+      where: { id: { in: ids } },
+      include: { role: { select: { name: true } } },
+    });
+    if (agents.length !== ids.length) {
+      res.status(400).json({ error: 'One or more agents were not found' });
+      return;
+    }
+
+    const notAssignable = agents.filter(
+      (a: any) => !(ASSIGNABLE_AGENT_ROLES as readonly string[]).includes(a.role.name)
+    );
+    if (notAssignable.length > 0) {
+      res.status(400).json({
+        error: 'Some of those users are not in a role that can be supervised',
+        names: notAssignable.map((a: any) => `${a.firstName} ${a.lastName}`.trim()),
+      });
+      return;
+    }
+
+    // --- cluster agent ---
+    let clusterApplied = 0;
+    let clusterSkipped: string[] = [];
+    if (clusterAgentId !== undefined) {
+      if (clusterAgentId) {
+        const supervisor = await prismaAny.adminUser.findUnique({
+          where: { id: clusterAgentId },
+          include: { role: { select: { name: true } } },
+        });
+        if (!supervisor || supervisor.role.name !== CLUSTER_AGENT_ROLE) {
+          res.status(400).json({ error: 'The chosen supervisor is not a cluster agent' });
+          return;
+        }
+        if (!supervisor.isActive) {
+          res.status(400).json({ error: 'That cluster agent is deactivated' });
+          return;
+        }
+
+        // A cluster agent is not supervised by another, and nobody supervises
+        // themselves. Skipped rather than refusing the whole batch, so one bad
+        // pick does not discard fifty good ones.
+        for (const agent of agents) {
+          const eligible =
+            (CLUSTER_SUPERVISABLE_ROLES as readonly string[]).includes(agent.role.name) &&
+            agent.id !== clusterAgentId;
+          if (!eligible) {
+            clusterSkipped.push(`${agent.firstName} ${agent.lastName}`.trim());
+            continue;
+          }
+          await prismaAny.clusterAgentAssignment.upsert({
+            where: { agentId: agent.id },
+            update: { clusterAgentId, assignedById: admin.id },
+            create: { agentId: agent.id, clusterAgentId, assignedById: admin.id },
+          });
+          clusterApplied++;
+        }
+      } else {
+        const cleared = await prismaAny.clusterAgentAssignment.deleteMany({
+          where: { agentId: { in: ids } },
+        });
+        clusterApplied = cleared.count;
+      }
+    }
+
+    // --- customer service officer ---
+    let csoApplied = 0;
+    if (csoId !== undefined) {
+      if (csoId) {
+        const officer = await prismaAny.adminUser.findUnique({
+          where: { id: csoId },
+          include: { role: { select: { name: true } } },
+        });
+        if (!officer || officer.role.name !== CUSTOMER_SERVICE_ROLE || !officer.isActive) {
+          res.status(400).json({ error: 'The chosen officer is not an active customer service user' });
+          return;
+        }
+        await prismaAny.csoAgentAssignment.deleteMany({ where: { agentId: { in: ids } } });
+        await prismaAny.csoAgentAssignment.createMany({
+          data: ids.map((agentId) => ({ agentId, csoId, assignedById: admin.id })),
+        });
+        csoApplied = ids.length;
+      } else {
+        const cleared = await prismaAny.csoAgentAssignment.deleteMany({ where: { agentId: { in: ids } } });
+        csoApplied = cleared.count;
+      }
+    }
+
+    await createAuditLog({
+      userId: admin.id,
+      action: 'BULK_SET_AGENT_SUPERVISION',
+      entity: 'AdminUser',
+      newValues: {
+        agentCount: ids.length,
+        clusterAgentId: clusterAgentId ?? null,
+        csoId: csoId ?? null,
+        clusterApplied,
+        csoApplied,
+        skipped: clusterSkipped,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] as string,
+    });
+
+    res.json({
+      message: `${ids.length} agent${ids.length === 1 ? '' : 's'} updated`,
+      clusterApplied,
+      csoApplied,
+      skipped: clusterSkipped,
+    });
+  } catch (error) {
+    console.error('bulkSetAgentSupervision error:', error);
+    res.status(500).json({ error: 'Failed to update supervision' });
+  }
+}

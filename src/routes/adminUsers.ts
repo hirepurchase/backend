@@ -17,6 +17,7 @@ import {
   getAgentSupervision,
   setAgentSupervision,
   updateSupervisionSettings,
+  bulkSetAgentSupervision,
 } from '../controllers/agentSupervisionController';
 import {
   getClusterAgents,
@@ -57,6 +58,11 @@ router.put(
   '/agent-supervision/settings',
   requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS),
   updateSupervisionSettings
+);
+router.put(
+  '/agent-supervision/bulk',
+  requireAnyPermission(PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS),
+  bulkSetAgentSupervision
 );
 router.put(
   '/agent-supervision',
