@@ -261,12 +261,17 @@ export async function setAgentSupervision(req: AuthenticatedRequest, res: Respon
 export async function updateSupervisionSettings(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const admin = req.user as AdminUserPayload;
-    const { requireClusterAgent, requireCso } = req.body ?? {};
+    const { requireClusterAgent, requireCso, confirmBlocking } = req.body ?? {};
     const current = await getSupervisionSettings();
 
-    // Turning the rule on while agents are uncovered stops them selling the
-    // moment it saves. Refused with the count rather than discovered by ninety
-    // agents at once.
+    // Switching a rule on while agents are uncovered stops those agents selling
+    // the moment it saves. That is often the point — the rule exists to make
+    // people get assigned, and refusing to arm it until everyone already is
+    // makes it useless for that. So the count is reported back once and the
+    // caller confirms; it is a decision to take deliberately, not one to be
+    // prevented from taking.
+    const blocking: { rule: string; uncovered: number }[] = [];
+
     if (requireClusterAgent === true && !current.requireClusterAgent) {
       const uncovered = await prismaAny.adminUser.count({
         where: {
@@ -275,13 +280,7 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
           agentCluster: null,
         },
       });
-      if (uncovered > 0) {
-        res.status(400).json({
-          error: `${uncovered} active agent${uncovered === 1 ? ' is' : 's are'} not assigned to a cluster agent. Assign them first, or they will be blocked from creating contracts the moment this is switched on.`,
-          uncovered,
-        });
-        return;
-      }
+      if (uncovered > 0) blocking.push({ rule: 'cluster agent', uncovered });
     }
     if (requireCso === true && !current.requireCso) {
       const uncovered = await prismaAny.adminUser.count({
@@ -291,13 +290,24 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
           agentAssignedCsos: { none: {} },
         },
       });
-      if (uncovered > 0) {
-        res.status(400).json({
-          error: `${uncovered} active agent${uncovered === 1 ? ' is' : 's are'} not assigned to a customer service officer. Assign them first.`,
-          uncovered,
-        });
-        return;
-      }
+      if (uncovered > 0) blocking.push({ rule: 'customer service officer', uncovered });
+    }
+
+    if (blocking.length > 0 && !confirmBlocking) {
+      const worst = Math.max(...blocking.map((b) => b.uncovered));
+      res.status(409).json({
+        error: blocking
+          .map(
+            (b) =>
+              `${b.uncovered} active agent${b.uncovered === 1 ? ' is' : 's are'} not assigned to a ${b.rule}.`
+          )
+          .join(' ') +
+          ` They will be unable to create contracts as soon as this is switched on. Confirm to proceed.`,
+        needsConfirmation: true,
+        blocking,
+        uncovered: worst,
+      });
+      return;
     }
 
     const updated = await prismaAny.supervisionSettings.update({
@@ -315,10 +325,16 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
       entity: 'SupervisionSettings',
       entityId: updated.id,
       oldValues: { requireClusterAgent: current.requireClusterAgent, requireCso: current.requireCso },
-      newValues: { requireClusterAgent: updated.requireClusterAgent, requireCso: updated.requireCso },
+      newValues: {
+        requireClusterAgent: updated.requireClusterAgent,
+        requireCso: updated.requireCso,
+        // Recorded because switching this on knowing it blocks people is a
+        // decision someone may need to account for later.
+        blockedAgentsAtSwitchOn: blocking,
+      },
     });
 
-    res.json({ settings: updated });
+    res.json({ settings: updated, blocked: blocking });
   } catch (error) {
     console.error('updateSupervisionSettings error:', error);
     res.status(500).json({ error: 'Failed to update settings' });
