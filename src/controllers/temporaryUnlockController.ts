@@ -198,18 +198,28 @@ export async function createTemporaryUnlockRequest(req: AuthenticatedRequest, re
       return;
     }
 
-    // Super admins can raise one for anybody; a cluster agent only for the
-    // agents they supervise.
-    if (caller.role !== 'SUPER_ADMIN') {
+    // Who may raise a request for this contract.
+    //
+    // Cluster agents cover the agents they supervise. Admins cover everyone,
+    // because a cluster agent's own customers are otherwise unreachable: the
+    // seller cannot vouch for themselves, no cluster agent supervises another,
+    // and the request would have had nowhere to go. Segregation is preserved
+    // at approval instead — see the requester-is-not-approver check there.
+    const canRequestForAnyone =
+      caller.role === 'SUPER_ADMIN' || callerCan(req, PERMISSIONS.APPROVE_TEMPORARY_UNLOCK);
+
+    if (!canRequestForAnyone) {
       const supervised = await getSupervisedAgentIds(caller.id);
       if (contract.createdById === caller.id) {
         // Cluster agents sell as well as supervise. The guarantee only means
         // something if someone other than the seller is staking their name on
         // it, so stating the rule beats silently omitting their own customers
         // from the picker and letting them think it is a bug.
+        // Naming who can actually help. The previous wording said "ask an
+        // administrator" at a time when administrators could not do it either.
         res.status(403).json({
           error:
-            'You cannot request an unlock for your own customer. The guarantee has to come from someone other than the agent who sold the contract — ask an administrator.',
+            'You cannot request an unlock for your own customer — the guarantee has to come from someone other than the agent who sold the contract. An administrator can raise this one for you.',
         });
         return;
       }
@@ -327,6 +337,16 @@ export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, r
     }
     if (request.contract?.status !== 'ACTIVE') {
       res.status(400).json({ error: 'The contract is no longer active' });
+      return;
+    }
+
+    // Vouching and agreeing must be two people, or the guarantee means
+    // nothing. Now that admins can raise requests as well as approve them,
+    // this is the only thing keeping the two apart.
+    if (request.requestedById === caller.id) {
+      res.status(403).json({
+        error: 'You raised this request, so another approver has to review it.',
+      });
       return;
     }
 
@@ -539,7 +559,7 @@ export async function cancelTemporaryUnlockRequest(req: AuthenticatedRequest, re
 export async function listTemporaryUnlockRequests(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const caller = getCaller(req);
-    const { status } = req.query as { status?: string };
+    const { status } = (req.query ?? {}) as { status?: string };
 
     const where: any = {};
     if (status && status !== 'ALL') {
@@ -612,24 +632,69 @@ export async function getPendingTemporaryUnlockCount(req: AuthenticatedRequest, 
   }
 }
 
-// GET /temporary-unlocks/eligible-contracts — the picker for a new request
+// GET /temporary-unlocks/eligible-contracts?search=
 export async function getEligibleContracts(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const caller = getCaller(req);
+    const search = typeof req.query?.search === 'string' ? req.query.search.trim() : '';
 
-    const agentIds =
-      caller.role === 'SUPER_ADMIN' ? null : await getSupervisedAgentIds(caller.id);
+    const seesEveryone =
+      caller.role === 'SUPER_ADMIN' || callerCan(req, PERMISSIONS.APPROVE_TEMPORARY_UNLOCK);
+    // A cluster agent's own sales are included even though they cannot request
+    // for them: leaving them out meant searching for your own customer returned
+    // nothing, with no way to tell whether they were ineligible or you had
+    // mistyped the name. They come back flagged, and the UI disables them with
+    // the reason.
+    const agentIds = seesEveryone
+      ? null
+      : [...(await getSupervisedAgentIds(caller.id)), caller.id];
     if (agentIds !== null && agentIds.length === 0) {
-      res.json({ contracts: [] });
+      res.json({ contracts: [], truncated: false, cap: LIST_CAP });
+      return;
+    }
+
+    // Ordered by how long the customer has actually been behind, which is what
+    // "most urgent" means here. Ordering by outstanding balance — as this did —
+    // dropped a customer ninety days late on a small balance in favour of one a
+    // day late on a large one, and with over a thousand contracts matching, the
+    // cap meant hundreds were simply unreachable.
+    //
+    // Raw because the sort key is MIN(dueDate) across a contract's overdue
+    // installments, which Prisma cannot express as an orderBy.
+    const like = `%${search.toLowerCase()}%`;
+    const rows: Array<{ id: string }> = await prismaAny.$queryRawUnsafe(
+      `
+      SELECT c."id", MIN(i."dueDate") AS oldest
+      FROM "HirePurchaseContract" c
+      JOIN "InstallmentSchedule" i ON i."contractId" = c."id"
+      JOIN "Customer" cu ON cu."id_uuid" = c."customerId_uuid"
+      WHERE c."status" = 'ACTIVE'
+        AND i."status" IN ('OVERDUE', 'PARTIAL', 'PENDING')
+        AND i."dueDate" < NOW()
+        AND (i."amount" - i."paidAmount") > 0
+        ${agentIds ? 'AND c."createdById" = ANY($1::text[])' : ''}
+        ${search ? `AND (
+             LOWER(cu."firstName" || ' ' || cu."lastName") LIKE $${agentIds ? 2 : 1}
+          OR LOWER(cu."membershipId") LIKE $${agentIds ? 2 : 1}
+          OR cu."phone" LIKE $${agentIds ? 2 : 1}
+          OR LOWER(c."contractNumber") LIKE $${agentIds ? 2 : 1}
+        )` : ''}
+      GROUP BY c."id"
+      ORDER BY oldest ASC
+      LIMIT ${LIST_CAP + 1}
+      `,
+      ...[...(agentIds ? [agentIds] : []), ...(search ? [like] : [])]
+    );
+
+    const truncated = rows.length > LIST_CAP;
+    const ids = rows.slice(0, LIST_CAP).map((row) => row.id);
+    if (ids.length === 0) {
+      res.json({ contracts: [], truncated: false, cap: LIST_CAP });
       return;
     }
 
     const contracts = await prismaAny.hirePurchaseContract.findMany({
-      where: {
-        status: 'ACTIVE',
-        ...(agentIds ? { createdById: { in: agentIds } } : {}),
-        installments: { some: { status: { in: ['OVERDUE', 'PARTIAL', 'PENDING'] }, dueDate: { lt: new Date() } } },
-      },
+      where: { id: { in: ids } },
       include: {
         installments: true,
         customer: { select: { firstName: true, lastName: true, phone: true, membershipId: true } },
@@ -640,13 +705,12 @@ export async function getEligibleContracts(req: AuthenticatedRequest, res: Respo
           select: { id: true, status: true },
         },
       },
-      // Ordered at the database, not only after the fact: the cap below would
-      // otherwise drop an arbitrary 500 rather than keeping the most urgent.
-      orderBy: { outstandingBalance: 'desc' },
-      take: LIST_CAP + 1,
     });
 
-    const rows = contracts
+    // The raw query decided the order; findMany does not preserve it.
+    const order = new Map(ids.map((id, index) => [id, index]));
+
+    const result = contracts
       .map((contract: any) => {
         const arrears = computeOverdue(contract);
         return {
@@ -658,6 +722,7 @@ export async function getEligibleContracts(req: AuthenticatedRequest, res: Respo
           agentName: contract.createdBy
             ? `${contract.createdBy.firstName} ${contract.createdBy.lastName}`.trim()
             : null,
+          isOwnSale: contract.createdById === caller.id,
           outstandingBalance: contract.outstandingBalance,
           deviceState: contract.managedDevice?.actualState ?? null,
           hasOpenRequest: (contract.temporaryUnlocks ?? []).length > 0,
@@ -665,14 +730,14 @@ export async function getEligibleContracts(req: AuthenticatedRequest, res: Respo
         };
       })
       .filter((row: any) => row.overdueAmount > 0)
-      .sort((a: any, b: any) => b.maxDaysOverdue - a.maxDaysOverdue);
+      .sort((a: any, b: any) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 
     res.json({
-      contracts: rows.slice(0, LIST_CAP),
-      // Silent truncation in a collections list means customers quietly
-      // missing from it, so the client is told rather than left to assume.
-      truncated: rows.length > LIST_CAP,
-      totalMatching: rows.length > LIST_CAP ? null : rows.length,
+      contracts: result,
+      // Said plainly rather than left for the user to infer from an absence.
+      truncated,
+      cap: LIST_CAP,
+      searched: Boolean(search),
     });
   } catch (error) {
     console.error('Eligible contracts error:', error);

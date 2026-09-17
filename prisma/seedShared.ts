@@ -64,6 +64,7 @@ export async function seedPermissionsAndRoles(prisma: PrismaClient): Promise<See
     PERMISSIONS.MANAGE_CSO_ASSIGNMENTS,
     PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS,
     PERMISSIONS.REQUEST_TEMPORARY_UNLOCK,
+    PERMISSIONS.APPROVE_TEMPORARY_UNLOCK,
     // ADMIN already sees every customer/contract via VIEW_CUSTOMERS and
     // VIEW_CONTRACTS; granting the assigned-scope permissions too would be
     // dead weight that only muddies the role editor.
