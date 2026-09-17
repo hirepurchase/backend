@@ -564,6 +564,20 @@ model AuditLog {
 
 // ============= NOTIFICATION SYSTEM =============
 
+// Whether an agent must be supervised before they can write business.
+//
+// Off by default and deliberately so: when this was built there were 96 active
+// agents and not one cluster agent, so switching it on blind would have stopped
+// every sale in the company at once. Assign first, then enable.
+model SupervisionSettings {
+  id                       String   @id @default(uuid())
+  requireClusterAgent      Boolean  @default(false)
+  requireCso               Boolean  @default(false)
+  updatedById              String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
+}
+
 model NotificationSettings {
   id                        String   @id @default(uuid())
   daysBeforeDue             Int      @default(3)        // Days before due date to send reminder

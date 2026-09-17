@@ -2,6 +2,7 @@ import prisma from '../config/database';
 import { sanitizePhoneNumber } from '../utils/helpers';
 import { isSellingAgentRole } from '../constants/roles';
 import { getAgentDefaultedTemporaryUnlocks } from './temporaryUnlockService';
+import { getSupervisionBlockers } from './supervisionService';
 
 export type ApprovalPriority = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -191,6 +192,7 @@ function assessContractContext(input: {
   excludeContractId?: string;
   agentOutstandingDeposits?: { count: number; total: number } | null;
   defaultedTemporaryUnlocks?: Array<{ contractNumber: string; customerName: string }> | null;
+  supervisionBlockers?: string[] | null;
 }): ContractGuardrailAssessment {
   const {
     customer,
@@ -204,6 +206,7 @@ function assessContractContext(input: {
     excludeContractId,
     agentOutstandingDeposits,
     defaultedTemporaryUnlocks,
+    supervisionBlockers,
   } = input;
 
   const blockers: string[] = [];
@@ -219,6 +222,14 @@ function assessContractContext(input: {
     blockers.push(
       `You have ${agentOutstandingDeposits.count} unpaid ${depositWord} (GHS ${agentOutstandingDeposits.total.toFixed(2)}) outstanding. Pay your outstanding deposit before you can create another contract.`
     );
+  }
+
+  // An unsupervised agent writing business is how a book ends up with nobody
+  // accountable for it. Only fires when the rule is switched on — see
+  // supervisionService for why it ships off.
+  if (supervisionBlockers && supervisionBlockers.length > 0) {
+    riskFlags.push('UNSUPERVISED_AGENT');
+    blockers.push(...supervisionBlockers);
   }
 
   // A cluster agent vouched for one of this agent's customers, an admin
@@ -386,7 +397,7 @@ export async function evaluateContractSubmissionGuardrails(input: {
     agentRole,
   } = input;
 
-  const [customer, inventoryItem, agentLedgerEntries, defaultedUnlocks] = await Promise.all([
+  const [customer, inventoryItem, agentLedgerEntries, defaultedUnlocks, supervisionBlockers] = await Promise.all([
     prisma.customer.findUnique({
       where: { id: customerId },
       select: {
@@ -415,6 +426,9 @@ export async function evaluateContractSubmissionGuardrails(input: {
     isSellingAgentRole(agentRole) && agentId
       ? getAgentDefaultedTemporaryUnlocks(agentId)
       : Promise.resolve([]),
+    isSellingAgentRole(agentRole) && agentId
+      ? getSupervisionBlockers(agentId)
+      : Promise.resolve([] as string[]),
   ]);
 
   const agentOutstandingDeposits = agentLedgerEntries.length > 0
@@ -439,6 +453,7 @@ export async function evaluateContractSubmissionGuardrails(input: {
       contractNumber: row.contractNumber,
       customerName: row.customerName,
     })),
+    supervisionBlockers,
   });
 }
 

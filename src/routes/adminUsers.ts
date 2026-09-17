@@ -14,6 +14,11 @@ import {
   getCustomerServiceChart,
 } from '../controllers/csoAssignmentController';
 import {
+  getAgentSupervision,
+  setAgentSupervision,
+  updateSupervisionSettings,
+} from '../controllers/agentSupervisionController';
+import {
   getClusterAgents,
   setClusterAgents,
 } from '../controllers/clusterAssignmentController';
@@ -40,6 +45,24 @@ router.get('/me/customer-service', getMyCustomerServiceOfficers);
 // Directory of officers and the agents they cover. Contact details only, no
 // customer data, so any signed-in staff member may read it.
 router.get('/customer-service-chart', getCustomerServiceChart);
+
+// Registered above '/:id' so the literal path is not swallowed by the
+// parameterised route below.
+router.get(
+  '/agent-supervision',
+  requireAnyPermission(PERMISSIONS.MANAGE_USERS, PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS),
+  getAgentSupervision
+);
+router.put(
+  '/agent-supervision/settings',
+  requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS),
+  updateSupervisionSettings
+);
+router.put(
+  '/agent-supervision',
+  requireAnyPermission(PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS),
+  setAgentSupervision
+);
 
 // Customer service officer -> agent assignments (before /:id so it isn't shadowed)
 router.get(
