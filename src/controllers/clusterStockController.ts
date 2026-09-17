@@ -21,15 +21,20 @@ async function stockScope(admin: AdminUserPayload): Promise<string[] | null> {
 
 // GET /cluster/stock
 //
-// What each of my agents is holding. Only unsold items count as stock — a
-// device already on a contract is the customer's, not the agent's.
+// Who is holding what. Counts only — a super admin covers 67 holders and 2,000
+// devices, and sending every serial number to draw a summary is a page nobody
+// waits for. Individual devices come from getAgentStockItems when a row is
+// opened.
+//
+// Only unsold items count as stock: a device already on a contract is the
+// customer's, not the agent's.
 export async function getClusterStock(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const admin = req.user as AdminUserPayload;
     const agentIds = await stockScope(admin);
 
     if (agentIds !== null && agentIds.length === 0) {
-      res.json({ agents: [], unassigned: [], summary: { agents: 0, inStock: 0, sold: 0 } });
+      res.json({ agents: [], summary: { agents: 0, inStock: 0, sold: 0 }, pool: null });
       return;
     }
 
@@ -43,40 +48,26 @@ export async function getClusterStock(req: AuthenticatedRequest, res: Response):
         },
         orderBy: [{ firstName: 'asc' }],
       }),
-      prismaAny.inventoryItem.findMany({
+      // Grouped in the database rather than pulled back and counted here.
+      prismaAny.inventoryItem.groupBy({
+        by: ['assignedAgentId', 'status'],
+        _count: { _all: true },
         where: {
           ...(agentIds ? { assignedAgentId: { in: agentIds } } : { assignedAgentId: { not: null } }),
         },
-        include: {
-          product: { select: { id: true, name: true } },
-          contract: { select: { contractNumber: true, status: true } },
-        },
-        orderBy: { createdAt: 'desc' },
       }),
     ]);
 
-    const byAgent = new Map<string, any[]>();
-    for (const item of items) {
-      const list = byAgent.get(item.assignedAgentId) ?? [];
-      list.push(item);
-      byAgent.set(item.assignedAgentId, list);
+    const counts = new Map<string, { inStock: number; sold: number }>();
+    for (const row of items) {
+      const entry = counts.get(row.assignedAgentId) ?? { inStock: 0, sold: 0 };
+      if (row.status === 'SOLD') entry.sold += row._count._all;
+      else entry.inStock += row._count._all;
+      counts.set(row.assignedAgentId, entry);
     }
 
-    const shape = (item: any) => ({
-      id: item.id,
-      serialNumber: item.serialNumber,
-      product: item.product?.name ?? null,
-      productId: item.product?.id ?? null,
-      status: item.status,
-      lockStatus: item.lockStatus,
-      // Sold stock cannot be moved — it belongs to a contract.
-      isMovable: item.status !== 'SOLD' && !item.contractId,
-      contractNumber: item.contract?.contractNumber ?? null,
-      addedAt: item.createdAt,
-    });
-
     const agents = holders.map((holder: any) => {
-      const held = (byAgent.get(holder.id) ?? []).map(shape);
+      const held = counts.get(holder.id) ?? { inStock: 0, sold: 0 };
       return {
         id: holder.id,
         name: `${holder.firstName} ${holder.lastName}`.trim(),
@@ -86,22 +77,89 @@ export async function getClusterStock(req: AuthenticatedRequest, res: Response):
         role: holder.role.name,
         isActive: holder.isActive,
         isSelf: holder.id === admin.id,
-        inStock: held.filter((i: any) => i.isMovable).length,
-        sold: held.filter((i: any) => !i.isMovable).length,
-        items: held,
+        inStock: held.inStock,
+        sold: held.sold,
       };
     });
 
     const inStock = agents.reduce((sum: number, a: any) => sum + a.inStock, 0);
     const sold = agents.reduce((sum: number, a: any) => sum + a.sold, 0);
 
+    // Unassigned stock is nobody's, which is exactly why whoever oversees the
+    // whole book needs to see it — it is the pile waiting to be distributed.
+    let pool: { available: number; sold: number } | null = null;
+    if (agentIds === null) {
+      const unassigned = await prismaAny.inventoryItem.groupBy({
+        by: ['status'],
+        _count: { _all: true },
+        where: { assignedAgentId: null },
+      });
+      const available = unassigned
+        .filter((r: any) => r.status !== 'SOLD')
+        .reduce((sum: number, r: any) => sum + r._count._all, 0);
+      const poolSold = unassigned
+        .filter((r: any) => r.status === 'SOLD')
+        .reduce((sum: number, r: any) => sum + r._count._all, 0);
+      pool = { available, sold: poolSold };
+    }
+
     res.json({
       agents: agents.sort((a: any, b: any) => b.inStock - a.inStock),
       summary: { agents: agents.length, inStock, sold },
+      pool,
+      // Everything, or only this caller's cluster.
+      scope: agentIds === null ? 'all' : 'cluster',
     });
   } catch (error) {
     console.error('getClusterStock error:', error);
     res.status(500).json({ error: 'Failed to load stock' });
+  }
+}
+
+// GET /cluster/stock/items?agentId=
+//
+// One holder's devices, fetched when their row is opened rather than shipped
+// with the summary.
+export async function getAgentStockItems(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const admin = req.user as AdminUserPayload;
+    const { agentId } = (req.query ?? {}) as { agentId?: string };
+    if (!agentId) {
+      res.status(400).json({ error: 'agentId is required' });
+      return;
+    }
+
+    const agentIds = await stockScope(admin);
+    if (agentIds !== null && !agentIds.includes(agentId)) {
+      res.status(403).json({ error: 'That agent is outside your cluster' });
+      return;
+    }
+
+    const items = await prismaAny.inventoryItem.findMany({
+      where: { assignedAgentId: agentId },
+      include: {
+        product: { select: { id: true, name: true } },
+        contract: { select: { contractNumber: true, status: true } },
+      },
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
+    });
+
+    res.json({
+      items: items.map((item: any) => ({
+        id: item.id,
+        serialNumber: item.serialNumber,
+        product: item.product?.name ?? null,
+        status: item.status,
+        lockStatus: item.lockStatus,
+        // Sold stock cannot be moved — it belongs to a contract.
+        isMovable: item.status !== 'SOLD' && !item.contractId,
+        contractNumber: item.contract?.contractNumber ?? null,
+        addedAt: item.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error('getAgentStockItems error:', error);
+    res.status(500).json({ error: 'Failed to load devices' });
   }
 }
 

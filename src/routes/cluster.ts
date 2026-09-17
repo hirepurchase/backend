@@ -4,6 +4,7 @@ import {
   getClusterStock,
   transferClusterStock,
   getStockTransferHistory,
+  getAgentStockItems,
 } from '../controllers/clusterStockController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -24,6 +25,7 @@ router.get('/coverage', requireAnyPermission(PERMISSIONS.MANAGE_CLUSTER_ASSIGNME
 // than by permission, since a cluster agent and an admin hit the same route and
 // should see different books.
 router.get('/stock', requireAnyPermission(PERMISSIONS.VIEW_ASSIGNED_CONTRACTS, PERMISSIONS.MANAGE_INVENTORY), getClusterStock);
+router.get('/stock/items', requireAnyPermission(PERMISSIONS.VIEW_ASSIGNED_CONTRACTS, PERMISSIONS.MANAGE_INVENTORY), getAgentStockItems);
 router.get('/stock/history', requireAnyPermission(PERMISSIONS.VIEW_ASSIGNED_CONTRACTS, PERMISSIONS.MANAGE_INVENTORY), getStockTransferHistory);
 router.post('/stock/transfer', requireAnyPermission(PERMISSIONS.VIEW_ASSIGNED_CONTRACTS, PERMISSIONS.MANAGE_INVENTORY), transferClusterStock);
 
