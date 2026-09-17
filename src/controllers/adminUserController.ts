@@ -20,7 +20,16 @@ export async function getAllAdminUsers(req: AuthenticatedRequest, res: Response)
     }
 
     if (roleId) where.roleId = roleId;
-    if (roleName) where.role = { name: roleName };
+    if (roleName) {
+      // Comma-separated so a caller can ask for every role that may hold
+      // inventory in one request, instead of the picker hard-coding one role
+      // and silently omitting the others.
+      const names = String(roleName)
+        .split(',')
+        .map((n) => n.trim())
+        .filter(Boolean);
+      where.role = names.length > 1 ? { name: { in: names } } : { name: names[0] };
+    }
     if (isActive !== undefined) where.isActive = isActive === 'true';
 
     const [users, total] = await Promise.all([
