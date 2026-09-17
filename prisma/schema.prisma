@@ -40,6 +40,11 @@ model AdminUser {
   firstName             String
   lastName              String
   phone                 String?
+  // Where this person actually works. Collected so a cluster agent can be
+  // grouped with agents near them, and so stock goes to whoever is closest to
+  // the customer rather than whoever asked first.
+  area                  String?
+  district              String?
   isActive              Boolean               @default(true)
   roleId                String
   role                  Role                  @relation(fields: [roleId], references: [id])
@@ -60,6 +65,9 @@ model AdminUser {
   temporaryUnlocksRequested TemporaryUnlockRequest[] @relation("TemporaryUnlockRequestedBy")
   temporaryUnlocksReviewed  TemporaryUnlockRequest[] @relation("TemporaryUnlockReviewedBy")
   penaltiesWaived           Penalty[]                @relation("PenaltyWaivedBy")
+  stockTransfersFrom        InventoryTransfer[]      @relation("StockTransferFrom")
+  stockTransfersTo          InventoryTransfer[]      @relation("StockTransferTo")
+  stockTransfersMade        InventoryTransfer[]      @relation("StockTransferBy")
   contactAttempts       ContactAttempt[]       @relation("ContactAttemptOfficer")
   announcementsPosted   StaffAnnouncement[]    @relation("AnnouncementCreatedBy")
   createdAt             DateTime              @default(now())
@@ -243,6 +251,7 @@ model InventoryItem {
   contractId        String?               @unique
   contract          HirePurchaseContract? @relation(fields: [contractId], references: [id])
   managedDevice     ManagedDevice?
+  transfers         InventoryTransfer[]
   knoxUploadStatus  String?               // PENDING, UPLOADED, FAILED, SKIPPED, DELETE_PENDING, DELETED
   knoxUploadId      String?               // Samsung uploadID from POST /devices/uploads
   knoxUploadError   String?               // Last error message if FAILED
@@ -682,6 +691,30 @@ model NotificationLog {
 // can post one (see PERMISSIONS.MANAGE_ANNOUNCEMENTS). It surfaces to every
 // staff member whose roleId is in targetRoleIds until expiresAt — by default
 // 7 days after posting — or until an admin deactivates it early.
+// Who moved a device, from whom, to whom and why.
+//
+// Stock assignment was a single mutable column on InventoryItem, so a transfer
+// overwrote its own history: the only way to answer "who had this phone last
+// month" was to read audit-log payloads. A cluster agent moving stock between
+// their agents makes that question routine, so it gets a table.
+model InventoryTransfer {
+  id              String        @id @default(uuid())
+  inventoryItemId String
+  inventoryItem   InventoryItem @relation(fields: [inventoryItemId], references: [id], onDelete: Cascade)
+  fromAgentId     String?
+  fromAgent       AdminUser?    @relation("StockTransferFrom", fields: [fromAgentId], references: [id])
+  toAgentId       String?
+  toAgent         AdminUser?    @relation("StockTransferTo", fields: [toAgentId], references: [id])
+  transferredById String
+  transferredBy   AdminUser     @relation("StockTransferBy", fields: [transferredById], references: [id])
+  reason          String?
+  createdAt       DateTime      @default(now())
+
+  @@index([inventoryItemId, createdAt])
+  @@index([toAgentId, createdAt])
+  @@index([fromAgentId, createdAt])
+}
+
 model StaffAnnouncement {
   id            String    @id @default(uuid())
   message       String

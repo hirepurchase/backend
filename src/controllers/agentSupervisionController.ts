@@ -29,6 +29,8 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
           lastName: true,
           email: true,
           phone: true,
+          area: true,
+          district: true,
           role: { select: { name: true } },
           agentCluster: {
             select: { clusterAgentId: true, clusterAgent: { select: { firstName: true, lastName: true } } },
@@ -42,7 +44,7 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
       }),
       prismaAny.adminUser.findMany({
         where: { isActive: true, role: { name: CLUSTER_AGENT_ROLE } },
-        select: { id: true, firstName: true, lastName: true, email: true },
+        select: { id: true, firstName: true, lastName: true, email: true, area: true, district: true },
         orderBy: [{ firstName: 'asc' }],
       }),
       prismaAny.adminUser.findMany({
@@ -58,6 +60,8 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
       name: `${agent.firstName} ${agent.lastName}`.trim(),
       email: agent.email,
       phone: agent.phone,
+      area: agent.area,
+      district: agent.district,
       role: agent.role.name,
       // Cluster agents sell but are not themselves supervised by a cluster
       // agent — the tier is flat. The UI uses this to disable that column.
@@ -80,6 +84,10 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
         id: c.id,
         name: `${c.firstName} ${c.lastName}`.trim(),
         email: c.email,
+        // Shown in the picker so an agent is grouped with a supervisor near
+        // them rather than whoever is alphabetically first.
+        area: c.area,
+        district: c.district,
       })),
       customerServiceOfficers: csos.map((c: any) => ({
         id: c.id,
@@ -91,6 +99,7 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
         total: rows.length,
         withoutClusterAgent: rows.filter((r: any) => r.canHaveClusterAgent && !r.clusterAgentId).length,
         withoutCso: rows.filter((r: any) => r.csoIds.length === 0).length,
+        withoutLocation: rows.filter((r: any) => !r.area && !r.district).length,
       },
     });
   } catch (error) {
@@ -107,7 +116,7 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
 export async function setAgentSupervision(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const admin = req.user as AdminUserPayload;
-    const { agentId, clusterAgentId, csoIds } = req.body ?? {};
+    const { agentId, clusterAgentId, csoIds, area, district } = req.body ?? {};
 
     if (!agentId || typeof agentId !== 'string') {
       res.status(400).json({ error: 'An agent must be given' });
@@ -134,7 +143,22 @@ export async function setAgentSupervision(req: AuthenticatedRequest, res: Respon
     const before = {
       clusterAgentId: agent.agentCluster?.clusterAgentId ?? null,
       csoIds: agent.agentAssignedCsos.map((r: any) => r.csoId),
+      area: agent.area,
+      district: agent.district,
     };
+
+    // Recorded here because this is the screen where the details agents are
+    // submitting get entered, and grouping by area is the reason they were
+    // asked for.
+    if (area !== undefined || district !== undefined) {
+      await prismaAny.adminUser.update({
+        where: { id: agentId },
+        data: {
+          ...(area !== undefined ? { area: area ? String(area).trim() : null } : {}),
+          ...(district !== undefined ? { district: district ? String(district).trim() : null } : {}),
+        },
+      });
+    }
 
     // --- cluster agent ---
     if (clusterAgentId !== undefined) {
@@ -197,6 +221,8 @@ export async function setAgentSupervision(req: AuthenticatedRequest, res: Respon
     const after = await prismaAny.adminUser.findUnique({
       where: { id: agentId },
       select: {
+        area: true,
+        district: true,
         agentCluster: { select: { clusterAgentId: true } },
         agentAssignedCsos: { select: { csoId: true } },
       },
@@ -211,6 +237,8 @@ export async function setAgentSupervision(req: AuthenticatedRequest, res: Respon
       newValues: {
         clusterAgentId: after?.agentCluster?.clusterAgentId ?? null,
         csoIds: after?.agentAssignedCsos.map((r: any) => r.csoId) ?? [],
+        area: after?.area ?? null,
+        district: after?.district ?? null,
       },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] as string,
@@ -220,6 +248,8 @@ export async function setAgentSupervision(req: AuthenticatedRequest, res: Respon
       message: 'Supervision updated',
       clusterAgentId: after?.agentCluster?.clusterAgentId ?? null,
       csoIds: after?.agentAssignedCsos.map((r: any) => r.csoId) ?? [],
+      area: after?.area ?? null,
+      district: after?.district ?? null,
     });
   } catch (error) {
     console.error('setAgentSupervision error:', error);
