@@ -4,6 +4,7 @@ import { sendPaymentFailureNotification } from './notificationService';
 import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService';
 import { appendWebhookToken } from '../utils/callbackSecurity';
 import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
+import { settleTemporaryUnlockOnPayment } from './temporaryUnlockService';
 import { roundMoney, isMoneyGte } from '../utils/helpers';
 import { allocatePaymentAcrossContract } from './paymentAllocationService';
 import { OWED_PENALTY_WHERE } from './penaltyService';
@@ -847,6 +848,9 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
     });
   });
 
+  // Close any unlock window or agent bar this payment has just settled,
+  // before the device is judged — otherwise both wait for tomorrow's cron.
+  await settleTemporaryUnlockOnPayment(contract.id);
   await safelyEvaluateManagedDeviceForContract(contract.id);
 }
 

@@ -438,7 +438,7 @@ export async function accrueExpiryPenalties(options: {
     // yesterday, so it answers the question actually being asked — what the
     // first run would charge — rather than "nothing yet, come back tomorrow".
     const previewActivation = new Date(today);
-    previewActivation.setDate(previewActivation.getDate() - 1);
+    previewActivation.setUTCDate(previewActivation.getUTCDate() - 1);
     const effective = dryRun
       ? { ...settings, expiryPenaltyEnabled: true, activatedAt: settings.activatedAt ?? previewActivation }
       : settings;

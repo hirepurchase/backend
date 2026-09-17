@@ -127,7 +127,7 @@ const LIST_INCLUDE = {
  */
 async function notifyRequester(
   request: any,
-  outcome: 'APPROVED' | 'REJECTED',
+  outcome: 'APPROVED' | 'REJECTED' | 'REVOKED',
   warning: string | null
 ): Promise<void> {
   try {
@@ -140,6 +140,16 @@ async function notifyRequester(
     const customer = request.contract?.customer
       ? `${request.contract.customer.firstName} ${request.contract.customer.lastName}`.trim()
       : 'the customer';
+
+    if (outcome === 'REVOKED') {
+      await sendSMS({
+        to: requester.phone,
+        message:
+          `AIDOO TECH: The temporary unlock for ${customer} (${request.contract?.contractNumber ?? ''}) has been ended early by an administrator.` +
+          `${request.reviewNote ? ' Reason: ' + request.reviewNote : ''} The phone returns to the normal rules.`,
+      });
+      return;
+    }
 
     const message =
       outcome === 'APPROVED'
@@ -363,6 +373,28 @@ export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, r
     }
 
     const arrears = computeOverdue(request.contract);
+
+    // The customer may have paid between asking and being answered. Approving
+    // then opens a phone nobody needed opened and, worse, occupies the one
+    // live-window slot this contract gets — so a real request later in the
+    // month would be refused as a duplicate.
+    if (arrears.overdueAmount <= 0) {
+      await prismaAny.temporaryUnlockRequest.update({
+        where: { id },
+        data: {
+          status: TEMPORARY_UNLOCK_STATUS.CANCELLED,
+          reviewedById: caller.id,
+          reviewedAt: new Date(),
+          reviewNote: 'Closed automatically — the customer cleared their arrears before this was reviewed.',
+          resolvedAt: new Date(),
+        },
+      });
+      res.status(400).json({
+        error: 'This customer has already cleared their overdue payments, so there is nothing to unlock for. The request has been closed.',
+      });
+      return;
+    }
+
     const expiresAt = computeExpiry(weeks);
 
     const updated = await prismaAny.temporaryUnlockRequest.update({
@@ -742,5 +774,104 @@ export async function getEligibleContracts(req: AuthenticatedRequest, res: Respo
   } catch (error) {
     console.error('Eligible contracts error:', error);
     res.status(500).json({ error: 'Failed to load contracts' });
+  }
+}
+
+// POST /temporary-unlocks/:id/revoke
+//
+// Ends a live window early and puts the phone back under the ordinary rules.
+//
+// Approving is a grant of access to a device the company controls, and until
+// now it could not be taken back: an approval made in error, or a customer who
+// turned out to be lying, left the phone open for the full period with no
+// remedy short of editing the database.
+export async function revokeTemporaryUnlockRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const caller = getCaller(req);
+    const { id } = req.params;
+    const { reason } = req.body ?? {};
+
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+      res.status(400).json({ error: 'Give a reason for ending this window early (at least 5 characters)' });
+      return;
+    }
+
+    const request = await prismaAny.temporaryUnlockRequest.findUnique({
+      where: { id },
+      include: {
+        contract: {
+          include: {
+            installments: true,
+            customer: { select: { firstName: true, lastName: true, phone: true } },
+            managedDevice: { select: { id: true } },
+          },
+        },
+      },
+    });
+
+    if (!request) {
+      res.status(404).json({ error: 'Request not found' });
+      return;
+    }
+    if (request.status !== TEMPORARY_UNLOCK_STATUS.APPROVED) {
+      res.status(400).json({ error: `Only a live window can be ended early — this one is ${request.status.toLowerCase()}` });
+      return;
+    }
+
+    // Judged now rather than at the original expiry. Ending a window early is
+    // not the same as the customer failing to use it: if they have already
+    // cleared what they owed, this closes as fulfilled and the agent is not
+    // barred for a guarantee that was actually kept.
+    let overdueRemaining = 0;
+    for (const installment of request.contract?.installments ?? []) {
+      if (installment.status === 'PAID') continue;
+      if (!isOverdue(installment.dueDate)) continue;
+      overdueRemaining += Math.max(0, (installment.amount ?? 0) - (installment.paidAmount ?? 0));
+    }
+    const cleared = overdueRemaining <= 0;
+
+    const updated = await prismaAny.temporaryUnlockRequest.update({
+      where: { id },
+      data: {
+        status: cleared ? TEMPORARY_UNLOCK_STATUS.FULFILLED : TEMPORARY_UNLOCK_STATUS.REVOKED,
+        reviewedById: caller.id,
+        reviewedAt: new Date(),
+        reviewNote: reason.trim(),
+        resolvedAt: new Date(),
+      },
+      include: LIST_INCLUDE,
+    });
+
+    // The override is dead the moment the status changes, so a plain
+    // re-evaluation applies whatever the arrears now warrant.
+    let deviceAction: string | null = null;
+    try {
+      const evaluation: any = await evaluateManagedDeviceForContract(request.contractId);
+      deviceAction = evaluation?.actionType ?? evaluation?.action ?? null;
+    } catch (error: any) {
+      console.error('Temporary unlock revoked but device evaluation failed:', error?.message);
+    }
+
+    await notifyRequester(updated, 'REVOKED', null);
+
+    await createAuditLog({
+      userId: caller.id,
+      action: 'REVOKE_TEMPORARY_UNLOCK',
+      entity: 'TemporaryUnlockRequest',
+      entityId: id,
+      oldValues: { status: TEMPORARY_UNLOCK_STATUS.APPROVED, expiresAt: request.expiresAt },
+      newValues: {
+        contractNumber: request.contract?.contractNumber,
+        outcome: cleared ? 'FULFILLED' : 'REVOKED',
+        overdueRemaining: Number(overdueRemaining.toFixed(2)),
+        reason: reason.trim(),
+        deviceAction,
+      },
+    });
+
+    res.json({ request: serialize(updated), device: { action: deviceAction }, arrearsCleared: cleared });
+  } catch (error) {
+    console.error('Revoke temporary unlock error:', error);
+    res.status(500).json({ error: 'Failed to end the window' });
   }
 }

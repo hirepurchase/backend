@@ -33,6 +33,7 @@ function payableCeiling(contract: { outstandingBalance: number; penaltyOutstandi
 }
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
+import { settleTemporaryUnlockOnPayment } from '../services/temporaryUnlockService';
 
 function ensureContractCanAcceptPayments(status: string, res: Response): boolean {
   if (status === 'ACTIVE') {
@@ -460,6 +461,9 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
     });
   });
 
+  // Close any unlock window or agent bar this payment has just settled,
+  // before the device is judged — otherwise both wait for tomorrow's cron.
+  await settleTemporaryUnlockOnPayment(contract.id);
   await safelyEvaluateManagedDeviceForContract(contract.id);
 }
 
@@ -740,6 +744,9 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
 
     // Editing an amount can clear the last of a balance, or reopen one that was
     // settled — either way the device state must be re-evaluated.
+    // Close any unlock window or agent bar this payment has just settled,
+    // before the device is judged — otherwise both wait for tomorrow's cron.
+    await settleTemporaryUnlockOnPayment(payment.contractId);
     await safelyEvaluateManagedDeviceForContract(payment.contractId);
 
     res.status(200).json({ message: 'Payment updated successfully' });
@@ -850,6 +857,9 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
 
     // Removing a payment can reopen a balance that was settled, which should
     // put the device back under management.
+    // Close any unlock window or agent bar this payment has just settled,
+    // before the device is judged — otherwise both wait for tomorrow's cron.
+    await settleTemporaryUnlockOnPayment(payment.contractId);
     await safelyEvaluateManagedDeviceForContract(payment.contractId);
 
     res.status(200).json({ message: 'Payment deleted successfully' });

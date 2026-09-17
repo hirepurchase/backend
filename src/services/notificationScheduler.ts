@@ -4,7 +4,7 @@ import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { isOverdue, calculatePenalty } from '../utils/helpers';
 import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices, relockDriftedWrittenOffDevices, runDailyDeviceAudit } from './deviceControlPolicyService';
-import { closeExpiredTemporaryUnlocks, releaseSettledDefaultedUnlocks } from './temporaryUnlockService';
+import { closeExpiredTemporaryUnlocks, releaseSettledDefaultedUnlocks, sendTemporaryUnlockReminders } from './temporaryUnlockService';
 import { PENALTY_KIND, recomputePenaltyOutstanding, accrueExpiryPenalties } from './penaltyService';
 
 // Mark past-due installments as OVERDUE and apply penalties
@@ -292,6 +292,13 @@ export function initializeNotificationScheduler(): void {
       const settled = await releaseSettledDefaultedUnlocks();
       if (settled.released > 0) {
         console.log(`Temporary unlocks: ${settled.released} defaulted guarantee(s) cleared by payment — agent bar lifted`);
+      }
+
+      // After the closures, so a window that just expired is not also warned
+      // about. A deadline nobody is reminded of collects less than one they are.
+      const reminded = await sendTemporaryUnlockReminders();
+      if (reminded.reminded > 0) {
+        console.log(`Temporary unlocks: reminded ${reminded.reminded} customer(s) their window is closing`);
       }
     });
     if (!enqueued) {

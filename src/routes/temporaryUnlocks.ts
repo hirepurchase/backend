@@ -4,6 +4,7 @@ import {
   approveTemporaryUnlockRequest,
   rejectTemporaryUnlockRequest,
   cancelTemporaryUnlockRequest,
+  revokeTemporaryUnlockRequest,
   listTemporaryUnlockRequests,
   getPendingTemporaryUnlockCount,
   getEligibleContracts,
@@ -25,5 +26,8 @@ router.post('/', requireAnyPermission(PERMISSIONS.REQUEST_TEMPORARY_UNLOCK), cre
 router.post('/:id/approve', requireAnyPermission(PERMISSIONS.APPROVE_TEMPORARY_UNLOCK), approveTemporaryUnlockRequest);
 router.post('/:id/reject', requireAnyPermission(PERMISSIONS.APPROVE_TEMPORARY_UNLOCK), rejectTemporaryUnlockRequest);
 router.post('/:id/cancel', requireAnyPermission(PERMISSIONS.REQUEST_TEMPORARY_UNLOCK), cancelTemporaryUnlockRequest);
+
+// Ending a live window is an approver's decision, not the requester's.
+router.post('/:id/revoke', requireAnyPermission(PERMISSIONS.APPROVE_TEMPORARY_UNLOCK), revokeTemporaryUnlockRequest);
 
 export default router;

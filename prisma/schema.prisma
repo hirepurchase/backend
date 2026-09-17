@@ -99,7 +99,7 @@ model TemporaryUnlockRequest {
   requestedBy       AdminUser @relation("TemporaryUnlockRequestedBy", fields: [requestedById], references: [id])
   requestedWeeks    Int
   reason            String
-  status            String   @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED | FULFILLED | DEFAULTED
+  status            String   @default("PENDING") // PENDING | APPROVED | REJECTED | CANCELLED | FULFILLED | DEFAULTED | REVOKED
   approvedWeeks     Int?
   expiresAt         DateTime?
   arrearsAtApproval Float?
