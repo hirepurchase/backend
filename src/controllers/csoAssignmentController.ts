@@ -327,6 +327,13 @@ export async function getCustomerServiceChart(
 // GET /admin-users/me/customer-service — the officers responsible for the
 // signed-in agent. Any authenticated staff member may call this; it only ever
 // returns their own supervisors.
+/**
+ * Who an agent answers to and who handles their customers.
+ *
+ * Returns both the officer and the cluster leader, because from the agent's
+ * side they are one question — "who do I call?" — and knowing only half of it
+ * sends every query to the wrong person.
+ */
 export async function getMyCustomerServiceOfficers(
   req: AuthenticatedRequest,
   res: Response
@@ -334,15 +341,41 @@ export async function getMyCustomerServiceOfficers(
   try {
     const admin = req.user as AdminUserPayload;
 
-    const assignments = await prisma.csoAgentAssignment.findMany({
-      where: { agentId: admin.id },
-      include: {
-        cso: {
-          select: { id: true, firstName: true, lastName: true, email: true, phone: true, isActive: true },
+    const [assignments, cluster] = await Promise.all([
+      prisma.csoAgentAssignment.findMany({
+        where: { agentId: admin.id },
+        include: {
+          cso: {
+            select: { id: true, firstName: true, lastName: true, email: true, phone: true, isActive: true },
+          },
         },
-      },
-      orderBy: { createdAt: 'asc' },
-    });
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.clusterAgentAssignment.findUnique({
+        where: { agentId: admin.id },
+        include: {
+          clusterAgent: {
+            select: { id: true, firstName: true, lastName: true, email: true, phone: true, isActive: true, area: true, district: true },
+          },
+        },
+      }),
+    ]);
+
+    // A supervisor who can no longer log in is no use to the agent, so an
+    // inactive one reads as no supervisor rather than a name that will not
+    // answer.
+    const leader =
+      cluster?.clusterAgent && cluster.clusterAgent.isActive
+        ? {
+            id: cluster.clusterAgent.id,
+            name: `${cluster.clusterAgent.firstName} ${cluster.clusterAgent.lastName}`.trim(),
+            email: cluster.clusterAgent.email,
+            phone: cluster.clusterAgent.phone,
+            area: cluster.clusterAgent.area,
+            district: cluster.clusterAgent.district,
+            assignedAt: cluster.createdAt,
+          }
+        : null;
 
     res.json({
       count: assignments.length,
@@ -355,6 +388,7 @@ export async function getMyCustomerServiceOfficers(
           phone: a.cso.phone,
           assignedAt: a.createdAt,
         })),
+      clusterLeader: leader,
     });
   } catch (error) {
     console.error('getMyCustomerServiceOfficers error:', error);
