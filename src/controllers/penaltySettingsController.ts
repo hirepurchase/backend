@@ -5,8 +5,11 @@ import {
   getPenaltySettings,
   accrueExpiryPenalties,
   waivePenalty,
+  reinstatePenalty,
+  OWED_PENALTY_WHERE,
   PENALTY_MODE,
 } from '../services/penaltyService';
+import { resolveContractScope, scopeAllows } from '../services/scopeService';
 import prisma from '../config/database';
 
 const prismaAny = prisma as any;
@@ -27,7 +30,7 @@ export async function getPenaltyConfig(_req: AuthenticatedRequest, res: Response
     // How much is currently sitting unpaid, so the page shows the consequence
     // of the switch rather than only its position.
     const [unpaid, pastTerm] = await Promise.all([
-      prismaAny.penalty.aggregate({ _sum: { amount: true, paidAmount: true }, where: { isPaid: false } }),
+      prismaAny.penalty.aggregate({ _sum: { amount: true, paidAmount: true }, where: OWED_PENALTY_WHERE }),
       prismaAny.hirePurchaseContract.aggregate({
         _count: { _all: true },
         _sum: { outstandingBalance: true },
@@ -195,6 +198,31 @@ export async function runExpiryPenalties(req: AuthenticatedRequest, res: Respons
   }
 }
 
+/**
+ * A penalty belongs to one customer's contract, so cancelling or reinstating it
+ * is scoped like every other contract action rather than granted wholesale by
+ * a settings permission.
+ */
+async function assertPenaltyInScope(
+  req: AuthenticatedRequest,
+  penaltyId: string
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const admin = req.user as AdminUserPayload;
+  const penalty = await prismaAny.penalty.findUnique({
+    where: { id: penaltyId },
+    select: { contract: { select: { createdById: true } } },
+  });
+  if (!penalty) return { ok: false, status: 404, error: 'Penalty not found' };
+
+  if (admin.role === 'SUPER_ADMIN') return { ok: true };
+
+  const scope = await resolveContractScope(admin);
+  if (!scopeAllows(scope, penalty.contract.createdById)) {
+    return { ok: false, status: 403, error: 'This contract is outside your portfolio' };
+  }
+  return { ok: true };
+}
+
 // POST /settings/penalties/:penaltyId/waive
 export async function waivePenaltyCharge(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
@@ -206,6 +234,12 @@ export async function waivePenaltyCharge(req: AuthenticatedRequest, res: Respons
     // the audit entry is worthless without a stated reason.
     if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
       res.status(400).json({ error: 'Give a reason for waiving this charge (at least 5 characters)' });
+      return;
+    }
+
+    const scoped = await assertPenaltyInScope(req, penaltyId);
+    if (!scoped.ok) {
+      res.status(scoped.status).json({ error: scoped.error });
       return;
     }
 
@@ -224,6 +258,43 @@ export async function waivePenaltyCharge(req: AuthenticatedRequest, res: Respons
     const message = error?.message || 'Failed to waive the penalty';
     const known = /not found|already been waived/i.test(message);
     console.error('Waive penalty error:', error);
+    res.status(known ? 400 : 500).json({ error: message });
+  }
+}
+
+// POST /settings/penalties/:penaltyId/reinstate
+export async function reinstatePenaltyCharge(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const admin = req.user as AdminUserPayload;
+    const { penaltyId } = req.params;
+    const { reason } = req.body ?? {};
+
+    if (!reason || typeof reason !== 'string' || reason.trim().length < 5) {
+      res.status(400).json({ error: 'Give a reason for reinstating this charge (at least 5 characters)' });
+      return;
+    }
+
+    const scoped = await assertPenaltyInScope(req, penaltyId);
+    if (!scoped.ok) {
+      res.status(scoped.status).json({ error: scoped.error });
+      return;
+    }
+
+    const result = await reinstatePenalty({
+      penaltyId,
+      adminUserId: admin.id,
+      reason: reason.trim(),
+    });
+
+    res.json({
+      message: 'Penalty reinstated',
+      penalty: result.penalty,
+      penaltyOutstanding: result.penaltyOutstanding,
+    });
+  } catch (error: any) {
+    const message = error?.message || 'Failed to reinstate the penalty';
+    const known = /not found|not waived/i.test(message);
+    console.error('Reinstate penalty error:', error);
     res.status(known ? 400 : 500).json({ error: message });
   }
 }

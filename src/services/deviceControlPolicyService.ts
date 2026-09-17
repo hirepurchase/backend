@@ -14,6 +14,7 @@ import {
   unlockKnoxGuardDevice,
 } from './knoxGuardService';
 import { getKnoxWebhookSecuritySummary } from '../utils/knoxWebhookSecurity';
+import { OWED_PENALTY_WHERE } from './penaltyService';
 import {
   getActiveTemporaryUnlockContractIds,
   hasLiveTemporaryUnlock,
@@ -1082,7 +1083,7 @@ async function getContractWithDevice(contractId: string) {
         orderBy: { installmentNo: 'asc' },
       },
       penalties: {
-        where: { isPaid: false },
+        where: OWED_PENALTY_WHERE,
       },
       agentLedger: true,
       temporaryUnlocks: {
@@ -1324,7 +1325,7 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
     },
     include: {
       installments: true,
-      penalties: true,
+      penalties: { where: OWED_PENALTY_WHERE },
       agentLedger: true,
       customer: { select: { firstName: true, lastName: true } },
       managedDevice: true,
@@ -1382,7 +1383,7 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
       // Re-read the arrears immediately before acting on them.
       const fresh = await prismaAny.hirePurchaseContract.findUnique({
         where: { id: contract.id },
-        include: { installments: true, penalties: true, agentLedger: true },
+        include: { installments: true, penalties: { where: OWED_PENALTY_WHERE }, agentLedger: true },
       });
 
       if (!fresh || fresh.status !== 'ACTIVE') {
@@ -1498,7 +1499,7 @@ export async function stopAllActiveRemindersAndApplyLock(): Promise<{
           contract: {
             include: {
               installments: true,
-              penalties: true,
+              penalties: { where: OWED_PENALTY_WHERE },
               agentLedger: true,
               customer: { select: { firstName: true, lastName: true } },
             },
@@ -3459,7 +3460,7 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
               customer: true,
               inventoryItem: true,
               installments: true,
-              penalties: true,
+              penalties: { where: OWED_PENALTY_WHERE },
             },
           },
         },

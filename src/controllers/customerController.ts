@@ -9,6 +9,7 @@ import { generateMembershipId, sanitizePhoneNumber, validatePhoneNumber, validat
 import { uploadToSupabase, deleteFromSupabase, ImageCompressionOptions } from '../services/storageService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { resolveCustomerScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
+import { OWED_PENALTY_WHERE } from '../services/penaltyService';
 
 const CUSTOMER_PHOTO_COMPRESSION: ImageCompressionOptions = {
   maxWidth: 800,
@@ -847,7 +848,7 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
           orderBy: { createdAt: 'desc' },
         },
         penalties: {
-          where: { isPaid: false },
+          where: OWED_PENALTY_WHERE,
         },
       },
       orderBy: { createdAt: 'desc' },

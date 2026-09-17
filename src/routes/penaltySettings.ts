@@ -5,6 +5,7 @@ import {
   previewExpiryPenalties,
   runExpiryPenalties,
   waivePenaltyCharge,
+  reinstatePenaltyCharge,
 } from '../controllers/penaltySettingsController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
@@ -24,5 +25,7 @@ router.post('/run', requireAnyPermission(PERMISSIONS.MANAGE_SETTINGS), runExpiry
 // named customer's account, so it is gated on contract-value editing rather
 // than general settings access.
 router.post('/:penaltyId/waive', requireAnyPermission(PERMISSIONS.EDIT_CONTRACT_VALUES, PERMISSIONS.MANAGE_SETTINGS), waivePenaltyCharge);
+
+router.post('/:penaltyId/reinstate', requireAnyPermission(PERMISSIONS.EDIT_CONTRACT_VALUES, PERMISSIONS.MANAGE_SETTINGS), reinstatePenaltyCharge);
 
 export default router;

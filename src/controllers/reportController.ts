@@ -4,6 +4,7 @@ import { AdminUserPayload, AuthenticatedRequest } from '../types';
 import { getCache, setCache } from '../services/cacheService';
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { resolveContractScope, applyCreatorScope } from '../services/scopeService';
+import { OWED_PENALTY_WHERE } from '../services/penaltyService';
 
 const REPORT_CACHE_TTL_SECONDS = Number(process.env.REPORT_CACHE_TTL_SECONDS || 90);
 
@@ -289,7 +290,7 @@ export async function getDefaultReport(req: AuthenticatedRequest, res: Response)
           orderBy: { dueDate: 'asc' },
         },
         penalties: {
-          where: { isPaid: false },
+          where: OWED_PENALTY_WHERE,
         },
       },
       orderBy: { createdAt: 'asc' },

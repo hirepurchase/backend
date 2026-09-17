@@ -68,7 +68,7 @@ async function main() {
       contract: {
         include: {
           installments: { orderBy: { installmentNo: 'asc' } },
-          penalties: { where: { isPaid: false } },
+          penalties: { where: { isPaid: false, isWaived: false } },
         },
       },
       commands: { orderBy: { createdAt: 'desc' }, take: 5 },

@@ -11,7 +11,7 @@ import {
   requestStandaloneInventoryDeviceLock,
 } from '../services/deviceControlPolicyService';
 import { evaluateContractSubmissionGuardrails } from '../services/contractReviewService';
-import { PENALTY_KIND, recomputePenaltyOutstanding, clearPenaltiesOnContractClose } from '../services/penaltyService';
+import { PENALTY_KIND, recomputePenaltyOutstanding, clearPenaltiesOnContractClose, OWED_PENALTY_WHERE } from '../services/penaltyService';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import bcrypt from 'bcryptjs';
 import {
@@ -831,8 +831,12 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
         payments: {
           orderBy: { createdAt: 'desc' },
         },
+        // Everything, waived included: the contract page shows what is owed
+        // and also what was cancelled and by whom, which is the point of
+        // waiving rather than deleting.
         penalties: {
           orderBy: { createdAt: 'desc' },
+          include: { waivedBy: { select: { firstName: true, lastName: true } } },
         },
         createdBy: {
           select: {
@@ -896,6 +900,13 @@ export async function getCustomerContracts(req: AuthenticatedRequest, res: Respo
         installments: {
           orderBy: { installmentNo: 'asc' },
         },
+        // The customer is the person being charged, so they have to be able to
+        // see the charges and what they add up to.
+        penalties: {
+          where: OWED_PENALTY_WHERE,
+          select: { id: true, amount: true, paidAmount: true, reason: true, kind: true, periodDate: true },
+          orderBy: { periodDate: 'asc' },
+        },
         _count: {
           select: { payments: true },
         },
@@ -909,13 +920,32 @@ export async function getCustomerContracts(req: AuthenticatedRequest, res: Respo
         i => i.status === 'PENDING' || i.status === 'PARTIAL' || i.status === 'OVERDUE'
       );
 
+      // Penalties sit outside outstandingBalance, which is derived from
+      // totalPrice. A customer whose installments are settled but whose
+      // charges are not still owes money — and before this the portal filtered
+      // that contract out of the payment screen entirely, leaving them locked
+      // out of the phone and of the only page that could unlock it.
+      const penaltyOutstanding = Math.round(
+        contract.penalties.reduce((sum, row) => sum + (row.amount - row.paidAmount), 0) * 100
+      ) / 100;
+
       return {
         ...contract,
+        penaltyOutstanding,
+        totalDue: Math.round((contract.outstandingBalance + penaltyOutstanding) * 100) / 100,
         nextPayment: nextInstallment ? {
           installmentNo: nextInstallment.installmentNo,
           dueDate: nextInstallment.dueDate,
           amount: nextInstallment.amount - nextInstallment.paidAmount,
           isOverdue: isOverdue(nextInstallment.dueDate, contract.gracePeriodDays),
+        } : penaltyOutstanding > 0 ? {
+          // Nothing left on the schedule, but charges remain — so the portal
+          // still has an amount to put in front of them.
+          installmentNo: null,
+          dueDate: null,
+          amount: penaltyOutstanding,
+          isOverdue: true,
+          isPenaltyOnly: true,
         } : null,
       };
     });

@@ -6,6 +6,7 @@ import { appendWebhookToken } from '../utils/callbackSecurity';
 import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
 import { roundMoney, isMoneyGte } from '../utils/helpers';
 import { allocatePaymentAcrossContract } from './paymentAllocationService';
+import { OWED_PENALTY_WHERE } from './penaltyService';
 
 // Hubtel API Configuration
 const HUBTEL_POS_SALES_ID = process.env.HUBTEL_POS_SALES_ID || '';
@@ -592,7 +593,7 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
               orderBy: { installmentNo: 'asc' },
             },
             penalties: {
-              where: { isPaid: false },
+              where: OWED_PENALTY_WHERE,
             },
           },
         },

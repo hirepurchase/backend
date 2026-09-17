@@ -17,7 +17,20 @@ import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types
 import { validateWebhookRequest } from '../utils/callbackSecurity';
 import { generateTransactionRef, sanitizePhoneNumber, validatePhoneNumber, roundMoney, isMoneyGte } from '../utils/helpers';
 import { allocatePaymentAcrossContract } from '../services/paymentAllocationService';
-import { rebuildPenaltyAllocation } from '../services/penaltyService';
+import { rebuildPenaltyAllocation, OWED_PENALTY_WHERE } from '../services/penaltyService';
+
+/**
+ * The most a customer can pay on a contract: the remaining price plus any
+ * unpaid late charges.
+ *
+ * Capping at outstandingBalance alone rejected a payment from a customer whose
+ * installments were settled but whose charges were not — the exact state that
+ * keeps a contract open and a device locked. They could neither clear it nor
+ * be told why.
+ */
+function payableCeiling(contract: { outstandingBalance: number; penaltyOutstanding?: number | null }): number {
+  return roundMoney(contract.outstandingBalance + (contract.penaltyOutstanding ?? 0));
+}
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 
@@ -106,8 +119,8 @@ export async function initiateCustomerPayment(req: AuthenticatedRequest, res: Re
       return;
     }
 
-    if (!isMoneyGte(contract.outstandingBalance, paymentAmount)) {
-      res.status(400).json({ error: 'Payment amount exceeds outstanding balance' });
+    if (!isMoneyGte(payableCeiling(contract), paymentAmount)) {
+      res.status(400).json({ error: 'Payment amount exceeds the total due on this contract' });
       return;
     }
 
@@ -384,7 +397,7 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
             orderBy: { installmentNo: 'asc' },
           },
           penalties: {
-            where: { isPaid: false },
+            where: OWED_PENALTY_WHERE,
           },
         },
       },
@@ -531,8 +544,8 @@ export async function recordManualPayment(req: AuthenticatedRequest, res: Respon
     }
 
     const paymentAmount = roundMoney(Number(amount));
-    if (!isMoneyGte(contract.outstandingBalance, paymentAmount)) {
-      res.status(400).json({ error: 'Payment amount exceeds outstanding balance' });
+    if (!isMoneyGte(payableCeiling(contract), paymentAmount)) {
+      res.status(400).json({ error: 'Payment amount exceeds the total due on this contract' });
       return;
     }
 
@@ -912,8 +925,8 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
       return;
     }
 
-    if (!isMoneyGte(contract.outstandingBalance, paymentAmount)) {
-      res.status(400).json({ error: 'Payment amount exceeds outstanding balance' });
+    if (!isMoneyGte(payableCeiling(contract), paymentAmount)) {
+      res.status(400).json({ error: 'Payment amount exceeds the total due on this contract' });
       return;
     }
 
@@ -1396,7 +1409,7 @@ export async function initiateHubtelRegularPayment(req: AuthenticatedRequest, re
 
     // Validate amount
     const paymentAmount = roundMoney(Number(amount));
-    if (paymentAmount <= 0 || !isMoneyGte(contract.outstandingBalance, paymentAmount)) {
+    if (paymentAmount <= 0 || !isMoneyGte(payableCeiling(contract), paymentAmount)) {
       res.status(400).json({ error: 'Invalid payment amount' });
       return;
     }
@@ -1520,7 +1533,7 @@ export async function initiateDirectDebitPayment(req: AuthenticatedRequest, res:
 
     // Validate amount
     const paymentAmount = amount ? Number(amount) : contract.installmentAmount;
-    if (paymentAmount <= 0 || !isMoneyGte(contract.outstandingBalance, paymentAmount)) {
+    if (paymentAmount <= 0 || !isMoneyGte(payableCeiling(contract), paymentAmount)) {
       res.status(400).json({ error: 'Invalid payment amount' });
       return;
     }

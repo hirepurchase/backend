@@ -295,6 +295,29 @@ async function notifyCustomerOfPenalty(
   }
 }
 
+const NOTIFY_BATCH_SIZE = 20;
+const NOTIFY_BATCH_PAUSE_MS = 2000;
+
+/**
+ * Sends the first-charge notices in small batches with a pause between them,
+ * so a switch-on that touches hundreds of contracts does not hand the gateway
+ * one unthrottled burst.
+ */
+async function sendPenaltyNotifications(
+  pending: Array<{ contractId: string; amount: number }>,
+  settings: PenaltySettings
+): Promise<void> {
+  for (let i = 0; i < pending.length; i += NOTIFY_BATCH_SIZE) {
+    const batch = pending.slice(i, i + NOTIFY_BATCH_SIZE);
+    await Promise.all(
+      batch.map((row) => notifyCustomerOfPenalty(row.contractId, row.amount, settings))
+    );
+    if (i + NOTIFY_BATCH_SIZE < pending.length) {
+      await new Promise((resolve) => setTimeout(resolve, NOTIFY_BATCH_PAUSE_MS));
+    }
+  }
+}
+
 /**
  * Applies expiry penalties across the whole book. `dryRun` returns exactly what
  * would be charged without writing it.
@@ -396,6 +419,11 @@ export async function accrueExpiryPenalties(options: {
   let contractsCharged = 0;
   let penaltiesCreated = 0;
   let skippedUnderUnlock = 0;
+  // Collected rather than sent inline: switching the feature on charges the
+  // whole past-term book at once, and firing several hundred SMS in a tight
+  // loop is throttled or silently dropped by the carrier — leaving customers
+  // charged with no notice while the log claims it sent.
+  const pendingNotifications: Array<{ contractId: string; amount: number }> = [];
   let totalCharged = 0;
   const details: Array<{ contractNumber: string; charges: number; amount: number }> = [];
 
@@ -461,7 +489,7 @@ export async function accrueExpiryPenalties(options: {
     await recomputePenaltyOutstanding(contract.id);
 
     if (isFirstCharge && settings.notifyCustomer) {
-      await notifyCustomerOfPenalty(contract.id, amount, settings);
+      pendingNotifications.push({ contractId: contract.id, amount });
     }
   }
 
@@ -491,6 +519,8 @@ export async function accrueExpiryPenalties(options: {
       console.error('Failed to audit expiry penalty accrual:', error);
     }
   }
+
+  await sendPenaltyNotifications(pendingNotifications, settings);
 
   return {
     enabled: settings.expiryPenaltyEnabled,
@@ -664,4 +694,61 @@ export async function clearPenaltiesOnContractClose(
     where: { id: contractId },
     data: { penaltyOutstanding: 0 },
   });
+}
+
+/**
+ * A penalty that is actually owed.
+ *
+ * Waived rows keep `isPaid: false` — they were cancelled, not settled — so a
+ * filter of `isPaid: false` alone still counts them. That is how waiving a
+ * charge left the device holding the customer's phone for it: the waiver
+ * cleared the cached total while every metric kept reading the row.
+ *
+ * Use this anywhere penalties are summed into money owed, a lock decision, or
+ * a collections figure. Display surfaces may load more, so long as they filter
+ * for presentation.
+ */
+export const OWED_PENALTY_WHERE = { isPaid: false, isWaived: false } as const;
+
+/**
+ * Reverses a waiver.
+ *
+ * Waiving was added so a charge raised in error could be cancelled; without
+ * this, cancelling in error is itself irreversible, which is the same trap one
+ * step along. The charge returns to being owed, and both directions are
+ * audited.
+ */
+export async function reinstatePenalty(params: {
+  penaltyId: string;
+  adminUserId: string;
+  reason: string;
+}): Promise<{ penalty: any; penaltyOutstanding: number }> {
+  const existing = await prismaAny.penalty.findUnique({
+    where: { id: params.penaltyId },
+    include: { contract: { select: { contractNumber: true, status: true } } },
+  });
+  if (!existing) throw new Error('Penalty not found');
+  if (!existing.isWaived) throw new Error('This penalty is not waived');
+
+  const penalty = await prismaAny.penalty.update({
+    where: { id: params.penaltyId },
+    data: { isWaived: false, waivedAt: null, waivedById: null, waiveReason: null },
+  });
+
+  const penaltyOutstanding = await recomputePenaltyOutstanding(existing.contractId);
+
+  await createAuditLog({
+    userId: params.adminUserId,
+    action: 'REINSTATE_PENALTY',
+    entity: 'Penalty',
+    entityId: params.penaltyId,
+    oldValues: { isWaived: true, waiveReason: existing.waiveReason },
+    newValues: {
+      contractNumber: existing.contract?.contractNumber,
+      reason: params.reason,
+      penaltyOutstandingAfter: penaltyOutstanding,
+    },
+  });
+
+  return { penalty, penaltyOutstanding };
 }
