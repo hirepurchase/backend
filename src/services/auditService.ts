@@ -11,7 +11,35 @@ interface AuditLogInput {
   userAgent?: string;
 }
 
+/**
+ * Actions that are not written to the audit trail.
+ *
+ * The trail is read to answer "who changed this, and when". These three answer
+ * nothing of the sort: LOGIN alone reached 15,956 rows — 40% of the table —
+ * and automated Knox evaluate/notify chatter is now recorded properly in
+ * KnoxActionLog, with the device, the state either side and the transaction id.
+ * Drowning the real entries in them made the trail worse at its one job.
+ *
+ * Suppressed centrally rather than by deleting the call sites, so this is one
+ * obvious list to change your mind about rather than four scattered edits to
+ * rediscover.
+ *
+ * Worth knowing what this costs: login history is what answers "was this
+ * account used by someone who should not have it". That question can no longer
+ * be answered from this table. If you need it, take LOGIN out of this list, or
+ * record sign-ins somewhere built for them rather than here.
+ */
+const UNAUDITED_ACTIONS = new Set([
+  'LOGIN',
+  'EVALUATE_KNOX_GUARD_DEVICE',
+  'NOTIFY_KNOX_GUARD_DEVICE',
+]);
+
 export async function createAuditLog(input: AuditLogInput): Promise<void> {
+  if (UNAUDITED_ACTIONS.has(input.action)) {
+    return;
+  }
+
   try {
     await prisma.auditLog.create({
       data: {

@@ -89,3 +89,6 @@ certs/
 /MIGRATION_INSTRUCTIONS.md
 /PERMISSIONS.md
 /RENDER_DEPLOYMENT.md
+
+# Exported audit rows — operational data, never commit
+audit-archive-*.jsonl
