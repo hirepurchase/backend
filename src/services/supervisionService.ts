@@ -57,14 +57,24 @@ export async function getAgentSupervision(agentId: string): Promise<{
  * The blockers an unsupervised agent should be stopped by, or an empty list
  * when the rule is off or they are covered.
  */
-export async function getSupervisionBlockers(agentId: string): Promise<string[]> {
+export async function getSupervisionBlockers(
+  agentId: string,
+  agentRole?: string | null
+): Promise<string[]> {
   const settings = await getSupervisionSettings();
   if (!settings.requireClusterAgent && !settings.requireCso) return [];
 
   const { clusterAgentName, csoNames } = await getAgentSupervision(agentId);
   const blockers: string[] = [];
 
-  if (settings.requireClusterAgent && !clusterAgentName) {
+  // A cluster leader supervises their own work. The tier is flat — no cluster
+  // agent can be assigned to another — so without this exemption the three
+  // leaders would be blocked permanently the moment the rule was switched on,
+  // with nothing anyone could assign to unblock them. They are still held to
+  // the officer rule below: their customers need verifying like anyone's.
+  const isClusterLeader = agentRole === 'CLUSTER_AGENT';
+
+  if (settings.requireClusterAgent && !isClusterLeader && !clusterAgentName) {
     blockers.push(
       'You are not assigned to a cluster agent, so no one supervises your portfolio. An administrator must assign you before you can create contracts.'
     );

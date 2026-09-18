@@ -427,7 +427,7 @@ export async function evaluateContractSubmissionGuardrails(input: {
       ? getAgentDefaultedTemporaryUnlocks(agentId)
       : Promise.resolve([]),
     isSellingAgentRole(agentRole) && agentId
-      ? getSupervisionBlockers(agentId)
+      ? getSupervisionBlockers(agentId, agentRole)
       : Promise.resolve([] as string[]),
   ]);
 
