@@ -582,6 +582,13 @@ model SupervisionSettings {
   id                       String   @id @default(uuid())
   requireClusterAgent      Boolean  @default(false)
   requireCso               Boolean  @default(false)
+  // Stop an agent writing new business while their own book is failing.
+  // PAR30 above the threshold blocks new contracts until they collect it back
+  // down; below parBlockMinContracts the rule does not apply, so one bad sale
+  // cannot stop a new agent building a book.
+  parBlockEnabled          Boolean  @default(false)
+  parBlockThreshold        Float    @default(20)
+  parBlockMinContracts     Int      @default(10)
   updatedById              String?
   createdAt                DateTime @default(now())
   updatedAt                DateTime @updatedAt

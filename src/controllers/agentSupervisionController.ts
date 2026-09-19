@@ -9,6 +9,7 @@ import {
   CUSTOMER_SERVICE_ROLE,
 } from '../constants/roles';
 import { getSupervisionSettings } from '../services/supervisionService';
+import { getAgentPortfolioRisk, breachesParLimit } from '../services/portfolioRiskService';
 
 const prismaAny = prisma as any;
 
@@ -55,6 +56,8 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
       getSupervisionSettings(),
     ]);
 
+    const risk = await getAgentPortfolioRisk(agents.map((a: any) => a.id));
+
     const rows = agents.map((agent: any) => ({
       id: agent.id,
       name: `${agent.firstName} ${agent.lastName}`.trim(),
@@ -76,6 +79,13 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
       ),
       customers: agent._count.customersCreated,
       contracts: agent._count.contractsCreated,
+      activeContracts: risk.get(agent.id)?.activeContracts ?? 0,
+      par30: risk.get(agent.id)?.par30 ?? 0,
+      par1: risk.get(agent.id)?.par1 ?? 0,
+      atRisk30: risk.get(agent.id)?.atRisk30 ?? 0,
+      parBlocked:
+        ['AGENT', 'CLUSTER_AGENT'].includes(agent.role.name) &&
+        breachesParLimit(risk.get(agent.id) ?? { activeContracts: 0, par30: 0 } as any, settings),
     }));
 
     res.json({
@@ -100,6 +110,9 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
         withoutClusterAgent: rows.filter((r: any) => r.canHaveClusterAgent && !r.clusterAgentId).length,
         withoutCso: rows.filter((r: any) => r.csoIds.length === 0).length,
         withoutLocation: rows.filter((r: any) => !r.area && !r.district).length,
+        // Counted at the current limit whether or not the rule is on, so the
+        // screen can say what switching it on would do.
+        overParLimit: rows.filter((r: any) => r.parBlocked).length,
       },
     });
   } catch (error) {
@@ -261,8 +274,30 @@ export async function setAgentSupervision(req: AuthenticatedRequest, res: Respon
 export async function updateSupervisionSettings(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const admin = req.user as AdminUserPayload;
-    const { requireClusterAgent, requireCso, confirmBlocking } = req.body ?? {};
+    const {
+      requireClusterAgent,
+      requireCso,
+      parBlockEnabled,
+      parBlockThreshold,
+      parBlockMinContracts,
+      confirmBlocking,
+    } = req.body ?? {};
     const current = await getSupervisionSettings();
+
+    if (parBlockThreshold !== undefined) {
+      const t = Number(parBlockThreshold);
+      if (!Number.isFinite(t) || t < 1 || t > 100) {
+        res.status(400).json({ error: 'The PAR30 limit must be between 1% and 100%' });
+        return;
+      }
+    }
+    if (parBlockMinContracts !== undefined) {
+      const m = Number(parBlockMinContracts);
+      if (!Number.isInteger(m) || m < 1 || m > 500) {
+        res.status(400).json({ error: 'The minimum number of contracts must be a whole number between 1 and 500' });
+        return;
+      }
+    }
 
     // Switching a rule on while agents are uncovered stops those agents selling
     // the moment it saves. That is often the point — the rule exists to make
@@ -293,13 +328,37 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
       if (uncovered > 0) blocking.push({ rule: 'customer service officer', uncovered });
     }
 
+    // The PAR rule is checked whenever it would end up on — being switched on,
+    // or tightened while already on — since lowering the limit blocks people
+    // just as surely as enabling it.
+    const parWillBeOn = parBlockEnabled !== undefined ? Boolean(parBlockEnabled) : current.parBlockEnabled;
+    const nextThreshold = parBlockThreshold !== undefined ? Number(parBlockThreshold) : current.parBlockThreshold;
+    const nextMin = parBlockMinContracts !== undefined ? Number(parBlockMinContracts) : current.parBlockMinContracts;
+    const parTightened =
+      nextThreshold < current.parBlockThreshold || nextMin < current.parBlockMinContracts;
+    if (parWillBeOn && (!current.parBlockEnabled || parTightened)) {
+      const risk = await getAgentPortfolioRisk();
+      const sellers = await prismaAny.adminUser.findMany({
+        where: { isActive: true, role: { name: { in: ['AGENT', 'CLUSTER_AGENT'] } } },
+        select: { id: true },
+      });
+      const sellerIds = new Set(sellers.map((u: any) => u.id));
+      const uncovered = [...risk.values()].filter(
+        (r) =>
+          sellerIds.has(r.agentId) &&
+          breachesParLimit(r, { parBlockThreshold: nextThreshold, parBlockMinContracts: nextMin })
+      ).length;
+      if (uncovered > 0) blocking.push({ rule: `portfolio at risk above ${nextThreshold}%`, uncovered });
+    }
+
     if (blocking.length > 0 && !confirmBlocking) {
       const worst = Math.max(...blocking.map((b) => b.uncovered));
       res.status(409).json({
         error: blocking
-          .map(
-            (b) =>
-              `${b.uncovered} active agent${b.uncovered === 1 ? ' is' : 's are'} not assigned to a ${b.rule}.`
+          .map((b) =>
+            b.rule.startsWith('portfolio at risk')
+              ? `${b.uncovered} active agent${b.uncovered === 1 ? ' has a' : 's have a'} ${b.rule}.`
+              : `${b.uncovered} active agent${b.uncovered === 1 ? ' is' : 's are'} not assigned to a ${b.rule}.`
           )
           .join(' ') +
           ` They will be unable to create contracts as soon as this is switched on. Confirm to proceed.`,
@@ -315,6 +374,9 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
       data: {
         ...(requireClusterAgent !== undefined ? { requireClusterAgent: Boolean(requireClusterAgent) } : {}),
         ...(requireCso !== undefined ? { requireCso: Boolean(requireCso) } : {}),
+        ...(parBlockEnabled !== undefined ? { parBlockEnabled: Boolean(parBlockEnabled) } : {}),
+        ...(parBlockThreshold !== undefined ? { parBlockThreshold: Number(parBlockThreshold) } : {}),
+        ...(parBlockMinContracts !== undefined ? { parBlockMinContracts: Number(parBlockMinContracts) } : {}),
         updatedById: admin.id,
       },
     });
@@ -324,10 +386,19 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
       action: 'UPDATE_SUPERVISION_SETTINGS',
       entity: 'SupervisionSettings',
       entityId: updated.id,
-      oldValues: { requireClusterAgent: current.requireClusterAgent, requireCso: current.requireCso },
+      oldValues: {
+        requireClusterAgent: current.requireClusterAgent,
+        requireCso: current.requireCso,
+        parBlockEnabled: current.parBlockEnabled,
+        parBlockThreshold: current.parBlockThreshold,
+        parBlockMinContracts: current.parBlockMinContracts,
+      },
       newValues: {
         requireClusterAgent: updated.requireClusterAgent,
         requireCso: updated.requireCso,
+        parBlockEnabled: updated.parBlockEnabled,
+        parBlockThreshold: updated.parBlockThreshold,
+        parBlockMinContracts: updated.parBlockMinContracts,
         // Recorded because switching this on knowing it blocks people is a
         // decision someone may need to account for later.
         blockedAgentsAtSwitchOn: blocking,

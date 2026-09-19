@@ -1,5 +1,7 @@
 import { Response } from 'express';
 import prisma from '../config/database';
+import { getSupervisionSettings } from '../services/supervisionService';
+import { getAgentPortfolioRisk, breachesParLimit, emptyRisk } from '../services/portfolioRiskService';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 
@@ -389,6 +391,24 @@ export async function getMyCustomerServiceOfficers(
           assignedAt: a.createdAt,
         })),
       clusterLeader: leader,
+      // The agent's own PAR30 and the limit it is judged against. Blocking
+      // someone on a number they have never seen guarantees a dispute; showing
+      // it lets them see the limit coming and collect before it bites.
+      portfolio: await (async () => {
+        const settings = await getSupervisionSettings();
+        const risk = (await getAgentPortfolioRisk([admin.id])).get(admin.id) ?? emptyRisk(admin.id);
+        return {
+          par30: risk.par30,
+          par1: risk.par1,
+          activeContracts: risk.activeContracts,
+          contractsAtRisk30: risk.contractsAtRisk30,
+          atRisk30: risk.atRisk30,
+          limit: settings.parBlockThreshold,
+          judgedFrom: settings.parBlockMinContracts,
+          enforced: settings.parBlockEnabled,
+          overLimit: breachesParLimit(risk, settings),
+        };
+      })(),
     });
   } catch (error) {
     console.error('getMyCustomerServiceOfficers error:', error);

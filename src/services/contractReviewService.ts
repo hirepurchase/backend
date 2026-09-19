@@ -227,8 +227,13 @@ function assessContractContext(input: {
   // An unsupervised agent writing business is how a book ends up with nobody
   // accountable for it. Only fires when the rule is switched on — see
   // supervisionService for why it ships off.
-  if (supervisionBlockers && supervisionBlockers.length > 0) {
+  if (supervisionBlockers && supervisionBlockers.some((b) => b.startsWith('Your portfolio at risk'))) {
+    riskFlags.push('AGENT_PAR_LIMIT');
+  }
+  if (supervisionBlockers && supervisionBlockers.some((b) => !b.startsWith('Your portfolio at risk'))) {
     riskFlags.push('UNSUPERVISED_AGENT');
+  }
+  if (supervisionBlockers && supervisionBlockers.length > 0) {
     blockers.push(...supervisionBlockers);
   }
 

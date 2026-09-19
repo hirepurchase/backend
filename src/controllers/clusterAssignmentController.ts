@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
+import { getAgentPortfolioRisk } from '../services/portfolioRiskService';
 import { CLUSTER_SUPERVISABLE_ROLES, CLUSTER_AGENT_ROLE } from '../constants/roles';
 
 // GET /admin-users/:id/cluster-agents
@@ -247,19 +248,11 @@ export async function getMyClusterAgents(req: AuthenticatedRequest, res: Respons
     const agentIds = assignments.map((a) => a.agentId);
     const bookIds = [...agentIds, admin.id];
 
-    const [pendingByAgent, activeContracts, self] = await Promise.all([
+    const [pendingByAgent, self] = await Promise.all([
       prisma.hirePurchaseContract.groupBy({
         by: ['createdById'],
         where: { createdById: { in: bookIds }, status: 'PENDING_APPROVAL' },
         _count: { _all: true },
-      }),
-      prisma.hirePurchaseContract.findMany({
-        where: { createdById: { in: bookIds }, status: 'ACTIVE' },
-        select: {
-          createdById: true,
-          outstandingBalance: true,
-          installments: { where: { status: 'OVERDUE' }, select: { id: true }, take: 1 },
-        },
       }),
       prisma.adminUser.findUnique({
         where: { id: admin.id },
@@ -278,21 +271,26 @@ export async function getMyClusterAgents(req: AuthenticatedRequest, res: Respons
 
     const pendingMap = new Map(pendingByAgent.map((row) => [row.createdById, row._count._all]));
 
-    // Portfolio at risk: the share of an agent's live book sitting on contracts
-    // that already have an overdue installment.
-    const riskMap = new Map<string, { overdueContracts: number; atRisk: number; total: number }>();
-    for (const contract of activeContracts) {
-      const entry = riskMap.get(contract.createdById) ?? { overdueContracts: 0, atRisk: 0, total: 0 };
-      entry.total += contract.outstandingBalance;
-      if (contract.installments.length > 0) {
-        entry.overdueContracts += 1;
-        entry.atRisk += contract.outstandingBalance;
-      }
-      riskMap.set(contract.createdById, entry);
+    // PAR from the shared calculation, so a leader sees the same number the
+    // contract block judges their agents on. The previous "any overdue
+    // installment" figure read roughly three times higher and ranked agents in
+    // the wrong order.
+    const bookRisk = await getAgentPortfolioRisk(bookIds);
+    const riskMap = new Map<string, { overdueContracts: number; atRisk: number; total: number; atRisk1: number; par1: number; par30: number; activeContracts: number }>();
+    for (const [id, r] of bookRisk) {
+      riskMap.set(id, {
+        overdueContracts: r.contractsAtRisk30,
+        atRisk: r.atRisk30,
+        total: r.outstanding,
+        atRisk1: r.atRisk1,
+        par1: r.par1,
+        par30: r.par30,
+        activeContracts: r.activeContracts,
+      });
     }
 
     const agents = assignments.map((a) => {
-      const risk = riskMap.get(a.agentId) ?? { overdueContracts: 0, atRisk: 0, total: 0 };
+      const risk = riskMap.get(a.agentId) ?? { overdueContracts: 0, atRisk: 0, total: 0, atRisk1: 0, par1: 0, par30: 0, activeContracts: 0 };
       return {
         id: a.agent.id,
         name: `${a.agent.firstName} ${a.agent.lastName}`.trim(),
@@ -306,13 +304,15 @@ export async function getMyClusterAgents(req: AuthenticatedRequest, res: Respons
         contractsOverdue: risk.overdueContracts,
         outstanding: Math.round(risk.total * 100) / 100,
         amountAtRisk: Math.round(risk.atRisk * 100) / 100,
-        portfolioAtRisk: risk.total > 0 ? Math.round((risk.atRisk / risk.total) * 1000) / 10 : 0,
+        portfolioAtRisk: risk.par30,
+        par1: risk.par1,
+        activeContracts: risk.activeContracts,
       };
     });
 
     // Their own row, flagged so the page can label it rather than pass the
     // supervisor off as one of their own agents.
-    const selfRisk = riskMap.get(admin.id) ?? { overdueContracts: 0, atRisk: 0, total: 0 };
+    const selfRisk = riskMap.get(admin.id) ?? { overdueContracts: 0, atRisk: 0, total: 0, atRisk1: 0, par1: 0, par30: 0, activeContracts: 0 };
     const ownBook = self
       ? {
           id: self.id,
@@ -327,7 +327,9 @@ export async function getMyClusterAgents(req: AuthenticatedRequest, res: Respons
           contractsOverdue: selfRisk.overdueContracts,
           outstanding: Math.round(selfRisk.total * 100) / 100,
           amountAtRisk: Math.round(selfRisk.atRisk * 100) / 100,
-          portfolioAtRisk: selfRisk.total > 0 ? Math.round((selfRisk.atRisk / selfRisk.total) * 1000) / 10 : 0,
+          portfolioAtRisk: selfRisk.par30,
+          par1: selfRisk.par1,
+          activeContracts: selfRisk.activeContracts,
           isSelf: true,
         }
       : null;

@@ -1,4 +1,5 @@
 import prisma from '../config/database';
+import { getAgentPortfolioRisk, breachesParLimit, emptyRisk } from './portfolioRiskService';
 
 const prismaAny = prisma as any;
 
@@ -6,9 +7,18 @@ export interface SupervisionSettings {
   id: string;
   requireClusterAgent: boolean;
   requireCso: boolean;
+  parBlockEnabled: boolean;
+  parBlockThreshold: number;
+  parBlockMinContracts: number;
 }
 
-const DEFAULTS = { requireClusterAgent: false, requireCso: false };
+const DEFAULTS = {
+  requireClusterAgent: false,
+  requireCso: false,
+  parBlockEnabled: false,
+  parBlockThreshold: 20,
+  parBlockMinContracts: 10,
+};
 
 export async function getSupervisionSettings(): Promise<SupervisionSettings> {
   const existing = await prismaAny.supervisionSettings.findFirst();
@@ -62,10 +72,27 @@ export async function getSupervisionBlockers(
   agentRole?: string | null
 ): Promise<string[]> {
   const settings = await getSupervisionSettings();
-  if (!settings.requireClusterAgent && !settings.requireCso) return [];
+  if (!settings.requireClusterAgent && !settings.requireCso && !settings.parBlockEnabled) return [];
+
+  const blockers: string[] = [];
+
+  // Portfolio at risk. An agent whose own book is failing keeps adding to it
+  // with every sale; the block makes collecting the priority. Applies to
+  // cluster leaders too — they sell, and their book is the example their team
+  // sees. It lifts by itself once collections bring PAR30 back under the limit.
+  if (settings.parBlockEnabled) {
+    const risk = (await getAgentPortfolioRisk([agentId])).get(agentId) ?? emptyRisk(agentId);
+    if (breachesParLimit(risk, settings)) {
+      blockers.push(
+        `Your portfolio at risk is ${risk.par30}% — ${risk.contractsAtRisk30} customer${risk.contractsAtRisk30 === 1 ? ' is' : 's are'} more than 30 days behind, GHS ${risk.atRisk30.toFixed(2)} outstanding. ` +
+          `The limit is ${settings.parBlockThreshold}%. Collect from these customers to bring it down before you create new contracts.`
+      );
+    }
+  }
+
+  if (!settings.requireClusterAgent && !settings.requireCso) return blockers;
 
   const { clusterAgentName, csoNames } = await getAgentSupervision(agentId);
-  const blockers: string[] = [];
 
   // A cluster leader supervises their own work. The tier is flat — no cluster
   // agent can be assigned to another — so without this exemption the three
