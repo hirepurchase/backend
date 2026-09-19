@@ -15,6 +15,7 @@ import {
   getAgentCompletedContracts,
   getAgentCompletionsReport,
 } from '../controllers/reportController';
+import { getPortfolioAtRiskReport, getAgentAtRiskContracts } from '../controllers/portfolioRiskController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { DASHBOARD_ACCESS_PERMISSIONS, DAILY_PAYMENTS_ACCESS_PERMISSIONS, PERMISSIONS } from '../constants/permissions';
 
@@ -39,6 +40,11 @@ router.get('/preapprovals', authenticateAdmin, requireAnyPermission(PERMISSIONS.
 router.get('/income', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getIncomeReport);
 router.get('/agents', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getAgentReport);
 // Per-agent completions for a month — the basis for completion bonuses
+// Portfolio at risk. Scoped inside the controller: an admin sees the whole
+// book, a cluster leader only their own team.
+router.get('/portfolio-at-risk', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS, PERMISSIONS.VIEW_ASSIGNED_CONTRACTS), getPortfolioAtRiskReport);
+router.get('/portfolio-at-risk/:agentId', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS, PERMISSIONS.VIEW_ASSIGNED_CONTRACTS), getAgentAtRiskContracts);
+
 router.get('/agent-completions', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getAgentCompletionsReport);
 router.get('/daily-payments', authenticateAdmin, requireAnyPermission(...DAILY_PAYMENTS_ACCESS_PERMISSIONS), getDailyPayments);
 
