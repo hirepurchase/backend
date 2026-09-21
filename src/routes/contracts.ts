@@ -27,6 +27,7 @@ import {
   assignContractApprover,
   approveContract,
   requestContractRevision,
+  cancelPendingContract,
   resubmitAgentContract,
   editRevisionRequestedContract,
   editPendingContract,
@@ -56,6 +57,8 @@ router.post('/:id/assign-approver', authenticateAdmin, requireAnyPermission(...C
 router.post('/:id/approve', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), approveContract);
 router.post('/:id/request-revision', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), requestContractRevision);
 router.post('/:id/reject', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), requestContractRevision);
+// Scoped inside the handler, and only ever reaches a contract that is not yet approved.
+router.post('/:id/cancel-pending', authenticateAdmin, requireAnyPermission(PERMISSIONS.CANCEL_PENDING_CONTRACT, PERMISSIONS.CANCEL_CONTRACT), cancelPendingContract);
 router.patch('/:id/pending-edit', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), editPendingContract);
 
 // Admin routes

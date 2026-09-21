@@ -1321,3 +1321,124 @@ export async function editPendingContract(req: AuthenticatedRequest, res: Respon
     res.status(500).json({ error: 'Failed to update contract' });
   }
 }
+
+/**
+ * POST /contracts/:id/cancel-pending
+ *
+ * Closes a contract that never reached approval — the usual case being a
+ * customer who changed their mind between the agent writing it up and the CSO
+ * approving it. Until now the only options were to approve it or bounce it back
+ * for revision, so a dead contract sat in the queue holding stock with it.
+ *
+ * Deliberately separate from cancelContract: that one ends a live loan and is
+ * gated on CANCEL_CONTRACT, which CSOs do not hold and should not. This path
+ * only ever touches a contract that has not been approved, so it cannot end a
+ * loan money is being collected on.
+ */
+export async function cancelPendingContract(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const { reason } = req.body as { reason?: string };
+    const admin = req.user as AdminUserPayload;
+
+    if (!reason || !reason.trim()) {
+      res.status(400).json({ error: 'A reason is required to cancel a contract' });
+      return;
+    }
+
+    const contract = await prisma.hirePurchaseContract.findUnique({
+      where: { id },
+      include: {
+        inventoryItem: { select: { id: true } },
+        managedDevice: { select: { id: true } },
+        customer: { select: { firstName: true, lastName: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+      },
+    });
+
+    if (!contract) {
+      res.status(404).json({ error: 'Contract not found' });
+      return;
+    }
+
+    const CANCELLABLE_BEFORE_APPROVAL = ['PENDING_APPROVAL', 'REVISION_REQUESTED'];
+    if (!CANCELLABLE_BEFORE_APPROVAL.includes(contract.status)) {
+      res.status(400).json({
+        error: contract.status === 'ACTIVE'
+          ? 'This contract is already approved and active. An active contract is cancelled from the contract page, which needs the Cancel contracts permission.'
+          : `Only a contract awaiting approval can be cancelled here (current status: ${contract.status})`,
+      });
+      return;
+    }
+
+    const scope = await resolveContractScope(admin);
+    if (!scopeAllows(scope, contract.createdById)) {
+      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
+      return;
+    }
+
+    await prisma.$transaction(async (tx) => {
+      await tx.hirePurchaseContract.update({
+        where: { id },
+        data: {
+          status: 'CANCELLED',
+          rejectionReason: reason.trim(),
+          approvedById: null,
+          approvedAt: null,
+        },
+      });
+
+      // Put the phone back on the shelf — it was held for a sale that is not
+      // happening, and nothing else releases it.
+      if (contract.inventoryItem) {
+        await tx.inventoryItem.update({
+          where: { id: contract.inventoryItem.id },
+          data: { status: 'AVAILABLE', contractId: null },
+        });
+      }
+
+      // A device already enrolled as stock gets linked to the contract at
+      // creation, before any approval. Left pointing at a cancelled contract it
+      // would keep being evaluated against a schedule nobody is paying, so
+      // return it to standalone stock. Its Knox enrolment is untouched: this
+      // contract never activated, so it never locked the device.
+      if (contract.managedDevice) {
+        await tx.managedDevice.update({
+          where: { id: contract.managedDevice.id },
+          data: { contractId: null, customerId_uuid: null },
+        });
+      }
+
+      await tx.agentDepositLedger.updateMany({
+        where: { contractId: id, status: 'PENDING' },
+        data: { status: 'CANCELLED' },
+      });
+    });
+
+    await createAuditLog({
+      userId: admin.id,
+      action: 'CANCEL_PENDING_CONTRACT',
+      entity: 'HirePurchaseContract',
+      entityId: id,
+      oldValues: { status: contract.status },
+      newValues: { status: 'CANCELLED', reason: reason.trim(), cancelledBy: admin.id },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] as string,
+    });
+
+    // The deposit is money that already changed hands. Nothing here can refund
+    // it, so say so plainly rather than letting it go quiet.
+    const depositTaken = Number(contract.depositAmount) > 0;
+
+    res.json({
+      message: depositTaken
+        ? 'Contract cancelled and the item returned to stock. A deposit was recorded on this contract — arrange the refund separately.'
+        : 'Contract cancelled and the item returned to stock.',
+      depositToRefund: depositTaken ? Number(contract.depositAmount) : 0,
+      reason: reason.trim(),
+    });
+  } catch (error) {
+    console.error('cancelPendingContract error:', error);
+    res.status(500).json({ error: 'Failed to cancel the contract' });
+  }
+}
