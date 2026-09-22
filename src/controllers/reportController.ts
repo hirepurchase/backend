@@ -1212,14 +1212,30 @@ export async function getAgentDashboard(req: AuthenticatedRequest, res: Response
 
 // Agent's overdue installments — one row per overdue installment, with the
 // customer's contact info and payment history, so the agent can call them.
+/**
+ * Whose book do the agent follow-up pages cover for this viewer?
+ *
+ * A plain agent sees their own. A cluster leader supervises follow-up, so they
+ * see their agents' and their own — that is the whole point of the role. An
+ * admin holds VIEW_CONTRACTS and would otherwise pull the entire book into a
+ * page built as one person's call list, so anything broader than a cluster
+ * collapses back to the viewer alone.
+ */
+async function resolveFollowUpCreatorIds(admin: AdminUserPayload): Promise<string[]> {
+  const scope = await resolveContractScope(admin);
+  return scope.mode === 'assigned' ? scope.agentIds : [admin.id];
+}
+
 export async function getAgentOverdueInstallments(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const agentId = req.user!.id;
+    const creatorIds = await resolveFollowUpCreatorIds(req.user as AdminUserPayload);
+    const isCluster = creatorIds.length > 1;
     const now = new Date();
 
     const contracts = await prisma.hirePurchaseContract.findMany({
-      where: { createdById: agentId, status: 'ACTIVE' },
+      where: { createdById: { in: creatorIds }, status: 'ACTIVE' },
       include: {
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
         customer: { select: { id: true, firstName: true, lastName: true, membershipId: true, phone: true } },
         inventoryItem: { include: { product: { select: { name: true } } } },
         installments: {
@@ -1253,6 +1269,8 @@ export async function getAgentOverdueInstallments(req: AuthenticatedRequest, res
             membershipId: contract.customer.membershipId,
           },
           product: contract.inventoryItem?.product?.name ?? null,
+          agentId: contract.createdById,
+          agentName: `${contract.createdBy.firstName} ${contract.createdBy.lastName}`.trim(),
           amountOverdue: Math.round((installment.amount - installment.paidAmount) * 100) / 100,
           dueDate: installment.dueDate,
           daysOverdue,
@@ -1266,6 +1284,7 @@ export async function getAgentOverdueInstallments(req: AuthenticatedRequest, res
     rows.sort((a, b) => b.daysOverdue - a.daysOverdue);
 
     res.json({
+      scope: isCluster ? 'cluster' : 'own',
       count: rows.length,
       totalOverdueAmount: Math.round(rows.reduce((sum, r) => sum + r.amountOverdue, 0) * 100) / 100,
       installments: rows,
@@ -1281,7 +1300,8 @@ export async function getAgentOverdueInstallments(req: AuthenticatedRequest, res
 // the payment goes overdue rather than only after.
 export async function getAgentUpcomingInstallments(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
-    const agentId = req.user!.id;
+    const creatorIds = await resolveFollowUpCreatorIds(req.user as AdminUserPayload);
+    const isCluster = creatorIds.length > 1;
 
     const tomorrowStart = new Date();
     tomorrowStart.setDate(tomorrowStart.getDate() + 1);
@@ -1290,8 +1310,9 @@ export async function getAgentUpcomingInstallments(req: AuthenticatedRequest, re
     tomorrowEnd.setHours(23, 59, 59, 999);
 
     const contracts = await prisma.hirePurchaseContract.findMany({
-      where: { createdById: agentId, status: 'ACTIVE' },
+      where: { createdById: { in: creatorIds }, status: 'ACTIVE' },
       include: {
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
         customer: { select: { id: true, firstName: true, lastName: true, membershipId: true, phone: true } },
         inventoryItem: { include: { product: { select: { name: true } } } },
         installments: {
@@ -1317,6 +1338,8 @@ export async function getAgentUpcomingInstallments(req: AuthenticatedRequest, re
           membershipId: contract.customer.membershipId,
         },
         product: contract.inventoryItem?.product?.name ?? null,
+        agentId: contract.createdById,
+        agentName: `${contract.createdBy.firstName} ${contract.createdBy.lastName}`.trim(),
         amountDue: Math.round((installment.amount - installment.paidAmount) * 100) / 100,
         dueDate: installment.dueDate,
       }))
@@ -1325,6 +1348,7 @@ export async function getAgentUpcomingInstallments(req: AuthenticatedRequest, re
     rows.sort((a, b) => a.customer.name.localeCompare(b.customer.name));
 
     res.json({
+      scope: isCluster ? 'cluster' : 'own',
       count: rows.length,
       totalUpcomingAmount: Math.round(rows.reduce((sum, r) => sum + r.amountDue, 0) * 100) / 100,
       installments: rows,

@@ -679,6 +679,7 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
       search,
       hasBalance,
       includeDeviceControl,
+      agentId,
     } = req.query;
 
     const adminUser = req.user as AdminUserPayload;
@@ -693,7 +694,16 @@ export async function getAllContracts(req: AuthenticatedRequest, res: Response):
     // Agents see only contracts they created; customer service officers see
     // those created by their assigned agents.
     const where: Record<string, unknown> = {};
-    applyCreatorScope(where, await resolveContractScope(adminUser));
+    const contractScope = await resolveContractScope(adminUser);
+    applyCreatorScope(where, contractScope);
+
+    // A cluster leader drilling into one of their agents. Narrowing happens on
+    // top of the scope above, never instead of it — an agentId outside the
+    // viewer's scope must return nothing rather than widen the query.
+    if (agentId) {
+      const requested = String(agentId);
+      where.createdById = scopeAllows(contractScope, requested) ? requested : '__out_of_scope__';
+    }
 
     if (status) where.status = status;
     // Payment screens ask for contracts that can still take money. Filtering
