@@ -17,6 +17,16 @@ const prismaAny = prisma as any;
 
 const LIST_CAP = 500;
 
+/**
+ * Roles permitted to approve a request they raised themselves.
+ *
+ * Kept narrow on purpose: these are the only roles holding
+ * APPROVE_TEMPORARY_UNLOCK, so this removes a second-approver step rather than
+ * granting anyone new reach. Cluster agents raise requests but approve none,
+ * so they are unaffected.
+ */
+const SELF_APPROVAL_ROLES = ['SUPER_ADMIN', 'ADMIN'];
+
 function getCaller(req: AuthenticatedRequest): AdminUserPayload {
   return req.user as AdminUserPayload;
 }
@@ -350,10 +360,13 @@ export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, r
       return;
     }
 
-    // Vouching and agreeing must be two people, or the guarantee means
-    // nothing. Now that admins can raise requests as well as approve them,
-    // this is the only thing keeping the two apart.
-    if (request.requestedById === caller.id) {
+    // Vouching and agreeing are normally two people, or the guarantee means
+    // nothing. Administrators are the exception: they are the only approvers,
+    // so holding them to it meant a request could sit unactioned whenever a
+    // second admin was not around — at night, or on one of the days only one
+    // is working. Every other role still needs a second pair of eyes.
+    const isSelfApproval = request.requestedById === caller.id;
+    if (isSelfApproval && !SELF_APPROVAL_ROLES.includes(caller.role)) {
       res.status(403).json({
         error: 'You raised this request, so another approver has to review it.',
       });
@@ -484,6 +497,9 @@ export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, r
         expiresAt,
         arrearsAtApproval: arrears.overdueAmount,
         deviceAction: deviceResult?.action,
+        // Recorded explicitly: one person both raised and granted this, so the
+        // usual two-person check did not happen on it.
+        selfApproved: isSelfApproval || undefined,
       },
     });
 
