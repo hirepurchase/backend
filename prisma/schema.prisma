@@ -920,3 +920,98 @@ model PayTriggerSettings {
   updatedById               String?
   updatedAt                 DateTime  @updatedAt
 }
+
+// ============= CLUSTER LEADER SCORECARD =============
+//
+// Monthly performance pay for cluster leaders. New tables only, with no
+// relations to existing models, so nothing here changes how assignments,
+// contracts or payments behave.
+
+// Who led which agent, and when. ClusterAgentAssignment holds only the
+// present; this is kept in step with it by syncAssignmentHistory so a month
+// can be credited to the leader who actually ran the agent at the time.
+model ClusterAssignmentHistory {
+  id             String    @id @default(uuid())
+  agentId        String
+  clusterAgentId String
+  startedAt      DateTime
+  endedAt        DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([agentId, startedAt])
+  @@index([clusterAgentId, startedAt])
+}
+
+model ClusterScorecardIndicator {
+  id              String   @id @default(uuid())
+  key             String   @unique
+  enabled         Boolean  @default(false)
+  payoutType      String   @default("RATE") // RATE | PER_UNIT | TARGET | TIERS
+  rate            Float    @default(0) // % of the value, for RATE
+  unitAmount      Float    @default(0) // GHS per unit, for PER_UNIT
+  target          Float?
+  targetDirection String   @default("GTE") // GTE | LTE
+  targetAmount    Float    @default(0) // GHS when the target is met, for TARGET
+  tiers           Json? // [{ threshold, amount }] for TIERS
+  cap             Float?
+  sortOrder       Int      @default(0)
+  updatedById     String?
+  updatedAt       DateTime @updatedAt
+}
+
+model ClusterScorecardSettings {
+  id                String   @id @default("singleton")
+  baseAmount        Float    @default(0)
+  parGateEnabled    Boolean  @default(false)
+  parGateCeiling    Float    @default(25)
+  gateWithholdsBase Boolean  @default(false)
+  depositRemitDays  Int      @default(7)
+  updatedById       String?
+  updatedAt         DateTime @updatedAt
+}
+
+model ClusterScorecardPeriod {
+  id            String    @id @default(uuid())
+  month         String    @unique // YYYY-MM
+  status        String    @default("CLOSED") // CLOSED | APPROVED
+  rulesSnapshot Json
+  closedById    String
+  closedAt      DateTime  @default(now())
+  approvedById  String?
+  approvedAt    DateTime?
+  updatedAt     DateTime  @updatedAt
+}
+
+model ClusterScorecardLine {
+  id             String @id @default(uuid())
+  periodId       String
+  clusterAgentId String
+  indicatorKey   String
+  value          Float
+  count          Int    @default(0)
+  payout         Float  @default(0)
+  detail         Json?
+
+  @@unique([periodId, clusterAgentId, indicatorKey])
+  @@index([periodId])
+}
+
+model ClusterPayout {
+  id             String    @id @default(uuid())
+  periodId       String
+  clusterAgentId String
+  base           Float     @default(0)
+  variable       Float     @default(0)
+  deductions     Float     @default(0)
+  total          Float     @default(0)
+  gated          Boolean   @default(false)
+  status         String    @default("PENDING") // PENDING | PAID
+  paidAt         DateTime?
+  paidById       String?
+  reference      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([periodId, clusterAgentId])
+  @@index([clusterAgentId])
+}
