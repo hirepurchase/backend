@@ -758,7 +758,11 @@ model PasswordResetOtp {
 
 model CommissionSettings {
   id            String   @id @default(uuid())
-  fixedAmount   Float
+  fixedAmount   Float // kept by the agent out of the deposit at sale
+  // Held back from the sale commission and paid, with the completion bonus,
+  // once the customer completes. Both 0 means the old one-payment scheme.
+  deferredAmount  Float  @default(0)
+  completionBonus Float  @default(0)
   effectiveDate DateTime
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
@@ -1014,4 +1018,29 @@ model ClusterPayout {
 
   @@unique([periodId, clusterAgentId])
   @@index([clusterAgentId])
+}
+
+// Commission owed to an agent when their customer completes: the part held
+// back at sale plus the completion bonus, copied from CommissionSettings when
+// the sale was approved. Whether it is due is read from the contract's status,
+// so the code that completes contracts is untouched. No relations to existing
+// models — plain ID columns.
+model AgentCompletionCommission {
+  id             String    @id @default(uuid())
+  contractId     String    @unique
+  agentId        String
+  ledgerEntryId  String?
+  upfrontAmount  Float // what the agent kept at sale, for the record
+  deferredAmount Float
+  bonusAmount    Float
+  total          Float // deferredAmount + bonusAmount
+  status         String    @default("ACCRUED") // ACCRUED | PAID
+  paidAt         DateTime?
+  paidById       String?
+  reference      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([agentId, status])
+  @@index([status])
 }

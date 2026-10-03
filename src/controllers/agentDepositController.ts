@@ -7,6 +7,7 @@ import { requestManagedDeviceUnlock } from '../services/deviceControlPolicyServi
 import { unlockKnoxGuardDevice } from '../services/knoxGuardService';
 import { SELLING_AGENT_ROLES } from '../constants/roles';
 import { notifyPayTrigger } from '../services/payTrigger/events';
+import { accrueCompletionCommission } from '../services/completionCommissionService';
 
 // Unlock the device for a contract after agent deposit is fully paid.
 // Priority order:
@@ -87,7 +88,7 @@ export async function createAgentDepositLedgerEntry(contractId: string): Promise
     const commissionAmount = commissionSettings?.fixedAmount ?? 0;
     const amountDueCompany = Math.max(0, contract.depositAmount - commissionAmount);
 
-    await prisma.agentDepositLedger.create({
+    const ledgerEntry = await prisma.agentDepositLedger.create({
       data: {
         contractId: contract.id,
         agentId: contract.createdById,
@@ -99,6 +100,17 @@ export async function createAgentDepositLedgerEntry(contractId: string): Promise
         outstandingBalance: amountDueCompany,
         status: 'PENDING',
       },
+    });
+
+    // The part of the commission held until the customer completes, plus the
+    // completion bonus. Records nothing while both are 0; never throws.
+    await accrueCompletionCommission({
+      contractId: contract.id,
+      agentId: contract.createdById,
+      ledgerEntryId: ledgerEntry.id,
+      upfrontAmount: commissionAmount,
+      deferredAmount: commissionSettings?.deferredAmount ?? 0,
+      completionBonus: commissionSettings?.completionBonus ?? 0,
     });
   } catch (error) {
     console.error(`Failed to create agent deposit ledger entry for contract ${contractId}:`, error);
