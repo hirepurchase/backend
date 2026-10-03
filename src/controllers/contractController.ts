@@ -28,6 +28,7 @@ import { uploadToSupabase, deleteFromSupabase } from '../services/storageService
 import { hasAnyPermission, hasPermission, PERMISSIONS } from '../constants/permissions';
 import { resolveContractScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
 import { isSellingAgentRole } from '../constants/roles';
+import { notifyPayTrigger } from '../services/payTrigger/events';
 
 async function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCreatedById: string | null | undefined): Promise<boolean> {
   const scope = await resolveContractScope(adminUser);
@@ -654,6 +655,7 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
         console.error(`Knox Guard auto-enroll failed for contract ${completeContract.contractNumber}:`, err);
       });
     }
+    if (!requiresApproval && completeContract) notifyPayTrigger(completeContract.id, 'CONTRACT_ACTIVE');
 
 
     res.status(201).json({

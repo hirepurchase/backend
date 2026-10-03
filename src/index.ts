@@ -12,6 +12,7 @@ import prisma from './config/database';
 import { initializeNotificationScheduler } from './services/notificationScheduler';
 import { startPaymentRetryScheduler } from './services/paymentRetryScheduler';
 import { startDeviceControlScheduler } from './services/deviceControlScheduler';
+import { startPayTriggerScheduler } from './services/payTrigger/scheduler';
 import { initializeIdleShutdown, stopIdleShutdown, getTimeUntilShutdown, getLastActivityTime, isIdleShutdownEnabled } from './services/idleShutdownService';
 import { activityTracker } from './middleware/activityTracker';
 
@@ -139,6 +140,9 @@ app.listen(PORT, () => {
 
   // Initialize Knox Guard device control scheduler
   startDeviceControlScheduler();
+
+  // PayTrigger (Transsion handsets): one 08:36 sweep; everything else is event-driven
+  startPayTriggerScheduler();
 
   // Initialize idle shutdown service
   initializeIdleShutdown();

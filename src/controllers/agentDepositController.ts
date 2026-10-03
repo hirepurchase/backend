@@ -6,6 +6,7 @@ import { generateTransactionRef } from '../utils/helpers';
 import { requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
 import { unlockKnoxGuardDevice } from '../services/knoxGuardService';
 import { SELLING_AGENT_ROLES } from '../constants/roles';
+import { notifyPayTrigger } from '../services/payTrigger/events';
 
 // Unlock the device for a contract after agent deposit is fully paid.
 // Priority order:
@@ -13,6 +14,7 @@ import { SELLING_AGENT_ROLES } from '../constants/roles';
 //   2. ManagedDevice linked via inventoryItemId only (standalone Knox enrollment) → Knox unlock directly
 //   3. No Knox enrollment at all → update inventoryItem lockStatus only
 async function unlockDeviceAfterDepositPaid(contractId: string, logPrefix: string): Promise<void> {
+  notifyPayTrigger(contractId, 'DEPOSIT_REMITTED');
   try {
     await requestManagedDeviceUnlock(contractId, 'Agent deposit fully remitted — device unlocked.');
   } catch (err: any) {

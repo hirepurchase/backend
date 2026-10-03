@@ -805,3 +805,118 @@ model AgentDepositPayment {
   @@index([agentId, status])
   @@index([ledgerEntryId, createdAt])
 }
+
+// ============= PAYTRIGGER (Transsion device lock) =============
+//
+// A self-contained sidecar for TECNO / Infinix / itel handsets, which Knox
+// Guard cannot lock. These models deliberately declare no relations to the
+// existing ones: a Prisma relation would force a back-reference field into an
+// existing model block, and this integration must not alter any of them.
+// Plain ID columns only.
+
+model PayTriggerProduct {
+  id        String   @id @default(uuid())
+  productId String   @unique
+  brand     String // TECNO | INFINIX | ITEL
+  addedById String?
+  createdAt DateTime @default(now())
+}
+
+model PayTriggerDevice {
+  id                     String    @id @default(uuid())
+  inventoryItemId        String    @unique
+  contractId             String?   @unique
+  imei                   String    @unique
+  deviceTag              String?
+  orderRef               String?
+  enrollmentStatus       String    @default("QUEUED") // QUEUED | ACTIVE | UNENFORCEABLE | CANCELLED | REMOVED
+  committedState         String    @default("UNKNOWN") // LOCKED | UNLOCKED | PENDING | UNKNOWN
+  scheduleExpiresAt      DateTime? // the lock date our decision wants
+  providerExpiresAt      DateTime? // the lock date PayTrigger last accepted
+  fingerprint            String?
+  releaseAfter           DateTime?
+  releaseHeld            Boolean   @default(false)
+  holdMessageShown       Boolean   @default(false)
+  lastConnectAt          DateTime?
+  apkVersion             String?
+  enforcementConfirmedAt DateTime?
+  licenceConsumedAt      DateTime?
+  lastStatusReadAt       DateTime?
+  pinUnlocksUsed         Int       @default(0)
+  awaitingPinSince       DateTime?
+  lastError              String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  @@index([enrollmentStatus])
+}
+
+model PayTriggerCommand {
+  id             String    @id @default(uuid())
+  deviceId       String
+  type           String // ENROL | EXTEND | LOCK | RELEASE | CANCEL | SYNC
+  status         String    @default("PENDING") // PENDING | PROCESSING | SUCCEEDED | DEFERRED | FAILED | CANCELLED
+  idempotencyKey String    @unique
+  payload        Json
+  attempts       Int       @default(0)
+  nextAttemptAt  DateTime?
+  lastError      String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([deviceId, createdAt])
+  @@index([status, nextAttemptAt])
+}
+
+// PayTrigger keeps no history of what we asked it to do, so this is the
+// record used to settle disputes.
+model PayTriggerActionLog {
+  id            String   @id @default(uuid())
+  deviceId      String?
+  contractId    String?
+  action        String
+  success       Boolean
+  dryRun        Boolean
+  providerCode  String?
+  skippedReason String?
+  request       Json?
+  response      Json?
+  actorId       String?
+  createdAt     DateTime @default(now())
+
+  @@index([deviceId, createdAt])
+  @@index([contractId, createdAt])
+}
+
+model PayTriggerWebhookEvent {
+  id          String    @id @default(uuid())
+  dedupeKey   String    @unique
+  notifyType  String
+  body        Json
+  processedAt DateTime?
+  error       String?
+  createdAt   DateTime  @default(now())
+}
+
+model PayTriggerSettings {
+  id                        String    @id @default("singleton")
+  defaultRuleNum            Int       @default(0)
+  lockAfterOverdueDays      Int       @default(1)
+  lockOnUnpaidAgentDeposit  Boolean   @default(true)
+  holdOnUnpaidPenalties     Boolean   @default(false)
+  maxUnlockHorizonDays      Int       @default(45)
+  releaseHoldHours          Int       @default(24)
+  extendBreakerPercent      Int       @default(20)
+  morningSweepCron          String    @default("36 8 * * *")
+  lockTitle                 String?
+  lockTips                  String?
+  depositHoldTitle          String    @default("Phone not yet activated")
+  depositHoldTips           String    @default("Your phone will be activated once your agent completes registration. Contact {agentName} on {agentPhone}.")
+  payDeeplink               String?
+  ladder                    Json? // the escalation stages last sent to PayTrigger
+  operatorOfflineTimerHours Int       @default(4392) // set by Transsion on request; read-only here
+  lastSweepAt               DateTime?
+  lastSweepSummary          Json?
+  updatedById               String?
+  updatedAt                 DateTime  @updatedAt
+}

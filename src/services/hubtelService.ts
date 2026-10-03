@@ -8,6 +8,7 @@ import { settleTemporaryUnlockOnPayment } from './temporaryUnlockService';
 import { roundMoney, isMoneyGte } from '../utils/helpers';
 import { allocatePaymentAcrossContract } from './paymentAllocationService';
 import { OWED_PENALTY_WHERE } from './penaltyService';
+import { notifyPayTrigger } from './payTrigger/events';
 
 // Hubtel API Configuration
 const HUBTEL_POS_SALES_ID = process.env.HUBTEL_POS_SALES_ID || '';
@@ -852,6 +853,7 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
   // before the device is judged — otherwise both wait for tomorrow's cron.
   await settleTemporaryUnlockOnPayment(contract.id);
   await safelyEvaluateManagedDeviceForContract(contract.id);
+  notifyPayTrigger(contract.id, 'PAYMENT');
 }
 
 export default {

@@ -24,6 +24,7 @@ import {
   CreatorScope,
 } from '../services/scopeService';
 import { isSellingAgentRole } from '../constants/roles';
+import { notifyPayTrigger } from '../services/payTrigger/events';
 
 const PRIORITY_RANK: Record<string, number> = {
   HIGH: 3,
@@ -669,6 +670,7 @@ export async function approveContract(req: AuthenticatedRequest, res: Response):
     }).catch((err) => {
       console.error(`Knox Guard auto-enroll failed for contract ${updated.contractNumber}:`, err);
     });
+    notifyPayTrigger(updated.id, 'CONTRACT_ACTIVE');
 
     // Create agent deposit ledger entry
     createAgentDepositLedgerEntry(updated.id).catch((err) => {

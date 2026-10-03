@@ -34,6 +34,7 @@ function payableCeiling(contract: { outstandingBalance: number; penaltyOutstandi
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { settleTemporaryUnlockOnPayment } from '../services/temporaryUnlockService';
+import { notifyPayTrigger } from '../services/payTrigger/events';
 
 function ensureContractCanAcceptPayments(status: string, res: Response): boolean {
   if (status === 'ACTIVE') {
@@ -465,6 +466,7 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
   // before the device is judged — otherwise both wait for tomorrow's cron.
   await settleTemporaryUnlockOnPayment(contract.id);
   await safelyEvaluateManagedDeviceForContract(contract.id);
+  notifyPayTrigger(contract.id, 'PAYMENT');
 }
 
 // Get payment history for contract
@@ -748,6 +750,7 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
     // before the device is judged — otherwise both wait for tomorrow's cron.
     await settleTemporaryUnlockOnPayment(payment.contractId);
     await safelyEvaluateManagedDeviceForContract(payment.contractId);
+    notifyPayTrigger(payment.contractId, 'PAYMENT');
 
     res.status(200).json({ message: 'Payment updated successfully' });
   } catch (error) {
@@ -861,6 +864,7 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
     // before the device is judged — otherwise both wait for tomorrow's cron.
     await settleTemporaryUnlockOnPayment(payment.contractId);
     await safelyEvaluateManagedDeviceForContract(payment.contractId);
+    notifyPayTrigger(payment.contractId, 'PAYMENT_REVERSED');
 
     res.status(200).json({ message: 'Payment deleted successfully' });
   } catch (error) {

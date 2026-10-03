@@ -20,6 +20,7 @@ import {
   hasLiveTemporaryUnlock,
   TEMPORARY_UNLOCK_STATUS,
 } from './temporaryUnlockService';
+import { isPayTriggerProduct } from './payTrigger/guard';
 
 type ManagedDeviceState = 'LOCKED' | 'UNLOCKED' | 'PENDING' | 'UNKNOWN';
 type ManagedDeviceCommandType = 'APPROVE_DEVICE' | 'BLINK_DEVICE' | 'LOCK_DEVICE' | 'UNLOCK_DEVICE' | 'SYNC_DEVICE' | 'COMPLETE_DEVICE' | 'CANCEL_COMPLETE';
@@ -1580,6 +1581,11 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
 
   if (!contract) {
     throw new Error('Contract not found');
+  }
+
+  // Transsion handsets are managed by PayTrigger; Samsung cannot lock them.
+  if (await isPayTriggerProduct(contract.inventoryItem?.productId)) {
+    throw new Error('Transsion handset — managed by PayTrigger, not Knox Guard.');
   }
 
   if (!contract.customerId_uuid || !contract.customer) {
