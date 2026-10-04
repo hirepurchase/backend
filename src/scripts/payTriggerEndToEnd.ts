@@ -522,18 +522,29 @@ async function main() {
 
   // ── 16. Phone sold without enrolment ───────────────────────────────────
   console.log('\n16. A TECNO phone is sold without ever being enrolled');
-  await step('the sale is stopped or flagged', async () => {
+  await step('the sale is refused with a plain reason, and goes through once the phone is enrolled', async () => {
     const imeiE = imeiNew();
     let itemE = (await call('POST', '/products/inventory', admin.token, { productId: product.id, serialNumber: imeiE })).json;
     itemE = itemE.inventoryItem || itemE.item || itemE;
-    const r = await call('POST', '/contracts', admin.token, {
-      customerId: await customer(admin.u.id), inventoryItemId: itemE.id, totalPrice: 2000, depositAmount: 400, paymentFrequency: 'WEEKLY', totalInstallments: 4,
-      paymentMethod: 'MANUAL', mobileMoneyNetwork: 'MTN', mobileMoneyNumber: '0241234572', startDate: day(7).toISOString(),
-    });
-    await sleep(1500);
-    const issues = await call('GET', '/paytrigger/issues', admin.token);
-    const flagged = JSON.stringify(issues.json).includes(imeiE) || JSON.stringify(issues.json).includes(r.json?.contractNumber || '§');
-    assert.ok(r.status >= 400 || flagged, `contract ${r.json?.contractNumber} created (HTTP ${r.status}) for a phone PayTrigger has never heard of, and Issues does not list it`);
+    const sale = { customerId: await customer(admin.u.id), inventoryItemId: itemE.id, totalPrice: 2000, depositAmount: 400, paymentFrequency: 'WEEKLY', totalInstallments: 4,
+      paymentMethod: 'MANUAL', mobileMoneyNetwork: 'MTN', mobileMoneyNumber: '0241234572', startDate: day(7).toISOString() };
+    const pre = await call('POST', '/contracts/preflight', admin.token, sale);
+    assert.match((pre.json?.blockers || []).join(' '), /not been enrolled with PayTrigger/, 'preflight shows the reason');
+    let r = await call('POST', '/contracts', admin.token, sale);
+    assert.strictEqual(r.status, 400, `contract ${r.json?.contractNumber} created for a phone PayTrigger has never heard of`);
+    assert.match(JSON.stringify(r.json), /not been enrolled with PayTrigger/);
+    assert.strictEqual((await prisma.inventoryItem.findUniqueOrThrow({ where: { id: itemE.id } })).status, 'AVAILABLE', 'stock untouched');
+    await call('POST', '/paytrigger/enrolment', admin.token, { inventoryItemIds: [itemE.id] });
+    r = await call('POST', '/contracts', admin.token, sale);
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json).slice(0, 300));
+  });
+  await step('a Samsung phone is sold exactly as before', async () => {
+    const samsung = await prisma.product.create({ data: { name: `SAMSUNG A15 ${TAG}`, basePrice: 2000, categoryId: category.id } });
+    let item = (await call('POST', '/products/inventory', admin.token, { productId: samsung.id, serialNumber: imeiNew() })).json;
+    item = item.inventoryItem || item.item || item;
+    const r = await call('POST', '/contracts', admin.token, { customerId: await customer(admin.u.id), inventoryItemId: item.id, totalPrice: 2000, depositAmount: 400, paymentFrequency: 'WEEKLY', totalInstallments: 4,
+      paymentMethod: 'MANUAL', mobileMoneyNetwork: 'MTN', mobileMoneyNumber: '0241234574', startDate: day(7).toISOString() });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.json).slice(0, 300));
   });
 
   // ── 17. Pay link ───────────────────────────────────────────────────────

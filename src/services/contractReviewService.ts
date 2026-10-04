@@ -3,6 +3,7 @@ import { sanitizePhoneNumber } from '../utils/helpers';
 import { isSellingAgentRole } from '../constants/roles';
 import { getAgentDefaultedTemporaryUnlocks } from './temporaryUnlockService';
 import { getSupervisionBlockers } from './supervisionService';
+import { payTriggerSaleBlocker } from './payTrigger/guard';
 
 export type ApprovalPriority = 'LOW' | 'MEDIUM' | 'HIGH';
 
@@ -443,7 +444,11 @@ export async function evaluateContractSubmissionGuardrails(input: {
       }
     : null;
 
-  return assessContractContext({
+  // A Transsion phone PayTrigger does not hold cannot be locked. Null for
+  // every other phone, and on any error.
+  const lockBlocker = await payTriggerSaleBlocker(inventoryItemId, inventoryItem?.productId);
+
+  const assessment = assessContractContext({
     customer,
     inventoryProductId: inventoryItem?.productId || null,
     totalPrice,
@@ -460,6 +465,8 @@ export async function evaluateContractSubmissionGuardrails(input: {
     })),
     supervisionBlockers,
   });
+  if (lockBlocker) assessment.blockers.push(lockBlocker);
+  return assessment;
 }
 
 async function getApprovalHistoryForContracts(contractIds: string[]): Promise<Record<string, ApprovalHistoryItem[]>> {
