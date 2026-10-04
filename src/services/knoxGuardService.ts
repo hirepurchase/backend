@@ -64,6 +64,9 @@ const KNOX_GUARD_PATHS = {
   sendMessage: (process.env.KNOX_GUARD_SEND_MESSAGE_PATH || '/devices/sendMessage').trim(),
   completeDevice: (process.env.KNOX_GUARD_COMPLETE_DEVICE_PATH || '/devices/complete').trim(),
   cancelComplete: (process.env.KNOX_GUARD_CANCEL_COMPLETE_PATH || '/devices/cancelComplete').trim(),
+  // Offline unlock PIN — with the passkey shown on the lock screen, or without one.
+  pinWithPasskey: (process.env.KNOX_GUARD_PIN_WITH_PASSKEY_PATH || '/devices/offlineDeviceLockPin').trim(),
+  pinWithoutPasskey: (process.env.KNOX_GUARD_PIN_PATH || '/devices/getPin').trim(),
 };
 
 // ─── Token refresh cache ───────────────────────────────────────────────────
@@ -624,4 +627,60 @@ export async function deleteDevicesFromApi(imeis: string[]): Promise<DevicesApiR
       error: body?.errors?.[0]?.message || body?.message || error.message || 'Devices API delete failed',
     };
   }
+}
+
+// ─── Offline unlock PIN ────────────────────────────────────────────────────
+
+export interface KnoxGuardPinResult extends KnoxGuardActionResult {
+  /** Codes the customer can type on the lock screen. Never log or store these. */
+  pins?: string[];
+}
+
+/**
+ * An unlock PIN for a locked phone with no data (payment lock, offline lock,
+ * SIM control, or a reminder that cannot be cleared offline).
+ *
+ * With the passkey (challenge code) the customer reads off the lock screen,
+ * Knox's offlineDeviceLockPin answers with one or more PINs; without one,
+ * getPin answers with a single lockPin. On hardened devices the phone must
+ * reach Knox within 24 hours of using the PIN or it locks again, and on
+ * reconnecting it obeys whatever Knox's server state says.
+ *
+ * Changes nothing on the device by itself, but it is a live request to
+ * Samsung, so it honours dry run like every other action.
+ */
+export async function getKnoxGuardUnlockPin(
+  payload: DeviceIdentifier & { passkey?: string | null },
+): Promise<KnoxGuardPinResult> {
+  const passkey = payload.passkey?.trim();
+  const path = passkey ? KNOX_GUARD_PATHS.pinWithPasskey : KNOX_GUARD_PATHS.pinWithoutPasskey;
+  const result = await postAction(path, {
+    ...normalizeIdentifier(payload),
+    ...(passkey ? { challenge: passkey } : {}),
+  });
+
+  if (result.dryRun) {
+    // Never echo a real-looking code from a simulation.
+    return { ...result, data: { message: 'Knox Guard PIN simulated locally.', path }, pins: ['00000000'] };
+  }
+  if (!result.success) return result;
+
+  const parsed = parseKnoxPinResponse(result.data);
+  if (!parsed.pins.length) {
+    return { ...result, success: false, data: { result: parsed.result }, error: 'Knox Guard did not return a PIN for this device.' };
+  }
+  // Strip the codes from data so they cannot end up in a log via the result object.
+  return { ...result, data: { result: parsed.result }, pins: parsed.pins };
+}
+
+/**
+ * Knox answers offlineDeviceLockPin with { result, pinNumber: [...] } and
+ * getPin with { result, lockPin }. A FAIL result or no code means no PIN.
+ */
+export function parseKnoxPinResponse(data: unknown): { result: string; pins: string[] } {
+  const body = (data ?? {}) as { result?: string; lockPin?: unknown; pinNumber?: unknown };
+  const raw = Array.isArray(body.pinNumber) ? body.pinNumber : body.lockPin !== undefined && body.lockPin !== null ? [body.lockPin] : [];
+  const pins = raw.map((p) => String(p).trim()).filter(Boolean);
+  const result = typeof body.result === 'string' ? body.result : 'SUCCESS';
+  return { result, pins: result === 'FAIL' ? [] : pins };
 }

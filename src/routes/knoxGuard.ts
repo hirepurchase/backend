@@ -34,6 +34,7 @@ import {
   removeManagedDevice,
   patchKnoxUploadStatus,
 } from '../controllers/knoxGuardUploadController';
+import { issueKnoxPin } from '../controllers/knoxPinController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
 
@@ -134,6 +135,14 @@ router.post(
   authenticateAdmin,
   requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
   lockKnoxGuardContractDevice
+);
+
+// Offline unlock PIN — the controller also requires the ADMIN or SUPER_ADMIN role.
+router.post(
+  '/contracts/:contractId/pin',
+  authenticateAdmin,
+  requireAnyPermission(PERMISSIONS.MANAGE_DEVICE_CONTROL),
+  issueKnoxPin
 );
 
 router.post(
