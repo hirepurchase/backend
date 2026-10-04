@@ -109,6 +109,43 @@ export async function markProducts(productIds: string[], actorId: string) {
   return products.length;
 }
 
+/**
+ * PayTrigger details for a page of inventory items, for the inventory table.
+ * A product marked as Transsion, or an item already enrolled, is a PayTrigger
+ * item; everything else keeps the Knox columns it had. Never throws: the
+ * inventory page must load even if PayTrigger's tables are unavailable.
+ */
+export async function payTriggerInfoForItems(items: Array<{ id: string; productId: string }>) {
+  const empty = new Map<string, { lockProvider: 'PAYTRIGGER' | 'KNOX'; payTrigger: Record<string, unknown> | null }>();
+  try {
+    if (!items.length) return empty;
+    const [devices, marked] = await Promise.all([
+      prisma.payTriggerDevice.findMany({
+        where: { inventoryItemId: { in: items.map((i) => i.id) } },
+        select: {
+          id: true, inventoryItemId: true, enrollmentStatus: true, committedState: true, providerExpiresAt: true,
+          awaitingPinSince: true, holdMessageShown: true, releaseAfter: true, apkVersion: true, contractId: true, lastError: true,
+        },
+      }),
+      prisma.payTriggerProduct.findMany({ where: { productId: { in: [...new Set(items.map((i) => i.productId))] } }, select: { productId: true } }),
+    ]);
+    const deviceByItem = new Map(devices.map((d) => [d.inventoryItemId, d]));
+    const markedProducts = new Set(marked.map((m) => m.productId));
+    for (const item of items) {
+      const device = deviceByItem.get(item.id);
+      const isPt = !!device || markedProducts.has(item.productId);
+      empty.set(item.id, {
+        lockProvider: isPt ? 'PAYTRIGGER' : 'KNOX',
+        payTrigger: device ? { ...device, needsKeyCode: needsKeyCode(device.apkVersion) } : null,
+      });
+    }
+    return empty;
+  } catch (err) {
+    console.error('PayTrigger: inventory lookup failed', (err as Error)?.message || err);
+    return empty;
+  }
+}
+
 // ─── Enrolment ─────────────────────────────────────────────────────────────
 
 /** Transsion stock not yet enrolled. */

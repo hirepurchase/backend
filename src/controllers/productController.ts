@@ -10,6 +10,7 @@ import {
 } from '../services/deviceControlPolicyService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { isSellingAgentRole } from '../constants/roles';
+import { payTriggerInfoForItems } from '../services/payTrigger/admin';
 
 const KNOX_UPLOAD_POLL_ATTEMPTS = 5;
 const KNOX_UPLOAD_POLL_DELAY_MS = 2000;
@@ -1186,8 +1187,11 @@ export async function getAllInventoryItems(req: AuthenticatedRequest, res: Respo
       prisma.inventoryItem.count({ where }),
     ]);
 
+    // Which lock system each item uses, and its PayTrigger state if it has one.
+    const lockInfo = await payTriggerInfoForItems(items);
+
     res.json({
-      items,
+      items: items.map((item) => ({ ...item, lockProvider: 'KNOX', payTrigger: null, ...lockInfo.get(item.id) })),
       pagination: {
         page: Number(page),
         limit: Number(limit),
