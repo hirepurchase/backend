@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { NextFunction, Request, Response, Router } from 'express';
 import {
   cancelEnrolment,
   enrolDevices,
@@ -20,7 +20,10 @@ import {
   putSettings,
   reconcileDevice,
   releaseDevice,
+  uploadBrandingLogo,
+  getLockProvider,
 } from '../controllers/payTriggerController';
+import { upload } from '../config/upload';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
 
@@ -46,6 +49,7 @@ router.post('/devices/:id/pin', ...manage, issuePin);
 // Irreversible: the PayTrigger app uninstalls itself.
 router.post('/devices/:id/release', authenticateAdmin, requireAnyPermission(PERMISSIONS.WRITE_OFF_CONTRACT), releaseDevice);
 
+router.get('/lock-provider', ...manage, getLockProvider);
 router.get('/enrolment/candidates', ...manage, getEnrolmentCandidates);
 router.post('/enrolment', ...manage, enrolDevices);
 
@@ -58,5 +62,12 @@ router.put('/ladder', ...manage, putLadder);
 router.get('/settings', ...manage, getSettings);
 router.put('/settings', ...manage, putSettings);
 router.put('/branding', ...manage, putBranding);
+// A wrong file type or an oversized file comes back as a plain message, not a server error.
+const logoUpload = (req: Request, res: Response, next: NextFunction) =>
+  upload.single('logo')(req, res, (err: unknown) => {
+    if (err) return res.status(400).json({ error: (err as Error).message || 'Upload failed' });
+    next();
+  });
+router.post('/branding/logo', ...manage, logoUpload, uploadBrandingLogo);
 
 export default router;

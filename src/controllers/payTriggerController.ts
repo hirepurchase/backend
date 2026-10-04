@@ -9,6 +9,8 @@ import { spoolCallback, processCallback } from '../services/payTrigger/callbacks
 import { registryLoaded, registrySize } from '../services/payTrigger/registry';
 import { EDITABLE_SETTINGS, getPayTriggerSettings, invalidatePayTriggerSettings } from '../services/payTrigger/settings';
 import * as admin from '../services/payTrigger/admin';
+import sharp from 'sharp';
+import { uploadToSupabase } from '../services/storageService';
 
 /**
  * PayTrigger HTTP API, mounted at /api/paytrigger. Every route is new; none
@@ -236,6 +238,13 @@ export async function enrolDevices(req: AuthenticatedRequest, res: Response) {
   if (!ids.length) return fail(res, new Error('Choose at least one phone.'));
   if (ids.length > 500) return fail(res, new Error('At most 500 phones at a time.'));
   try {
+    // From the inventory form: mark the product as Transsion first, so a
+    // TECNO/Infinix/itel model not yet on the Products screen can be enrolled.
+    if (req.body?.markProducts === true) {
+      const items = await prisma.inventoryItem.findMany({ where: { id: { in: ids } }, select: { productId: true } });
+      const marked = await admin.markProducts([...new Set(items.map((i) => i.productId))], actor(req).id);
+      if (marked) await createAuditLog({ userId: actor(req).id, action: 'PAYTRIGGER_PRODUCTS', entity: 'PayTriggerProduct', newValues: { markedFromInventory: marked }, ipAddress: req.ip });
+    }
     const results = await admin.enrolItems(ids, actor(req).id);
     await createAuditLog({ userId: actor(req).id, action: 'PAYTRIGGER_ENROL', entity: 'PayTriggerDevice', newValues: { requested: ids.length, enrolled: results.filter((r) => r.ok).length }, ipAddress: req.ip });
     res.json({ results });
@@ -381,4 +390,69 @@ export async function putBranding(req: AuthenticatedRequest, res: Response) {
   if (!result.success) return fail(res, result.error, 502);
   await createAuditLog({ userId: actor(req).id, action: 'PAYTRIGGER_BRANDING', entity: 'PayTriggerSettings', newValues: b, ipAddress: req.ip });
   res.json({ ok: true, dryRun: result.dryRun });
+}
+
+/**
+ * POST /paytrigger/branding/logo  (multipart, field "logo")
+ *
+ * PayTrigger shows the company logo in its app and wants a PNG of at most
+ * 512×512 pixels and 50 KB, at a public address. Any JPEG or PNG chosen here
+ * is fitted to that — resized, converted to PNG and compressed until it fits —
+ * then stored publicly. The address comes back for the branding form; nothing
+ * is sent to PayTrigger until "Send branding" is pressed.
+ */
+const LOGO_MAX_BYTES = 50 * 1024;
+
+/** Resize and compress until the PNG is within PayTrigger's 512×512 and 50 KB, or give up. */
+export async function fitPayTriggerLogo(input: Buffer): Promise<Buffer | null> {
+  for (const size of [512, 384, 256, 192, 128]) {
+    for (const colours of [256, 128, 64]) {
+      const out = await sharp(input)
+        .rotate()
+        .resize({ width: size, height: size, fit: 'inside', withoutEnlargement: true })
+        .png({ compressionLevel: 9, palette: true, colours })
+        .toBuffer();
+      if (out.length <= LOGO_MAX_BYTES) return out;
+    }
+  }
+  return null;
+}
+
+export async function uploadBrandingLogo(req: AuthenticatedRequest, res: Response) {
+  const file = (req as AuthenticatedRequest & { file?: Express.Multer.File }).file;
+  if (!file) return fail(res, new Error('Choose a PNG or JPEG image.'));
+  try {
+    const meta = await sharp(file.buffer).metadata();
+    if (!meta.width || !meta.height) return fail(res, new Error('That file is not an image PayTrigger can use.'));
+
+    const png = await fitPayTriggerLogo(file.buffer);
+    if (!png) return fail(res, new Error('This image is too detailed to fit in 50 KB. Try a simpler logo.'));
+
+    const uploaded = await uploadToSupabase(png, 'paytrigger', 'logo.png');
+    if (!uploaded.success || !uploaded.publicUrl) return fail(res, new Error(uploaded.error || 'Upload failed'), 502);
+
+    const final = await sharp(png).metadata();
+    await createAuditLog({
+      userId: actor(req).id,
+      action: 'PAYTRIGGER_LOGO_UPLOADED',
+      entity: 'PayTriggerSettings',
+      newValues: { url: uploaded.publicUrl, bytes: png.length, width: final.width, height: final.height },
+      ipAddress: req.ip,
+    });
+    res.json({ url: uploaded.publicUrl, bytes: png.length, width: final.width, height: final.height });
+  } catch (err) {
+    fail(res, err);
+  }
+}
+
+/** GET /paytrigger/lock-provider?productId=&imei= — which lock the inventory form should suggest. */
+export async function getLockProvider(req: AuthenticatedRequest, res: Response) {
+  const productId = typeof req.query.productId === 'string' ? req.query.productId : '';
+  if (!productId) return fail(res, new Error('productId is required'));
+  try {
+    const imei = typeof req.query.imei === 'string' ? req.query.imei : null;
+    res.json(await admin.detectLockProvider(productId, imei));
+  } catch (err) {
+    fail(res, err, 404);
+  }
 }

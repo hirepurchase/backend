@@ -61,6 +61,54 @@ export async function setProducts(productIds: string[], actorId: string) {
   return listProducts();
 }
 
+// ─── Which lock a product needs ────────────────────────────────────────────
+
+export type LockProvider = 'PAYTRIGGER' | 'KNOX' | 'NONE';
+const SAMSUNG_NAME = /\b(samsung|galaxy)\b/i;
+
+/**
+ * Suggest the lock system for a new stock item, for the inventory form:
+ *   1. a product marked on the PayTrigger products screen → PayTrigger
+ *   2. a TECNO / Infinix / itel name → PayTrigger (product not yet marked)
+ *   3. a Samsung / Galaxy name → Knox Guard
+ *   4. with an IMEI and PayTrigger configured, PayTrigger's own model lookup
+ *   5. otherwise no lock (TVs, fridges and other goods)
+ * It is a suggestion; the person adding stock can choose otherwise.
+ */
+export async function detectLockProvider(productId: string, imei?: string | null) {
+  const product = await prisma.product.findUnique({ where: { id: productId }, select: { id: true, name: true } });
+  if (!product) throw new Error('Product not found');
+  const marked = await prisma.payTriggerProduct.findUnique({ where: { productId } });
+  const result = (provider: LockProvider, reason: string) => ({ provider, reason, productName: product.name, productMarked: !!marked });
+
+  if (marked) return result('PAYTRIGGER', `${product.name} is marked as a PayTrigger (Transsion) product.`);
+  if (TRANSSION_NAME.test(product.name)) return result('PAYTRIGGER', `${product.name} is a TECNO, Infinix or itel phone.`);
+  if (SAMSUNG_NAME.test(product.name)) return result('KNOX', `${product.name} is a Samsung phone.`);
+
+  if (imei && /^\d{15}$/.test(imei.trim())) {
+    const model = await client.getModel(imei.trim()).catch(() => null);
+    const brand = model?.success && !model.dryRun ? model.data?.brandName : undefined;
+    if (brand && TRANSSION_NAME.test(brand)) {
+      return result('PAYTRIGGER', `PayTrigger recognises this IMEI as a ${brand} ${model?.data?.modelMarketName || ''}`.trim() + '.');
+    }
+  }
+  return result('NONE', `${product.name} is not a phone we lock. No lock will be set up.`);
+}
+
+/** Mark products as Transsion without touching the others (setProducts replaces the whole list). */
+export async function markProducts(productIds: string[], actorId: string) {
+  const products = await prisma.product.findMany({ where: { id: { in: productIds } }, select: { id: true, name: true } });
+  for (const p of products) {
+    await prisma.payTriggerProduct.upsert({
+      where: { productId: p.id },
+      create: { productId: p.id, brand: (p.name.match(TRANSSION_NAME)?.[1] || 'TECNO').toUpperCase(), addedById: actorId },
+      update: {},
+    });
+  }
+  invalidatePayTriggerProducts();
+  return products.length;
+}
+
 // ─── Enrolment ─────────────────────────────────────────────────────────────
 
 /** Transsion stock not yet enrolled. */
