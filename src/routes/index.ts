@@ -13,6 +13,8 @@ import importRoutes from './import';
 import paymentRetryRoutes from './paymentRetry';
 import hubtelTestRoutes from './hubtelTest';
 import knoxGuardRoutes from './knoxGuard';
+import payTriggerRoutes from './payTrigger';
+import clusterScorecardRoutes from './clusterScorecard';
 import smsRoutes from './sms';
 import commissionSettingsRoutes from './commissionSettings';
 import agentDepositRoutes from './agentDeposits';
@@ -51,6 +53,8 @@ router.use('/cluster', clusterRoutes);
 router.use('/temporary-unlocks', temporaryUnlockRoutes);
 router.use('/settings/penalties', penaltySettingsRoutes);
 router.use('/announcements', announcementRoutes);
+router.use('/paytrigger', payTriggerRoutes);
+router.use('/cluster-scorecard', clusterScorecardRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

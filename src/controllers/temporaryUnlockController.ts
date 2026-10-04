@@ -12,6 +12,7 @@ import {
 } from '../services/temporaryUnlockService';
 import { evaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { sendSMS } from '../services/notificationService';
+import { notifyPayTrigger } from '../services/payTrigger/events';
 
 const prismaAny = prisma as any;
 
@@ -483,6 +484,7 @@ export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, r
         warning: `The unlock could not be sent (${error?.message || 'unknown error'}). The approval stands and the scheduler will retry.`,
       };
     }
+    notifyPayTrigger(request.contractId, 'TEMP_UNLOCK_APPROVED');
 
     await notifyRequester(updated, 'APPROVED', deviceResult.warning);
 
@@ -867,6 +869,7 @@ export async function revokeTemporaryUnlockRequest(req: AuthenticatedRequest, re
     } catch (error: any) {
       console.error('Temporary unlock revoked but device evaluation failed:', error?.message);
     }
+    notifyPayTrigger(request.contractId, 'TEMP_UNLOCK_REVOKED');
 
     await notifyRequester(updated, 'REVOKED', null);
 

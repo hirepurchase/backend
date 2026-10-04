@@ -42,6 +42,75 @@ export function isMoneyGte(a: number, b: number): boolean {
   return roundMoney(a) >= roundMoney(b) - 0.005;
 }
 
+/** Saturday and Sunday are not collection days. */
+export function isWeekend(date: Date): boolean {
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+/**
+ * Move a date forward to the next collection day, so nothing ever falls due on
+ * a Saturday or Sunday. A date already on a weekday is returned unchanged.
+ */
+export function toBusinessDay(date: Date): Date {
+  const result = new Date(date);
+  while (isWeekend(result)) {
+    result.setDate(result.getDate() + 1);
+  }
+  return result;
+}
+
+/** Advance by one frequency period, ignoring weekends. */
+function advanceByFrequency(date: Date, frequency: PaymentFrequency): Date {
+  const next = new Date(date);
+
+  switch (frequency) {
+    case 'DAILY':
+      next.setDate(next.getDate() + 1);
+      break;
+    case 'WEEKLY':
+      next.setDate(next.getDate() + 7);
+      break;
+    case 'MONTHLY':
+      next.setMonth(next.getMonth() + 1);
+      break;
+  }
+
+  return next;
+}
+
+/**
+ * The due dates for a contract, in order, none of them on a weekend.
+ *
+ * The `anchor` carries the contract's own cadence and is never shifted, so a
+ * monthly contract due on the 15th stays on the 15th even when one month's 15th
+ * falls on a Saturday. Each date is moved off the weekend as it is emitted,
+ * rather than carried forward shifted, which would make the due date creep
+ * later and later.
+ *
+ * Daily collections are the exception: they run on working days, so each one is
+ * counted from the day actually collected. Friday's next due date is Monday.
+ */
+function buildDueDates(
+  frequency: PaymentFrequency,
+  totalInstallments: number,
+  startDate: Date
+): Date[] {
+  const dueDates: Date[] = [];
+  let anchor = new Date(startDate);
+
+  for (let i = 0; i < totalInstallments; i++) {
+    const dueDate = toBusinessDay(anchor);
+    dueDates.push(dueDate);
+
+    anchor = frequency === 'DAILY'
+      ? advanceByFrequency(dueDate, 'DAILY')
+      : advanceByFrequency(anchor, frequency);
+  }
+
+  return dueDates;
+}
+
 export function calculateInstallmentSchedule(
   financeAmount: number,
   frequency: PaymentFrequency,
@@ -49,45 +118,26 @@ export function calculateInstallmentSchedule(
   startDate: Date
 ): InstallmentScheduleInput[] {
   const installmentAmount = Math.ceil((financeAmount / totalInstallments) * 100) / 100;
-  const schedule: InstallmentScheduleInput[] = [];
+  const dueDates = buildDueDates(frequency, totalInstallments, startDate);
 
-  let currentDate = new Date(startDate);
+  return dueDates.map((dueDate, index) => {
+    const installmentNo = index + 1;
 
-  for (let i = 1; i <= totalInstallments; i++) {
     // Adjust amount for last installment to handle rounding
-    const amount = i === totalInstallments
+    const amount = installmentNo === totalInstallments
       ? financeAmount - (installmentAmount * (totalInstallments - 1))
       : installmentAmount;
 
-    schedule.push({
-      installmentNo: i,
-      dueDate: new Date(currentDate),
+    return {
+      installmentNo,
+      dueDate,
       amount: Math.round(amount * 100) / 100,
-    });
-
-    // Move to next due date based on frequency
-    currentDate = getNextDueDate(currentDate, frequency);
-  }
-
-  return schedule;
+    };
+  });
 }
 
 export function getNextDueDate(currentDate: Date, frequency: PaymentFrequency): Date {
-  const nextDate = new Date(currentDate);
-
-  switch (frequency) {
-    case 'DAILY':
-      nextDate.setDate(nextDate.getDate() + 1);
-      break;
-    case 'WEEKLY':
-      nextDate.setDate(nextDate.getDate() + 7);
-      break;
-    case 'MONTHLY':
-      nextDate.setMonth(nextDate.getMonth() + 1);
-      break;
-  }
-
-  return nextDate;
+  return toBusinessDay(advanceByFrequency(currentDate, frequency));
 }
 
 export function calculateEndDate(
@@ -95,13 +145,12 @@ export function calculateEndDate(
   frequency: PaymentFrequency,
   totalInstallments: number
 ): Date {
-  let endDate = new Date(startDate);
+  const dueDates = buildDueDates(frequency, totalInstallments, startDate);
+  const lastDueDate = dueDates[dueDates.length - 1];
 
-  for (let i = 0; i < totalInstallments; i++) {
-    endDate = getNextDueDate(endDate, frequency);
-  }
-
-  return endDate;
+  // The contract runs one period past the final installment. With no
+  // installments at all there is nothing to run past, so the start date stands.
+  return lastDueDate ? getNextDueDate(lastDueDate, frequency) : toBusinessDay(startDate);
 }
 
 export function isOverdue(dueDate: Date, gracePeriodDays: number = 0): boolean {
