@@ -9,6 +9,7 @@ import { spoolCallback, processCallback } from '../services/payTrigger/callbacks
 import { registryLoaded, registrySize } from '../services/payTrigger/registry';
 import { EDITABLE_SETTINGS, getPayTriggerSettings, invalidatePayTriggerSettings } from '../services/payTrigger/settings';
 import * as admin from '../services/payTrigger/admin';
+import * as messages from '../services/payTrigger/messages';
 import sharp from 'sharp';
 import { uploadToSupabase } from '../services/storageService';
 
@@ -160,6 +161,7 @@ export async function getDevice(req: AuthenticatedRequest, res: Response) {
     ]);
     const role = actor(req).role;
     const proof = await admin.liveEnrolmentProof([device.id]);
+    const messagesToday = await messages.sentInLastDay(device.id);
     res.json({
       device: {
         ...device,
@@ -171,6 +173,8 @@ export async function getDevice(req: AuthenticatedRequest, res: Response) {
       logs,
       commands,
       canIssuePin: PIN_ROLES.has(role),
+      messagesToday,
+      messageLimit: messages.DAILY_LIMIT,
     });
   } catch (err) {
     fail(res, err, 500);
@@ -295,9 +299,29 @@ const INT_RANGES: Record<string, [number, number]> = {
   extendBreakerPercent: [1, 100],
 };
 
+const REQUIRED_TEXTS = new Set(['depositHoldTitle', 'depositHoldTips', 'unlinkedTitle', 'unlinkedTips', 'reminderTitle', 'reminderText']);
+const TEXT_LIMITS: Record<string, number> = {
+  lockTitle: messages.TITLE_MAX,
+  depositHoldTitle: messages.TITLE_MAX,
+  unlinkedTitle: messages.TITLE_MAX,
+  reminderTitle: messages.TITLE_MAX,
+  reminderText: messages.PUSH_TEXT_MAX,
+};
+const TEXT_LABELS: Record<string, string> = {
+  lockTitle: 'The overdue title',
+  lockTips: 'The overdue message',
+  depositHoldTitle: 'The deposit title',
+  depositHoldTips: 'The deposit message',
+  unlinkedTitle: 'The no-contract title',
+  unlinkedTips: 'The no-contract message',
+  reminderTitle: 'The reminder title',
+  reminderText: 'The reminder message',
+  payDeeplink: 'The pay link',
+};
+
 export async function getSettings(_req: AuthenticatedRequest, res: Response) {
   try {
-    res.json({ settings: await getPayTriggerSettings(), config: getConfigurationSummary() });
+    res.json({ settings: await getPayTriggerSettings(), config: getConfigurationSummary(), placeholders: messages.PLACEHOLDERS });
   } catch (err) {
     fail(res, err, 500);
   }
@@ -315,12 +339,28 @@ export async function putSettings(req: AuthenticatedRequest, res: Response) {
         const n = Number(value);
         if (!Number.isInteger(n) || n < min || n > max) return fail(res, new Error(`${key} must be a whole number from ${min} to ${max}.`));
         data[key] = n;
-      } else if (key === 'lockOnUnpaidAgentDeposit' || key === 'holdOnUnpaidPenalties') {
+      } else if (key === 'lockOnUnpaidAgentDeposit' || key === 'holdOnUnpaidPenalties' || key === 'reminderEnabled') {
         data[key] = Boolean(value);
+      } else if (key === 'reminderChannel') {
+        if (!['POPUP', 'PUSH', 'BOTH'].includes(String(value))) return fail(res, new Error('Send reminders as a pop-up, a notification or both.'));
+        data[key] = String(value);
+      } else if (key === 'reminderDaysBefore') {
+        const parts = String(value ?? '').split(',').map((part) => part.trim()).filter(Boolean);
+        const days = messages.parseReminderDays(parts.join(','));
+        if (!days.length || days.length !== new Set(parts).size || days.length > 5) {
+          return fail(res, new Error('Reminder days must be up to 5 whole numbers from 0 to 30, separated by commas (0 is the due day).'));
+        }
+        data[key] = days.join(',');
       } else {
         const text = value === null || value === undefined ? null : String(value).trim();
-        if ((key === 'depositHoldTitle' || key === 'depositHoldTips') && !text) return fail(res, new Error(`${key} cannot be empty.`));
-        if (text && text.length > 400) return fail(res, new Error(`${key} is limited to 400 characters.`));
+        const label = TEXT_LABELS[key] || key;
+        if (REQUIRED_TEXTS.has(key) && !text) return fail(res, new Error(`${label} cannot be empty.`));
+        const max = TEXT_LIMITS[key] ?? 400;
+        if (text && text.length > max) return fail(res, new Error(`${label} is limited to ${max} characters.`));
+        const unknown = text && key !== 'payDeeplink' ? messages.unknownPlaceholders(text) : [];
+        if (unknown.length) {
+          return fail(res, new Error(`${label}: {${unknown[0]}} is not something we can fill in. Use ${messages.PLACEHOLDERS.map((name) => `{${name}}`).join(', ')}.`));
+        }
         data[key] = text || null;
       }
     }
@@ -473,6 +513,34 @@ export async function getLockProvider(req: AuthenticatedRequest, res: Response) 
 export async function verifyDevice(req: AuthenticatedRequest, res: Response) {
   try {
     res.json(await admin.verifyDevice(String(req.params.id), actor(req).id));
+  } catch (err) {
+    fail(res, err);
+  }
+}
+
+/** A one-off pop-up or notification to one phone. */
+export async function sendDeviceMessage(req: AuthenticatedRequest, res: Response) {
+  try {
+    const channel = String(req.body?.channel || 'POPUP');
+    if (channel !== 'POPUP' && channel !== 'PUSH') return fail(res, new Error('Send it as a pop-up or a notification.'));
+    const title = String(req.body?.title || '').trim();
+    const text = String(req.body?.text || '').trim();
+    if (!title || !text) return fail(res, new Error('A title and a message are both needed.'));
+    if (title.length > messages.TITLE_MAX) return fail(res, new Error(`The title is limited to ${messages.TITLE_MAX} characters.`));
+    if (text.length > messages.PUSH_TEXT_MAX) return fail(res, new Error(`The message is limited to ${messages.PUSH_TEXT_MAX} characters.`));
+    const unknown = messages.unknownPlaceholders(`${title} ${text}`);
+    if (unknown.length) return fail(res, new Error(`{${unknown[0]}} is not something we can fill in.`));
+
+    const result = await messages.sendDeviceMessage(String(req.params.id), { channel, title, text }, actor(req).id);
+    await createAuditLog({
+      userId: actor(req).id,
+      action: 'PAYTRIGGER_MESSAGE_SENT',
+      entity: 'PayTriggerDevice',
+      entityId: String(req.params.id),
+      newValues: { channel, title: result.title, text: result.text, dryRun: result.dryRun },
+      ipAddress: req.ip,
+    });
+    res.json(result);
   } catch (err) {
     fail(res, err);
   }

@@ -1,12 +1,13 @@
 import prisma from '../../config/database';
 import * as client from './client';
 import { runCommand } from './commands';
-import { applyLockState, reconcileContract } from './reconcile';
+import { applyLockState, reconcileContract, syncUnlinkedMessage } from './reconcile';
 import { refreshTranssionContracts, removeTranssionContract } from './registry';
 import { getPayTriggerSettings } from './settings';
 import { logAction } from './log';
 import { liveActionsEnabled } from './config';
 import { enrolItems, liveEnrolmentProof, needsEnrolment } from './admin';
+import { ReminderSummary, sendPaymentReminders } from './messages';
 
 /**
  * The 08:36 morning sweep — the only scheduled PayTrigger work.
@@ -33,6 +34,8 @@ export interface SweepSummary {
   statusReads: number;
   breakerTripped: boolean;
   reEnrolled?: number;
+  reminders?: ReminderSummary;
+  unlinkedMessages?: number;
 }
 
 export async function runMorningSweep(): Promise<SweepSummary> {
@@ -112,6 +115,24 @@ export async function runMorningSweep(): Promise<SweepSummary> {
 
   // 4. Status reads for phones near a lock date or waiting on confirmation.
   summary.statusReads = await readStatusesNeeded();
+
+  // 4b. Active phones with no contract: make sure their lock screen says so.
+  try {
+    summary.unlinkedMessages = 0;
+    const loose = await prisma.payTriggerDevice.findMany({ where: { enrollmentStatus: 'ACTIVE', contractId: null }, select: { id: true } });
+    for (const { id } of loose) if (await syncUnlinkedMessage(id)) summary.unlinkedMessages++;
+  } catch (err) {
+    summary.errors++;
+    console.error('PayTrigger sweep: no-contract messages failed', err);
+  }
+
+  // 5. Reminders of a payment coming up. Last, and never allowed to fail the sweep.
+  try {
+    summary.reminders = await sendPaymentReminders();
+  } catch (err) {
+    summary.errors++;
+    console.error('PayTrigger sweep: reminders failed', err);
+  }
 
   summary.finishedAt = new Date().toISOString();
   await prisma.payTriggerSettings.update({

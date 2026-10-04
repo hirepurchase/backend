@@ -1,7 +1,7 @@
 import * as crypto from 'crypto';
 import prisma from '../../config/database';
 import { enqueue } from './events';
-import { applyLockState } from './reconcile';
+import { applyLockState, syncUnlinkedMessage } from './reconcile';
 import { markActivated } from './sweep';
 import { removeTranssionContract } from './registry';
 import { logAction } from './log';
@@ -63,6 +63,8 @@ export async function processCallback(eventId: string): Promise<void> {
         // First contact: push whatever the contract says now (usually nothing
         // while the deposit is unpaid — the phone activated locked).
         if (device.contractId) await enqueue(device.contractId, 'DEVICE_ACTIVATED');
+        // Switched on with no sale behind it: it locked itself; tell the holder why.
+        else await syncUnlinkedMessage(device.id).catch((err) => console.error('PayTrigger: no-contract message failed', err));
       } else if (body.deviceTag && !device.deviceTag) {
         await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { deviceTag: body.deviceTag } });
       }

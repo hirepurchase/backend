@@ -841,6 +841,7 @@ model PayTriggerDevice {
   releaseAfter           DateTime?
   releaseHeld            Boolean   @default(false)
   holdMessageShown       Boolean   @default(false)
+  lockMessageKey         String? // hash of the lock-screen text last accepted for this phone
   lastConnectAt          DateTime?
   apkVersion             String?
   enforcementConfirmedAt DateTime?
@@ -858,7 +859,7 @@ model PayTriggerDevice {
 model PayTriggerCommand {
   id             String    @id @default(uuid())
   deviceId       String
-  type           String // ENROL | EXTEND | LOCK | RELEASE | CANCEL | SYNC
+  type           String // ENROL | EXTEND | LOCK | RELEASE | CANCEL | SYNC | REMIND
   status         String    @default("PENDING") // PENDING | PROCESSING | SUCCEEDED | DEFERRED | FAILED | CANCELLED
   idempotencyKey String    @unique
   payload        Json
@@ -916,7 +917,16 @@ model PayTriggerSettings {
   lockTips                  String?
   depositHoldTitle          String    @default("Phone not yet activated")
   depositHoldTips           String    @default("Your phone will be activated once your agent completes registration. Contact {agentName} on {agentPhone}.")
+  // Shown on a phone that has activated but is not on an active contract.
+  unlinkedTitle             String    @default("Phone not yet activated for use")
+  unlinkedTips              String    @default("This phone is locked because it is not yet linked to an active hire purchase contract. Please contact AIDOO TECH customer service on 0303981216.")
   payDeeplink               String?
+  // Reminders of an upcoming payment, sent to the phone as a pop-up or a notification.
+  reminderEnabled           Boolean   @default(false)
+  reminderDaysBefore        String    @default("3,1,0") // days before the due date; 0 = the due day
+  reminderChannel           String    @default("POPUP") // POPUP | PUSH | BOTH
+  reminderTitle             String    @default("Payment reminder")
+  reminderText              String    @default("Dear {firstName}, your payment of {amount} is due on {dueDate}. Please pay on time to keep your phone open.")
   ladder                    Json? // the escalation stages last sent to PayTrigger
   operatorOfflineTimerHours Int       @default(4392) // set by Transsion on request; read-only here
   lastSweepAt               DateTime?

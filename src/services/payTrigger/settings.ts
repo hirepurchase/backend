@@ -39,5 +39,12 @@ export const EDITABLE_SETTINGS = [
   'lockTips',
   'depositHoldTitle',
   'depositHoldTips',
+  'unlinkedTitle',
+  'unlinkedTips',
   'payDeeplink',
+  'reminderEnabled',
+  'reminderDaysBefore',
+  'reminderChannel',
+  'reminderTitle',
+  'reminderText',
 ] as const;

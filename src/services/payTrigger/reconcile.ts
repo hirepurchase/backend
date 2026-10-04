@@ -9,6 +9,7 @@ import { recordDeferredLock, runCommand } from './commands';
 import { addTranssionContract, removeTranssionContract } from './registry';
 import { getPayTriggerSettings, PayTriggerSettingsRow } from './settings';
 import { logAction } from './log';
+import { isUnlinkedStatus, lockMessageFor, unlinkedMessageFor } from './messages';
 
 /**
  * Reconcile ONE contract: load it, decide, and send PayTrigger whatever is
@@ -68,7 +69,7 @@ async function loadContract(contractId: string) {
       totalInstallments: true,
       endDate: true,
       approvedAt: true,
-      customer: { select: { phone: true } },
+      customer: { select: { phone: true, firstName: true, lastName: true } },
       createdBy: { select: { firstName: true, lastName: true, phone: true } },
       installments: {
         orderBy: { installmentNo: 'asc' },
@@ -85,13 +86,6 @@ async function loadContract(contractId: string) {
 }
 
 type ContractRow = NonNullable<Awaited<ReturnType<typeof loadContract>>>;
-
-function holdText(template: string, contract: ContractRow): string {
-  const agent = contract.createdBy;
-  return template
-    .replace(/\{agentName\}/g, agent ? `${agent.firstName} ${agent.lastName}`.trim() : 'your agent')
-    .replace(/\{agentPhone\}/g, agent?.phone || 'the number on your contract');
-}
 
 function scheduleRetry(contractId: string) {
   return (delayMs: number) => {
@@ -144,9 +138,9 @@ export async function reconcileContract(contractId: string, options: ReconcileOp
     scheduleRetry: scheduleRetry(contractId),
   };
 
-  // ── Lock-screen wording for the deposit hold ────────────────────────────
-  if (activated && decision.depositHold !== device.holdMessageShown) {
-    await syncHoldMessage(device, contract, settings, decision.depositHold, ctxBase);
+  // ── Lock-screen wording ─────────────────────────────────────────────────
+  if (activated) {
+    await syncLockMessage(device, contract, settings, decision.depositHold, now, ctxBase);
   }
 
   if (!options.force && device.fingerprint === decision.fingerprint) {
@@ -259,36 +253,79 @@ export async function reconcileContract(contractId: string, options: ReconcileOp
   return { ...outcome, sent: `${decision.action.toLowerCase()} ${res.status.toLowerCase()}` };
 }
 
-async function syncHoldMessage(
+/** What `lockMessageKey` reads as on a phone last written before the column existed. */
+const LEGACY_HOLD_KEY = 'legacy-hold';
+
+/**
+ * Keep the words on the phone's lock screen in step with the contract: the
+ * "contact your agent" text while the deposit is held, otherwise the overdue
+ * text with this customer's amount and due date. The phone stores it, so it is
+ * sent ahead of the lock and shows even when the phone locks with no data.
+ * Only sent when the words change.
+ */
+async function syncLockMessage(
   device: DeviceRow,
   contract: ContractRow,
   settings: PayTriggerSettingsRow,
   hold: boolean,
+  now: Date,
   ctxBase: Omit<Parameters<typeof runCommand>[0], 'type' | 'fingerprint' | 'payload' | 'send'>,
 ) {
-  const title = hold ? settings.depositHoldTitle : settings.lockTitle || undefined;
-  const tips = hold ? holdText(settings.depositHoldTips, contract) : settings.lockTips || undefined;
-  // Keyed per day, so retries of a failing call count against one row (and
-  // stop after three) rather than starting afresh each time.
+  const current = device.lockMessageKey ?? (device.holdMessageShown ? LEGACY_HOLD_KEY : '');
+  // Sold but not approved yet, or cancelled: the phone is locked with the "no active contract" text.
+  const unlinked = isUnlinkedStatus(contract.status);
+  // A contract that has ended keeps the words it has, unless the hold text must come off.
+  if (!unlinked && contract.status !== 'ACTIVE' && !device.holdMessageShown) return;
+  const message = unlinked ? unlinkedMessageFor(settings) : lockMessageFor(settings, contract, hold, now);
+  if (message.key === current) return;
+  if (hold && current === LEGACY_HOLD_KEY) return;
+
+  // Keyed per day, so retries of a failing call count against one row rather
+  // than starting afresh each time.
   const res = await runCommand({
     ...ctxBase,
     type: 'SYNC',
-    fingerprint: `hold-message:${hold}:${new Date().toISOString().slice(0, 10)}`,
-    payload: { hold, title, tips },
+    fingerprint: `lock-message:${message.key || 'cleared'}:${now.toISOString().slice(0, 10)}`,
+    payload: { hold, title: message.title, tips: message.tips },
     send: () =>
       client.setDeviceRule({
         imei: device.imei,
         deviceTag: device.deviceTag,
         ruleNum: settings.defaultRuleNum,
-        deviceTitle: title,
+        deviceTitle: message.title,
         // Clearing the per-device text lets the portal's general wording show again.
-        deviceTips: tips ?? ' ',
+        deviceTips: message.tips ?? ' ',
       }),
   });
   // SKIPPED here means this exact message already went out today.
   if (res.status === 'SUCCEEDED' || (res.status === 'SKIPPED' && !res.error)) {
-    await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { holdMessageShown: hold } });
+    await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { holdMessageShown: hold, lockMessageKey: message.key } });
   }
+}
+
+/**
+ * A phone that activated with no contract behind it locked itself on
+ * activation (preLockFlag). Give its lock screen the "no active contract"
+ * text, so whoever holds it knows to call us. Returns true when it was sent.
+ */
+export async function syncUnlinkedMessage(deviceId: string): Promise<boolean> {
+  const device = await prisma.payTriggerDevice.findUnique({ where: { id: deviceId } });
+  if (!device || device.contractId || device.enrollmentStatus !== 'ACTIVE') return false;
+  const settings = await getPayTriggerSettings();
+  const message = unlinkedMessageFor(settings);
+  if (device.lockMessageKey === message.key) return false;
+  const res = await runCommand({
+    device,
+    contract: null,
+    type: 'SYNC',
+    fingerprint: `lock-message:${message.key}:${new Date().toISOString().slice(0, 10)}`,
+    payload: { unlinked: true, title: message.title, tips: message.tips },
+    send: () =>
+      client.setDeviceRule({ imei: device.imei, deviceTag: device.deviceTag, ruleNum: settings.defaultRuleNum, deviceTitle: message.title, deviceTips: message.tips }),
+  });
+  if (res.status !== 'SUCCEEDED') return false;
+  await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { holdMessageShown: false, lockMessageKey: message.key } });
+  return true;
 }
 
 /**

@@ -48,6 +48,7 @@ const PATHS = {
   companyConfig: '/api/partner/company/v1/queryCompanyConfigInfo',
   checkLicence: '/api/partner/company/v1/checkLicense',
   issuePin: '/api/partner/unlock/v1/verifyCode',
+  sendPush: '/api/partner/push/v1/sendPushInfo',
 } as const;
 
 /** The key field is named `relatedMerchant` on updateRepayInfo, `apiKey` everywhere else. */
@@ -349,6 +350,25 @@ export function updateBranding(branding: {
     callInPhoneNum: branding.callInPhoneNum,
     callOutPhoneNum: branding.callOutPhoneNum,
     customerServiceNumList: branding.customerServiceNumbers?.length ? branding.customerServiceNumbers : undefined,
+  });
+}
+
+// ─── Messages to the phone ─────────────────────────────────────────────────
+
+export type PushChannel = 'POPUP' | 'PUSH';
+
+/**
+ * A pop-up (the customer must dismiss it) or a notification on one phone.
+ * The phone needs data to receive it. PayTrigger allows 3 of each per phone
+ * per 24 hours (code 50008 past that). Title up to 80 characters, text 500.
+ */
+export function sendPush(message: { imei: string; deviceTag?: string | null; channel: PushChannel; title: string; text: string }) {
+  return postAction<void>('action', PATHS.sendPush, {
+    imei: message.imei,
+    deviceTag: message.deviceTag,
+    pushType: message.channel === 'POPUP' ? 1 : 2,
+    title: message.title.slice(0, 80),
+    content: message.text.slice(0, 500),
   });
 }
 
