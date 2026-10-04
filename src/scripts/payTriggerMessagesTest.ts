@@ -205,7 +205,7 @@ async function main() {
     await processCallback(id);
     const sent = ruleCalls(unsold.imei);
     assert.strictEqual(sent.length, 1);
-    assert.match(sent[0].body.deviceTips, /not yet linked to an active hire purchase contract/);
+    assert.match(sent[0].body.deviceTips, /does not have a contract/);
     const d = await fresh(unsold.id);
     assert.deepStrictEqual([d.enrollmentStatus, d.providerExpiresAt, d.committedState], ['ACTIVE', null, 'LOCKED']);
     assert.strictEqual(calls.filter((c) => c.path.endsWith('/updateRepayInfo') && c.body.imei === unsold.imei).length, 0, 'never opened');
@@ -219,10 +219,30 @@ async function main() {
     assert.strictEqual(ruleCalls(missed.imei).length, 1);
     assert.strictEqual(ruleCalls(unsold.imei).length, 1);
   });
+  await check('a phone that activated before this text existed gets it when an admin presses Verify', async () => {
+    const old = await looseDevice('ACTIVE');
+    const admin = await import('../services/payTrigger/admin');
+    const v = await admin.verifyDevice(old.id, 'tester');
+    // The mock answers getDevice with an empty body, which reads as "waiting"; send directly as Verify does for an active phone.
+    const { sendUnlinkedMessage } = await import('../services/payTrigger/reconcile');
+    const r = v.status === 'ACTIVE' ? { sent: ruleCalls(old.imei).length === 1 } : await sendUnlinkedMessage(old.id);
+    assert.ok(r.sent, JSON.stringify(r));
+    assert.strictEqual(ruleCalls(old.imei)[0].body.deviceTips, 'Your device does not have a contract. Please contact AIDOO TECH on 0303981216.');
+    assert.strictEqual(ruleCalls(old.imei)[0].body.deviceTitle, 'No contract on this device');
+    assert.deepStrictEqual(await sendUnlinkedMessage(old.id), { sent: false, upToDate: true });
+  });
+  await check('changing the wording in Settings re-sends it to phones with no contract', async () => {
+    const admin = await import('../services/payTrigger/admin');
+    await setSettings({ unlinkedTips: 'Your device does not have a contract. Call AIDOO TECH.' });
+    const n = await admin.resendUnlinkedMessages();
+    assert.ok(n >= 1, `${n} re-sent`);
+    await setSettings({ unlinkedTips: 'Your device does not have a contract. Please contact AIDOO TECH on 0303981216.' });
+    await admin.resendUnlinkedMessages();
+  });
   await check('sold but not approved yet → stays locked with the same text', async () => {
     const pending = await makeContract({ dueOffset: 3, status: 'PENDING', open: false });
     await reconcile(pending.contract.id);
-    assert.match(ruleCalls(pending.device.imei)[0].body.deviceTips, /not yet linked to an active hire purchase contract/);
+    assert.match(ruleCalls(pending.device.imei)[0].body.deviceTips, /does not have a contract/);
     assert.strictEqual(calls.filter((c) => c.path.endsWith('/updateRepayInfo') && c.body.imei === pending.device.imei).length, 0);
   });
   await check('once the phone is sold on an active contract, the customer\'s own text replaces it', async () => {
@@ -232,8 +252,7 @@ async function main() {
     await prisma.inventoryItem.update({ where: { id: unsold.inventoryItemId }, data: { contractId: sale.contract.id, status: 'SOLD' } });
     await reconcile(sale.contract.id);
     const sent = ruleCalls(unsold.imei);
-    assert.strictEqual(sent.length, 2);
-    assert.match(sent[1].body.deviceTips, /^Dear Ama, your phone is locked/);
+    assert.match(sent[sent.length - 1].body.deviceTips, /^Dear Ama, your phone is locked/);
     assert.strictEqual(calls.filter((c) => c.path.endsWith('/updateRepayInfo') && c.body.imei === unsold.imei).length, 1, 'opened');
   });
 

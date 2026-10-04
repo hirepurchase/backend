@@ -375,11 +375,16 @@ async function syncLockMessage(
  * text, so whoever holds it knows to call us. Returns true when it was sent.
  */
 export async function syncUnlinkedMessage(deviceId: string): Promise<boolean> {
+  return (await sendUnlinkedMessage(deviceId)).sent;
+}
+
+/** As syncUnlinkedMessage, but says why nothing was sent — for the Verify button. */
+export async function sendUnlinkedMessage(deviceId: string): Promise<{ sent: boolean; upToDate?: boolean; error?: string }> {
   const device = await prisma.payTriggerDevice.findUnique({ where: { id: deviceId } });
-  if (!device || device.contractId || device.enrollmentStatus !== 'ACTIVE') return false;
+  if (!device || device.contractId || device.enrollmentStatus !== 'ACTIVE') return { sent: false };
   const settings = await getPayTriggerSettings();
   const message = unlinkedMessageFor(settings);
-  if (device.lockMessageKey === message.key) return false;
+  if (device.lockMessageKey === message.key) return { sent: false, upToDate: true };
   const res = await runCommand({
     device,
     contract: null,
@@ -390,9 +395,9 @@ export async function syncUnlinkedMessage(deviceId: string): Promise<boolean> {
     send: () =>
       client.setDeviceRule({ imei: device.imei, deviceTag: device.deviceTag, ruleNum: settings.defaultRuleNum, deviceTitle: message.title, deviceTips: message.tips }),
   });
-  if (res.status !== 'SUCCEEDED') return false;
+  if (res.status !== 'SUCCEEDED') return { sent: false, error: res.error || 'PayTrigger did not accept the lock-screen message.' };
   await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { holdMessageShown: false, lockMessageKey: message.key } });
-  return true;
+  return { sent: true };
 }
 
 /**

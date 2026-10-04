@@ -3,7 +3,7 @@ import prisma from '../../config/database';
 import * as client from './client';
 import { describeCode } from './errors';
 import { enqueue } from './events';
-import { applyLockState, reconcileContract } from './reconcile';
+import { applyLockState, reconcileContract, sendUnlinkedMessage } from './reconcile';
 import { releaseDevice } from './sweep';
 import { getPayTriggerSettings } from './settings';
 import { addTranssionContract } from './registry';
@@ -339,6 +339,13 @@ export async function verifyDevice(deviceId: string, actorId: string) {
     status = 'ACTIVE';
     message = 'Enrolled and active on PayTrigger.';
     if (device.contractId) enqueue(device.contractId, 'ADMIN_RECONCILE').catch(() => undefined);
+    else {
+      // Active with no contract: it is locked, so make sure its screen says why.
+      const text = await sendUnlinkedMessage(deviceId);
+      if (text.sent) message += ' It has no contract, so the "no contract" message was sent to its lock screen.';
+      else if (text.upToDate) message += ' It has no contract; its lock screen already carries the "no contract" message.';
+      else if (text.error) message += ` It has no contract, but the "no contract" message was not accepted: ${text.error}`;
+    }
   } else {
     await prisma.payTriggerDevice.update({
       where: { id: deviceId },
@@ -564,4 +571,12 @@ export async function getIssues() {
       total: paidStillLocked.length + ledgerMissing.length + unconfirmedLocks.length + unenforceable.length + failing.length + soldNotEnrolled.length + callbackErrors.length + (sweepLate ? 1 : 0),
     },
   };
+}
+
+/** Send the current "no contract" text to every active phone that has no contract. */
+export async function resendUnlinkedMessages(): Promise<number> {
+  const loose = await prisma.payTriggerDevice.findMany({ where: { enrollmentStatus: 'ACTIVE', contractId: null }, select: { id: true } });
+  let sent = 0;
+  for (const { id } of loose) if ((await sendUnlinkedMessage(id)).sent) sent++;
+  return sent;
 }

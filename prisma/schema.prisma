@@ -918,8 +918,8 @@ model PayTriggerSettings {
   depositHoldTitle          String    @default("Phone not yet activated")
   depositHoldTips           String    @default("Your phone will be activated once your agent completes registration. Contact {agentName} on {agentPhone}.")
   // Shown on a phone that has activated but is not on an active contract.
-  unlinkedTitle             String    @default("Phone not yet activated for use")
-  unlinkedTips              String    @default("This phone is locked because it is not yet linked to an active hire purchase contract. Please contact AIDOO TECH customer service on 0303981216.")
+  unlinkedTitle             String    @default("No contract on this device")
+  unlinkedTips              String    @default("Your device does not have a contract. Please contact AIDOO TECH on 0303981216.")
   payDeeplink               String?
   // Reminders of an upcoming payment, sent to the phone as a pop-up or a notification.
   reminderEnabled           Boolean   @default(false)

@@ -366,6 +366,12 @@ export async function putSettings(req: AuthenticatedRequest, res: Response) {
     }
     const settings = await prisma.payTriggerSettings.update({ where: { id: 'singleton' }, data: { ...data, updatedById: actor(req).id } });
     invalidatePayTriggerSettings();
+    // New wording for phones with no contract goes out now, not at the next sweep.
+    if ('unlinkedTitle' in data || 'unlinkedTips' in data) {
+      setImmediate(() => {
+        admin.resendUnlinkedMessages().catch((err) => console.error('PayTrigger: no-contract messages failed', err));
+      });
+    }
     await createAuditLog({
       userId: actor(req).id,
       action: 'PAYTRIGGER_SETTINGS',

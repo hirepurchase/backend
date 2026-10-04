@@ -246,7 +246,7 @@ async function main() {
     const p = phones.get(imeiA)!;
     assert.ok(lockedNow(p), 'phone locked');
     console.log(`        device.contractId=${d.contractId ? 'linked' : 'null'}; screen: "${p.tips || '(portal default)'}"`);
-    assert.match(p.tips || '', /not yet linked to an active hire purchase contract/);
+    assert.match(p.tips || '', /does not have a contract/);
   });
 
   // ── 3. Approval, deposit hold ──────────────────────────────────────────
@@ -450,7 +450,7 @@ async function main() {
     await sweep();
     const p = phones.get(imeiB)!;
     assert.ok(lockedNow(p) || p.expiration! - nowS() <= 61, `still open for ${hoursFromNow(p.expiration).toFixed(0)}h after the sweep`);
-    assert.match(p.tips || '', /not yet linked to an active hire purchase contract/);
+    assert.match(p.tips || '', /does not have a contract/);
   });
   await step('the same phone is sold again → the new contract takes over the device and opens it', async () => {
     const it = await prisma.inventoryItem.findUniqueOrThrow({ where: { id: itemB.id } });
