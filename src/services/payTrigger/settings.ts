@@ -45,6 +45,7 @@ export const EDITABLE_SETTINGS = [
   'reminderEnabled',
   'reminderDaysBefore',
   'reminderChannel',
+  'reminderIncludeDaily',
   'reminderTitle',
   'reminderText',
 ] as const;

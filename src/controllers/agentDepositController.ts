@@ -102,6 +102,11 @@ export async function createAgentDepositLedgerEntry(contractId: string): Promise
       },
     });
 
+    // A Transsion phone is held locked until this row exists; tell PayTrigger
+    // it now does, so a sale with nothing to remit opens without waiting for
+    // the morning sweep. Returns at once for Samsung contracts.
+    notifyPayTrigger(contract.id, 'CONTRACT_ACTIVE');
+
     // The part of the commission held until the customer completes, plus the
     // completion bonus. Records nothing while both are 0; never throws.
     await accrueCompletionCommission({

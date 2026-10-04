@@ -205,6 +205,7 @@ async function readStatusesNeeded(): Promise<number> {
   let read = 0;
   for (let i = 0; i < toRead.length; i += 100) {
     const chunk = toRead.slice(i, i + 100);
+    const activated: typeof chunk = [];
     const res = await client.batchFindLockState(chunk.map((d) => d.imei));
     await logAction({ action: 'STATUS_READ_BATCH', result: res, response: { count: chunk.length } });
     if (!res.success || res.dryRun || !Array.isArray(res.data)) continue;
@@ -214,9 +215,20 @@ async function readStatusesNeeded(): Promise<number> {
       // A queued phone that has activated without us hearing the callback.
       if (device.enrollmentStatus === 'QUEUED' && state.lockState === 3000) {
         await markActivated(device.id, state);
+        activated.push(device);
       }
       await applyLockState(device.id, state);
       read++;
+    }
+    // A phone that activated without its callback reaching us was locked on
+    // activation; bring it in line with its contract now, not tomorrow.
+    for (const device of activated) {
+      if (!device.contractId) continue;
+      try {
+        await reconcileContract(device.contractId, { reasons: ['DEVICE_ACTIVATED'] });
+      } catch (err) {
+        console.error('PayTrigger sweep: reconcile after activation failed', device.contractId, err);
+      }
     }
   }
   return read;

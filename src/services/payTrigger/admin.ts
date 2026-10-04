@@ -1,3 +1,4 @@
+import { PAYTRIGGER_APP_PACKAGE } from './config';
 import prisma from '../../config/database';
 import * as client from './client';
 import { describeCode } from './errors';
@@ -219,7 +220,7 @@ export async function enrolItems(inventoryItemIds: string[], actorId: string) {
   }
 
   const res = await client.enrolImeis(
-    eligible.map((item) => ({ imei: item.serialNumber, orderNum: item.id, ruleNum: settings.defaultRuleNum, deeplink: settings.payDeeplink || undefined })),
+    eligible.map((item) => ({ imei: item.serialNumber, orderNum: item.id, ruleNum: settings.defaultRuleNum, deeplink: settings.payDeeplink || undefined, deeplinkPkg: settings.payDeeplink ? PAYTRIGGER_APP_PACKAGE : undefined })),
     true,
   );
   const failures = new Map((Array.isArray(res.data) ? res.data : []).map((f) => [String(f.imei), f]));
@@ -502,6 +503,50 @@ export async function getIssues() {
     .filter((d) => d.enrollmentStatus === 'ACTIVE' && d.lastConnectAt && now - d.lastConnectAt.getTime() > 14 * 86400_000)
     .map(row);
 
+  // Sold (or awaiting approval) on a Transsion product, but PayTrigger was
+  // never given the phone — or the attempt failed — so nothing can lock it.
+  const transsionProducts = (await prisma.payTriggerProduct.findMany({ select: { productId: true } })).map((p) => p.productId);
+  const soldItems = transsionProducts.length
+    ? await prisma.inventoryItem.findMany({
+        where: { productId: { in: transsionProducts }, contract: { status: { in: ['ACTIVE', 'PENDING_APPROVAL', 'REVISION_REQUESTED'] } } },
+        select: {
+          id: true,
+          serialNumber: true,
+          contract: { select: { id: true, contractNumber: true, status: true, customer: { select: { firstName: true, lastName: true, phone: true } } } },
+        },
+      })
+    : [];
+  const soldDevices = new Map(
+    (await prisma.payTriggerDevice.findMany({ where: { inventoryItemId: { in: soldItems.map((i) => i.id) } }, select: { inventoryItemId: true, enrollmentStatus: true } })).map((d) => [d.inventoryItemId, d.enrollmentStatus]),
+  );
+  const soldNotEnrolled = soldItems
+    .filter((i) => !soldDevices.has(i.id) || ['FAILED', 'CANCELLED'].includes(soldDevices.get(i.id) as string))
+    .map((i) => ({
+      inventoryItemId: i.id,
+      imei: i.serialNumber,
+      contractId: i.contract?.id ?? null,
+      contractNumber: i.contract?.contractNumber ?? null,
+      contractStatus: i.contract?.status ?? null,
+      customer: i.contract ? `${i.contract.customer.firstName} ${i.contract.customer.lastName}` : null,
+      customerPhone: i.contract?.customer.phone ?? null,
+      enrolment: soldDevices.get(i.id) ?? null,
+    }));
+
+  // Callbacks PayTrigger sent that we could not act on in the last two weeks —
+  // most often a phone active on our account that we hold no record of.
+  const strayEvents = await prisma.payTriggerWebhookEvent.findMany({
+    where: { processedAt: null, error: { not: null }, createdAt: { gte: new Date(now - 14 * 86400_000) }, NOT: { dedupeKey: { startsWith: 'unsigned:' } } },
+    orderBy: { createdAt: 'desc' },
+    take: 50,
+  });
+  const callbackErrors = strayEvents.map((e) => ({
+    id: e.id,
+    imei: String((e.body as any)?.imei ?? ''),
+    notifyType: e.notifyType,
+    error: e.error,
+    createdAt: e.createdAt,
+  }));
+
   const sweepLate = !settings.lastSweepAt || now - settings.lastSweepAt.getTime() > 26 * 3600_000;
   return {
     paidStillLocked,
@@ -511,10 +556,12 @@ export async function getIssues() {
     unenforceable,
     failing,
     stale,
+    soldNotEnrolled,
+    callbackErrors,
     sweep: { lastSweepAt: settings.lastSweepAt, late: sweepLate, summary: settings.lastSweepSummary },
     counts: {
       paidStillLocked: paidStillLocked.length,
-      total: paidStillLocked.length + ledgerMissing.length + unconfirmedLocks.length + unenforceable.length + failing.length + (sweepLate ? 1 : 0),
+      total: paidStillLocked.length + ledgerMissing.length + unconfirmedLocks.length + unenforceable.length + failing.length + soldNotEnrolled.length + callbackErrors.length + (sweepLate ? 1 : 0),
     },
   };
 }

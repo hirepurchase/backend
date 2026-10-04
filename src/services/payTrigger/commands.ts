@@ -7,7 +7,8 @@ import { logAction } from './log';
  * Sending one command to PayTrigger and remembering how it went.
  *
  * Each command row is keyed on (device, type, decision fingerprint), so the
- * same decision is never sent twice once it has succeeded, and a failed one
+ * same decision is never sent twice once it has succeeded (unless the caller
+ * marks it repeatable), and a failed one
  * is retried under the same row. Retries run in-process at +30s, +2m and
  * +10m; after that the row is FAILED and the 08:36 sweep tries again.
  *
@@ -27,6 +28,14 @@ export interface CommandContext {
   payload: Record<string, unknown>;
   actorId?: string | null;
   send: () => Promise<client.PayTriggerResult>;
+  /**
+   * Send even if this exact command succeeded before. For lock dates: a phone
+   * can come back to a state it was in earlier (locked → paid → payment
+   * reversed), and the earlier success must not swallow the new command. The
+   * caller is then responsible for not repeating itself (reconcile compares
+   * the device's last fingerprint).
+   */
+  repeat?: boolean;
   /** Called with a delay when a retry should be scheduled. */
   scheduleRetry?: (delayMs: number) => void;
 }
@@ -40,7 +49,7 @@ export interface CommandOutcome {
 export async function runCommand(ctx: CommandContext): Promise<CommandOutcome> {
   const idempotencyKey = `${ctx.device.id}:${ctx.type}:${ctx.fingerprint}`;
   const existing = await prisma.payTriggerCommand.findUnique({ where: { idempotencyKey } });
-  if (existing?.status === 'SUCCEEDED') return { status: 'SKIPPED' };
+  if (existing?.status === 'SUCCEEDED' && !ctx.repeat) return { status: 'SKIPPED' };
 
   // Canary: with live actions on, only listed contracts are really sent.
   if (liveActionsEnabled() && !liveActionsAllowedFor(ctx.contract)) {

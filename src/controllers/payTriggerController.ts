@@ -339,7 +339,7 @@ export async function putSettings(req: AuthenticatedRequest, res: Response) {
         const n = Number(value);
         if (!Number.isInteger(n) || n < min || n > max) return fail(res, new Error(`${key} must be a whole number from ${min} to ${max}.`));
         data[key] = n;
-      } else if (key === 'lockOnUnpaidAgentDeposit' || key === 'holdOnUnpaidPenalties' || key === 'reminderEnabled') {
+      } else if (key === 'lockOnUnpaidAgentDeposit' || key === 'holdOnUnpaidPenalties' || key === 'reminderEnabled' || key === 'reminderIncludeDaily') {
         data[key] = Boolean(value);
       } else if (key === 'reminderChannel') {
         if (!['POPUP', 'PUSH', 'BOTH'].includes(String(value))) return fail(res, new Error('Send reminders as a pop-up, a notification or both.'));

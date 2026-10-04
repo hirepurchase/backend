@@ -2,7 +2,7 @@ import prisma from '../../config/database';
 import { OWED_PENALTY_WHERE } from '../penaltyService';
 import { TEMPORARY_UNLOCK_STATUS } from '../temporaryUnlockService';
 import * as client from './client';
-import { PAYTRIGGER_CURRENCY } from './config';
+import { PAYTRIGGER_APP_PACKAGE, PAYTRIGGER_CURRENCY } from './config';
 import { decide, Decision } from './decide';
 import { enqueue, eventStats, EventReason, UNLOCK_REASONS } from './events';
 import { recordDeferredLock, runCommand } from './commands';
@@ -48,9 +48,19 @@ async function findOrLinkDevice(contractId: string): Promise<DeviceRow | null> {
   if (!item) return null;
   const device = await prisma.payTriggerDevice.findUnique({ where: { inventoryItemId: item.id } });
   if (!device) return null;
-  if (device.contractId && device.contractId !== contractId) return null;
+  if (device.contractId && device.contractId !== contractId) {
+    // The stock item now belongs to this contract. A device still tied to an
+    // earlier contract is handed over only if that contract has ended (a
+    // cancelled sale whose phone came back and was sold again).
+    const previous = await prisma.hirePurchaseContract.findUnique({ where: { id: device.contractId }, select: { status: true } });
+    if (previous && !['CANCELLED', 'WRITTEN_OFF'].includes(previous.status)) return null;
+    removeTranssionContract(device.contractId);
+  }
 
-  const updated = await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { contractId } });
+  const updated = await prisma.payTriggerDevice.update({
+    where: { id: device.id },
+    data: { contractId, fingerprint: null, releaseAfter: null, releaseHeld: false, awaitingPinSince: null },
+  });
   addTranssionContract(contractId);
   await logAction({ deviceId: device.id, contractId, action: 'LINK', success: true, dryRun: false, skippedReason: 'Device linked to contract' });
   return updated;
@@ -143,6 +153,11 @@ export async function reconcileContract(contractId: string, options: ReconcileOp
     await syncLockMessage(device, contract, settings, decision.depositHold, now, ctxBase);
   }
 
+  // ── A paid-off phone stays open while it waits to be released ───────────
+  if (decision.action === 'RELEASE' && activated) {
+    await keepOpenUntilRelease(device, contract, decision, settings, now, ctxBase);
+  }
+
   if (!options.force && device.fingerprint === decision.fingerprint) {
     return { ...outcome, skipped: 'Decision unchanged' };
   }
@@ -212,6 +227,9 @@ export async function reconcileContract(contractId: string, options: ReconcileOp
     ...ctxBase,
     type: decision.action === 'EXTEND' ? 'EXTEND' : 'LOCK',
     fingerprint: decision.fingerprint,
+    // The fingerprint check above already stops repeats; a state the phone has
+    // been in before (paid → reversed → paid again) must still be sent.
+    repeat: true,
     payload: { nextRepayTime: nextRepayTime.toISOString(), reason: decision.reason },
     send: () =>
       client.updateRepayInfo({
@@ -227,6 +245,7 @@ export async function reconcileContract(contractId: string, options: ReconcileOp
         phoneNum: contract.customer?.phone,
         currencyType: PAYTRIGGER_CURRENCY,
         deeplink: settings.payDeeplink,
+        deeplinkPkg: settings.payDeeplink ? PAYTRIGGER_APP_PACKAGE : undefined,
         description: decision.reason.slice(0, 100),
       }),
   });
@@ -251,6 +270,51 @@ export async function reconcileContract(contractId: string, options: ReconcileOp
     }
   }
   return { ...outcome, sent: `${decision.action.toLowerCase()} ${res.status.toLowerCase()}` };
+}
+
+/** A paid-off phone is kept open this far ahead, and topped up when less than a third of it is left. */
+const RELEASE_OPEN_MS = 14 * 86400_000;
+
+/**
+ * Between the last payment and the release (a 24-hour hold by default, longer
+ * if an admin pauses it) the customer owes nothing, so the phone must not
+ * lock: not because it was locked when they paid, and not because the lock
+ * date for the next instalment comes round during the wait.
+ */
+async function keepOpenUntilRelease(
+  device: DeviceRow,
+  contract: ContractRow,
+  decision: Decision,
+  settings: PayTriggerSettingsRow,
+  now: Date,
+  ctxBase: Omit<Parameters<typeof runCommand>[0], 'type' | 'fingerprint' | 'payload' | 'send'>,
+) {
+  const openFor = (device.providerExpiresAt?.getTime() ?? 0) - now.getTime();
+  if (openFor > RELEASE_OPEN_MS / 3) return;
+  const nextRepayTime = new Date(now.getTime() + RELEASE_OPEN_MS);
+  const res = await runCommand({
+    ...ctxBase,
+    type: 'EXTEND',
+    fingerprint: `paid-off:${now.toISOString().slice(0, 10)}`,
+    payload: { nextRepayTime: nextRepayTime.toISOString(), reason: 'Paid off — kept open until release.' },
+    repeat: true,
+    send: () =>
+      client.updateRepayInfo({
+        imei: device.imei,
+        deviceTag: device.deviceTag,
+        nextRepayTime,
+        repayedAmt: decision.repayedAmt,
+        totalAmt: decision.totalAmt,
+        totalTerm: decision.totalTerm,
+        orderNum: contract.contractNumber,
+        currencyType: PAYTRIGGER_CURRENCY,
+        description: 'Paid off',
+      }),
+  });
+  if (res.status === 'SUCCEEDED') {
+    await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { providerExpiresAt: nextRepayTime, committedState: 'PENDING', lastError: null } });
+    device.providerExpiresAt = nextRepayTime;
+  }
 }
 
 /** What `lockMessageKey` reads as on a phone last written before the column existed. */
@@ -287,6 +351,9 @@ async function syncLockMessage(
     type: 'SYNC',
     fingerprint: `lock-message:${message.key || 'cleared'}:${now.toISOString().slice(0, 10)}`,
     payload: { hold, title: message.title, tips: message.tips },
+    // The key comparison above stops repeats; words the phone showed earlier
+    // today (held → open → held again) must still be sent.
+    repeat: true,
     send: () =>
       client.setDeviceRule({
         imei: device.imei,
@@ -297,8 +364,7 @@ async function syncLockMessage(
         deviceTips: message.tips ?? ' ',
       }),
   });
-  // SKIPPED here means this exact message already went out today.
-  if (res.status === 'SUCCEEDED' || (res.status === 'SKIPPED' && !res.error)) {
+  if (res.status === 'SUCCEEDED') {
     await prisma.payTriggerDevice.update({ where: { id: device.id }, data: { holdMessageShown: hold, lockMessageKey: message.key } });
   }
 }
@@ -320,6 +386,7 @@ export async function syncUnlinkedMessage(deviceId: string): Promise<boolean> {
     type: 'SYNC',
     fingerprint: `lock-message:${message.key}:${new Date().toISOString().slice(0, 10)}`,
     payload: { unlinked: true, title: message.title, tips: message.tips },
+    repeat: true,
     send: () =>
       client.setDeviceRule({ imei: device.imei, deviceTag: device.deviceTag, ruleNum: settings.defaultRuleNum, deviceTitle: message.title, deviceTips: message.tips }),
   });

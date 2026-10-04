@@ -1309,6 +1309,7 @@ export async function cancelContract(req: AuthenticatedRequest, res: Response): 
       userAgent: req.headers['user-agent'],
     });
 
+    notifyPayTrigger(id, 'CONTRACT_CHANGED');
     res.json({ message: 'Contract cancelled successfully' });
   } catch (error) {
     console.error('Cancel contract error:', error);
@@ -1418,6 +1419,7 @@ export async function writeOffContract(req: AuthenticatedRequest, res: Response)
       }
     }
 
+    notifyPayTrigger(id, 'CONTRACT_CHANGED');
     res.json({
       message: 'Contract written off successfully.',
       contractId: id,
@@ -1479,6 +1481,7 @@ export async function transferOwnership(req: AuthenticatedRequest, res: Response
       console.error(`Knox Guard unenrollment failed for contract ${id}:`, knoxError);
     }
 
+    notifyPayTrigger(id, 'CONTRACT_CHANGED');
     res.json({ message: 'Ownership transferred successfully' });
   } catch (error) {
     console.error('Transfer ownership error:', error);
@@ -1688,6 +1691,7 @@ export async function nullifyContract(req: AuthenticatedRequest, res: Response):
       }
     }
 
+    notifyPayTrigger(id, 'CONTRACT_CHANGED');
     res.json({
       message: `Contract ${contract.contractNumber} has been nullified`,
       deleted: {
@@ -1791,6 +1795,7 @@ export async function rescheduleInstallments(req: AuthenticatedRequest, res: Res
       userAgent: req.headers['user-agent'],
     });
 
+    notifyPayTrigger(id, 'CONTRACT_CHANGED');
     res.json({
       message: 'Installments rescheduled successfully',
       startDate,
@@ -1915,6 +1920,7 @@ export async function editInstallment(req: AuthenticatedRequest, res: Response):
       userAgent: req.headers['user-agent'],
     });
 
+    notifyPayTrigger(contractId, 'CONTRACT_CHANGED');
     res.json({
       message: 'Installment updated successfully',
       installment: updatedInstallment,
@@ -2313,6 +2319,7 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
       },
     });
 
+    notifyPayTrigger(id, 'CONTRACT_CHANGED');
     res.json({
       message: 'Contract amended successfully',
       summary: {
@@ -2597,6 +2604,7 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
     // Evaluate Knox Guard policy — unlocks device if all overdue amounts are now cleared
     await safelyEvaluateManagedDeviceForContract(contractId);
 
+    notifyPayTrigger(contractId, 'PAYMENT');
     res.status(201).json({
       message: 'Payment recorded successfully',
       transactionRef,

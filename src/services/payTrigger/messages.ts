@@ -202,6 +202,7 @@ export async function sendPaymentReminders(now = new Date()): Promise<ReminderSu
       contractNumber: true,
       totalPrice: true,
       totalPaid: true,
+      paymentFrequency: true,
       customer: { select: { firstName: true, lastName: true } },
       createdBy: { select: { firstName: true, lastName: true, phone: true } },
       installments: { select: { installmentNo: true, dueDate: true, amount: true, paidAmount: true, status: true } },
@@ -212,6 +213,9 @@ export async function sendPaymentReminders(now = new Date()): Promise<ReminderSu
   for (const device of devices) {
     const contract = byId.get(device.contractId as string);
     if (!contract) continue;
+    // Something is due every day on a daily collection, so "the due day" is
+    // every morning. Left out unless an admin asks for it.
+    if (contract.paymentFrequency === 'DAILY' && !settings.reminderIncludeDaily) continue;
     const next = unpaidOf(contract.installments)[0];
     if (!next) continue;
     const daysLeft = Math.round((startOfDay(next.dueDate) - startOfDay(now)) / DAY_MS);

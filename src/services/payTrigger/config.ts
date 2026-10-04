@@ -27,6 +27,13 @@ export const PAYTRIGGER_CANARY_CONTRACTS = new Set(
     .filter(Boolean),
 );
 
+/**
+ * Android package a pay link opens in. PayTrigger refuses a link sent without
+ * its package (code 50012), and that refusal fails the whole request — an
+ * enrolment or a lock-date update — so the two always travel together.
+ */
+export const PAYTRIGGER_APP_PACKAGE = env('PAYTRIGGER_APP_PACKAGE', 'com.aidootech.customer');
+
 /** Currency symbol shown on the lock screen next to amounts. */
 export const PAYTRIGGER_CURRENCY = env('PAYTRIGGER_CURRENCY', 'GHS');
 

@@ -81,6 +81,8 @@ export const LOCK_NOW_LEAD_MS = 60_000;
 const TEMP_UNLOCK_SLACK_MS = 6 * 3600_000;
 
 const DAY_MS = 86400_000;
+/** How stale a capped lock date may get before it is pushed out again. */
+const HORIZON_REFRESH_MS = 7 * DAY_MS;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 function lockMomentFor(dueDate: Date, graceDays: number, lockAfterDays: number): Date {
@@ -148,9 +150,12 @@ export function decide(input: DecideInput): Decision {
     return result('RELEASE', 'Contract paid off — release after the hold period.');
   }
   if (contract.status === 'CANCELLED') {
-    return device.activated
-      ? result('NONE', 'Cancelled after activation — lock date is never extended, so the phone stays locked.')
-      : result('CANCEL', 'Cancelled before activation — cancel enrolment and return the licence.');
+    if (!device.activated) return result('CANCEL', 'Cancelled before activation — cancel enrolment and return the licence.');
+    // The phone is back in stock (or should be): shut it now rather than
+    // leaving it usable until the lock date it was last given.
+    return providerOpen
+      ? result('LOCK', 'Cancelled — the phone is locked like any unsold stock.', { nextRepayTime: lockNow(), lockNow: true })
+      : result('NONE', 'Cancelled after activation — lock date is never extended, so the phone stays locked.');
   }
   if (contract.status === 'WRITTEN_OFF' || contract.status === 'DEFAULTED') {
     return result('NONE', `Contract ${contract.status.toLowerCase().replace('_', ' ')} — lock date is never extended.`);
@@ -208,8 +213,17 @@ export function decide(input: DecideInput): Decision {
     });
   }
 
+  // A lock date further off than the cap is sent as "now + cap", which moves
+  // every time we look. Keep the date the phone already holds until it is a
+  // week short of the cap, so a monthly payer is refreshed weekly, not on
+  // every payment event and every morning sweep.
+  let target = clamp(schedule);
+  const held = device.providerExpiresAt?.getTime();
+  if (schedule.getTime() > horizon.getTime() && held && held <= target.getTime() && held >= target.getTime() - HORIZON_REFRESH_MS) {
+    target = device.providerExpiresAt as Date;
+  }
   return result('EXTEND', next ? `Current — open until instalment ${next.installmentNo} is overdue.` : 'Nothing unpaid — open while the contract completes.', {
-    nextRepayTime: clamp(schedule),
+    nextRepayTime: target,
     scheduleExpiresAt: schedule,
   });
 }
