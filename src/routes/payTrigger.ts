@@ -22,6 +22,7 @@ import {
   releaseDevice,
   uploadBrandingLogo,
   getLockProvider,
+  verifyDevice,
 } from '../controllers/payTriggerController';
 import { upload } from '../config/upload';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
@@ -42,6 +43,7 @@ router.get('/issues', ...view, getIssues);
 router.get('/devices', ...view, listDevices);
 router.get('/devices/:id', ...view, getDevice);
 router.post('/devices/:id/reconcile', ...manage, reconcileDevice);
+router.post('/devices/:id/verify', ...manage, verifyDevice);
 router.post('/devices/:id/cancel-enrolment', ...manage, cancelEnrolment);
 router.post('/devices/:id/hold-release', ...manage, holdRelease);
 // The controller also requires the ADMIN or SUPER_ADMIN role.

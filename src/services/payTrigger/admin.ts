@@ -2,7 +2,7 @@ import prisma from '../../config/database';
 import * as client from './client';
 import { describeCode } from './errors';
 import { enqueue } from './events';
-import { reconcileContract } from './reconcile';
+import { applyLockState, reconcileContract } from './reconcile';
 import { releaseDevice } from './sweep';
 import { getPayTriggerSettings } from './settings';
 import { addTranssionContract } from './registry';
@@ -116,7 +116,7 @@ export async function markProducts(productIds: string[], actorId: string) {
  * inventory page must load even if PayTrigger's tables are unavailable.
  */
 export async function payTriggerInfoForItems(items: Array<{ id: string; productId: string }>) {
-  const empty = new Map<string, { lockProvider: 'PAYTRIGGER' | 'KNOX'; payTrigger: Record<string, unknown> | null }>();
+  const empty = new Map<string, { lockProvider: 'PAYTRIGGER' | 'KNOX'; payTrigger: Record<string, unknown> | null; needsEnrolment: boolean }>();
   try {
     if (!items.length) return empty;
     const [devices, marked] = await Promise.all([
@@ -130,13 +130,22 @@ export async function payTriggerInfoForItems(items: Array<{ id: string; productI
       prisma.payTriggerProduct.findMany({ where: { productId: { in: [...new Set(items.map((i) => i.productId))] } }, select: { productId: true } }),
     ]);
     const deviceByItem = new Map(devices.map((d) => [d.inventoryItemId, d]));
+    const liveProof = await liveEnrolmentProof(devices.map((d) => d.id));
     const markedProducts = new Set(marked.map((m) => m.productId));
     for (const item of items) {
       const device = deviceByItem.get(item.id);
       const isPt = !!device || markedProducts.has(item.productId);
       empty.set(item.id, {
         lockProvider: isPt ? 'PAYTRIGGER' : 'KNOX',
-        payTrigger: device ? { ...device, needsKeyCode: needsKeyCode(device.apkVersion) } : null,
+        payTrigger: device
+          ? {
+              ...device,
+              needsKeyCode: needsKeyCode(device.apkVersion),
+              enrolledLive: liveProof.has(device.id),
+              needsEnrolment: needsEnrolment(device, liveProof),
+            }
+          : null,
+        needsEnrolment: isPt ? needsEnrolment(device, liveProof) : false,
       });
     }
     return empty;
@@ -179,7 +188,15 @@ export async function enrolItems(inventoryItemIds: string[], actorId: string) {
   const transsion = new Set((await prisma.payTriggerProduct.findMany({ select: { productId: true } })).map((p) => p.productId));
   const results: Array<{ inventoryItemId: string; imei: string; ok: boolean; message: string }> = [];
 
+  const existing = new Map(
+    (await prisma.payTriggerDevice.findMany({ where: { inventoryItemId: { in: items.map((i) => i.id) } } })).map((d) => [d.inventoryItemId, d]),
+  );
   const eligible = items.filter((item) => {
+    const current = existing.get(item.id);
+    if (current && ['ACTIVE', 'UNENFORCEABLE', 'REMOVED'].includes(current.enrollmentStatus)) {
+      results.push({ inventoryItemId: item.id, imei: item.serialNumber, ok: false, message: 'Already active on PayTrigger — use Verify instead.' });
+      return false;
+    }
     if (!transsion.has(item.productId)) {
       results.push({ inventoryItemId: item.id, imei: item.serialNumber, ok: false, message: 'Product is not marked as Transsion.' });
       return false;
@@ -209,16 +226,22 @@ export async function enrolItems(inventoryItemIds: string[], actorId: string) {
   await logAction({ action: 'ENROL', result: res, actorId, response: { count: eligible.length, failures: [...failures.values()] } });
 
   for (const item of eligible) {
-    const failure = failures.get(item.serialNumber);
+    let failure = failures.get(item.serialNumber);
+    // 50015: PayTrigger already holds this IMEI — the goal is met.
+    const alreadyThere = failure && String(failure.errCode) === '50015';
+    if (alreadyThere) failure = undefined;
     // A whole-request failure (not 50021 "some failed") fails every IMEI.
     const failedAll = !res.success && res.code !== '50021';
     if (failure || failedAll) {
-      results.push({
-        inventoryItemId: item.id,
-        imei: item.serialNumber,
-        ok: false,
-        message: failure ? describeCode(failure.errCode, failure.message) : res.error || 'Enrolment failed',
+      const message = failure ? describeCode(failure.errCode, failure.message) : res.error || 'Enrolment failed';
+      // Keep the failure on record, so inventory shows it and offers "Enrol again".
+      const failed = await prisma.payTriggerDevice.upsert({
+        where: { inventoryItemId: item.id },
+        create: { inventoryItemId: item.id, imei: item.serialNumber, contractId: item.contractId, orderRef: item.id, enrollmentStatus: 'FAILED', lastError: message },
+        update: { enrollmentStatus: 'FAILED', lastError: message },
       });
+      await logAction({ deviceId: failed.id, contractId: item.contractId, action: 'ENROL', result: res, success: false, skippedReason: message, actorId });
+      results.push({ inventoryItemId: item.id, imei: item.serialNumber, ok: false, message });
       continue;
     }
     const device = await prisma.payTriggerDevice.upsert({
@@ -226,7 +249,9 @@ export async function enrolItems(inventoryItemIds: string[], actorId: string) {
       create: { inventoryItemId: item.id, imei: item.serialNumber, contractId: item.contractId, orderRef: item.id, enrollmentStatus: 'QUEUED' },
       update: { enrollmentStatus: 'QUEUED', lastError: null },
     });
-    await logAction({ deviceId: device.id, contractId: item.contractId, action: 'ENROL', result: res, actorId });
+    // This phone's own outcome — in a batch where another IMEI was refused,
+    // the request as a whole reports 50021 even though this one went through.
+    await logAction({ deviceId: device.id, contractId: item.contractId, action: 'ENROL', result: res, success: true, actorId });
     if (item.contractId) {
       addTranssionContract(item.contractId);
       enqueue(item.contractId, 'DEVICE_ENROLLED').catch(() => undefined);
@@ -235,10 +260,94 @@ export async function enrolItems(inventoryItemIds: string[], actorId: string) {
       inventoryItemId: item.id,
       imei: item.serialNumber,
       ok: true,
-      message: (res.dryRun ? 'Enrolled (dry run). ' : 'Enrolled. ') + (notes.get(item.id) || ''),
+      message: (res.dryRun ? 'Enrolled (dry run — simulated only). ' : alreadyThere ? 'Already enrolled on PayTrigger. ' : 'Enrolled. ') + (notes.get(item.id) || ''),
     });
   }
   return results;
+}
+
+/**
+ * Which devices PayTrigger really holds: an enrolment counts only if a live
+ * (not dry-run) ENROL or VERIFY succeeded for it.
+ */
+export async function liveEnrolmentProof(deviceIds: string[]): Promise<Set<string>> {
+  if (!deviceIds.length) return new Set();
+  const rows = await prisma.payTriggerActionLog.findMany({
+    where: { deviceId: { in: deviceIds }, action: { in: ['ENROL', 'VERIFY', 'ACTIVATED'] }, success: true, dryRun: false },
+    select: { deviceId: true },
+    distinct: ['deviceId'],
+  });
+  return new Set(rows.map((r) => r.deviceId!).filter(Boolean));
+}
+
+/** Enrolment needs (re)doing: never sent, failed, cancelled, or only simulated in dry run. */
+export function needsEnrolment(device: { id: string; enrollmentStatus: string } | null | undefined, liveProof: Set<string>): boolean {
+  if (!device) return true;
+  if (device.enrollmentStatus === 'FAILED' || device.enrollmentStatus === 'CANCELLED') return true;
+  return device.enrollmentStatus === 'QUEUED' && !liveProof.has(device.id);
+}
+
+/**
+ * Ask PayTrigger what it holds for this phone and bring our record in line:
+ * unknown IMEI → marked FAILED (offer to enrol again); pre-enrolled → confirmed;
+ * active → ACTIVE with its lock state; removable → REMOVED.
+ */
+export async function verifyDevice(deviceId: string, actorId: string) {
+  const device = await prisma.payTriggerDevice.findUnique({ where: { id: deviceId } });
+  if (!device) throw new Error('Device not found');
+  const res = await client.getDevice(device.imei);
+
+  if (res.dryRun) {
+    await logAction({ deviceId, contractId: device.contractId, action: 'VERIFY', result: res, success: false, skippedReason: 'Dry run — nothing to check against.', actorId });
+    return {
+      status: 'DRY_RUN' as const,
+      message: 'PayTrigger is in dry run, so the enrolment was only simulated and cannot be checked. Enrol again once live mode is on.',
+    };
+  }
+  if (!res.success) {
+    const unknown = ['20001', '50051', '50071'].includes(String(res.code));
+    if (unknown) {
+      await prisma.payTriggerDevice.update({
+        where: { id: deviceId },
+        data: device.enrollmentStatus === 'QUEUED' || device.enrollmentStatus === 'FAILED'
+          ? { enrollmentStatus: 'FAILED', lastError: 'PayTrigger does not have this IMEI. Enrol it again.' }
+          : { lastError: 'PayTrigger does not have this IMEI.' },
+      });
+    }
+    await logAction({ deviceId, contractId: device.contractId, action: 'VERIFY', result: res, actorId });
+    return unknown
+      ? { status: 'NOT_REGISTERED' as const, message: 'PayTrigger does not have this IMEI. Enrol it again.' }
+      : { status: 'ERROR' as const, message: res.error || 'PayTrigger could not be reached. Try again later.' };
+  }
+
+  const info = res.data || {};
+  const serverState = Number(info.serverState ?? info.lockState);
+  let status: 'WAITING' | 'ACTIVE' | 'REMOVED';
+  let message: string;
+  if (serverState === 5000) {
+    await prisma.payTriggerDevice.update({ where: { id: deviceId }, data: { enrollmentStatus: 'REMOVED', committedState: 'UNLOCKED', lastError: null, deviceTag: info.deviceTag || device.deviceTag } });
+    status = 'REMOVED';
+    message = 'PayTrigger has released this phone.';
+  } else if (serverState === 3000) {
+    if (device.enrollmentStatus !== 'ACTIVE') {
+      await prisma.payTriggerDevice.update({ where: { id: deviceId }, data: { enrollmentStatus: 'ACTIVE', licenceConsumedAt: device.licenceConsumedAt ?? new Date() } });
+    }
+    const lock = await client.findLockState(device);
+    if (lock.success && !lock.dryRun && lock.data) await applyLockState(deviceId, lock.data);
+    await prisma.payTriggerDevice.update({ where: { id: deviceId }, data: { lastError: null, deviceTag: info.deviceTag || device.deviceTag } });
+    status = 'ACTIVE';
+    message = 'Enrolled and active on PayTrigger.';
+    if (device.contractId) enqueue(device.contractId, 'ADMIN_RECONCILE').catch(() => undefined);
+  } else {
+    await prisma.payTriggerDevice.update({
+      where: { id: deviceId },
+      data: { enrollmentStatus: device.enrollmentStatus === 'FAILED' ? 'QUEUED' : device.enrollmentStatus, lastError: null, deviceTag: info.deviceTag || device.deviceTag },
+    });
+    status = 'WAITING';
+    message = 'Enrolled on PayTrigger, waiting for the phone to be switched on.';
+  }
+  await logAction({ deviceId, contractId: device.contractId, action: 'VERIFY', result: res, success: true, actorId, response: { serverState, status } });
+  return { status, message };
 }
 
 export async function cancelEnrolment(deviceId: string, actorId: string) {
@@ -328,7 +437,7 @@ export async function setReleaseHold(deviceId: string, held: boolean, actorId: s
 export async function getIssues() {
   const now = Date.now();
   const settings = await getPayTriggerSettings();
-  const devices = await prisma.payTriggerDevice.findMany({ where: { enrollmentStatus: { in: ['QUEUED', 'ACTIVE', 'UNENFORCEABLE'] } } });
+  const devices = await prisma.payTriggerDevice.findMany({ where: { enrollmentStatus: { in: ['QUEUED', 'ACTIVE', 'UNENFORCEABLE', 'FAILED'] } } });
   const contractIds = devices.map((d) => d.contractId).filter((id): id is string => !!id);
   const contracts = await prisma.hirePurchaseContract.findMany({
     where: { id: { in: contractIds } },

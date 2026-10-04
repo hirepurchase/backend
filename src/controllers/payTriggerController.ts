@@ -159,7 +159,19 @@ export async function getDevice(req: AuthenticatedRequest, res: Response) {
       prisma.payTriggerCommand.findMany({ where: { deviceId: device.id }, orderBy: { createdAt: 'desc' }, take: 20 }),
     ]);
     const role = actor(req).role;
-    res.json({ device: { ...device, needsKeyCode: admin.needsKeyCode(device.apkVersion) }, contract, logs, commands, canIssuePin: PIN_ROLES.has(role) });
+    const proof = await admin.liveEnrolmentProof([device.id]);
+    res.json({
+      device: {
+        ...device,
+        needsKeyCode: admin.needsKeyCode(device.apkVersion),
+        enrolledLive: proof.has(device.id),
+        needsEnrolment: admin.needsEnrolment(device, proof),
+      },
+      contract,
+      logs,
+      commands,
+      canIssuePin: PIN_ROLES.has(role),
+    });
   } catch (err) {
     fail(res, err, 500);
   }
@@ -454,5 +466,14 @@ export async function getLockProvider(req: AuthenticatedRequest, res: Response) 
     res.json(await admin.detectLockProvider(productId, imei));
   } catch (err) {
     fail(res, err, 404);
+  }
+}
+
+/** POST /paytrigger/devices/:id/verify — check the phone against what PayTrigger holds. */
+export async function verifyDevice(req: AuthenticatedRequest, res: Response) {
+  try {
+    res.json(await admin.verifyDevice(String(req.params.id), actor(req).id));
+  } catch (err) {
+    fail(res, err);
   }
 }

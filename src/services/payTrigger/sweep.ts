@@ -5,6 +5,8 @@ import { applyLockState, reconcileContract } from './reconcile';
 import { refreshTranssionContracts, removeTranssionContract } from './registry';
 import { getPayTriggerSettings } from './settings';
 import { logAction } from './log';
+import { liveActionsEnabled } from './config';
+import { enrolItems, liveEnrolmentProof, needsEnrolment } from './admin';
 
 /**
  * The 08:36 morning sweep — the only scheduled PayTrigger work.
@@ -30,6 +32,7 @@ export interface SweepSummary {
   released: number;
   statusReads: number;
   breakerTripped: boolean;
+  reEnrolled?: number;
 }
 
 export async function runMorningSweep(): Promise<SweepSummary> {
@@ -99,6 +102,10 @@ export async function runMorningSweep(): Promise<SweepSummary> {
       console.error('PayTrigger sweep: reconcile failed', contractId, err);
     }
   }
+
+  // 2b. Once live: enrolments that were only simulated in dry run (or failed)
+  // are sent for real, so no phone is left looking enrolled when it is not.
+  summary.reEnrolled = await resendSimulatedEnrolments();
 
   // 3. Releases due: paid off, hold period over, not stopped by an admin.
   summary.released = await runDueReleases();
@@ -206,4 +213,22 @@ export async function markActivated(deviceId: string, state: { deviceTag?: strin
   });
   await logAction({ deviceId, contractId: device.contractId, action: 'ACTIVATED', success: true, dryRun: false });
   return device;
+}
+
+/** Live mode only: enrol for real every unactivated phone PayTrigger may not hold. */
+export async function resendSimulatedEnrolments(): Promise<number> {
+  if (!liveActionsEnabled()) return 0;
+  const candidates = await prisma.payTriggerDevice.findMany({
+    where: { enrollmentStatus: { in: ['QUEUED', 'FAILED'] } },
+    select: { id: true, inventoryItemId: true, enrollmentStatus: true },
+  });
+  const proof = await liveEnrolmentProof(candidates.map((c) => c.id));
+  const todo = candidates.filter((c) => needsEnrolment(c, proof)).map((c) => c.inventoryItemId);
+  if (!todo.length) return 0;
+  let done = 0;
+  for (let i = 0; i < todo.length; i += 200) {
+    const results = await enrolItems(todo.slice(i, i + 200), 'system');
+    done += results.filter((r) => r.ok).length;
+  }
+  return done;
 }
