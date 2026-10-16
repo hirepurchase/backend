@@ -1608,10 +1608,15 @@ export async function enrollManagedDeviceForContract(contractId: string, input: 
 
   // If a standalone ManagedDevice already exists for the inventory item (contractId = null),
   // claim it by setting contractId + contract fields rather than creating a duplicate row.
+  // A phone resold after an earlier contract ended still carries that
+  // contract's record; it is claimed the same way.
   const standaloneExisting = contract.inventoryItem?.id
-    ? await prismaAny.managedDevice.findUnique({ where: { inventoryItemId: contract.inventoryItem.id } })
+    ? await findClaimableManagedDevice(contract.inventoryItem.id, contract.id)
     : null;
-  const standaloneIsOrphan = standaloneExisting && !standaloneExisting.contractId;
+  const standaloneIsOrphan = !!standaloneExisting && standaloneExisting.contractId !== contract.id;
+  if (standaloneIsOrphan && standaloneExisting.contractId) {
+    await claimManagedDeviceForContract(contract.inventoryItem.id, contract.id, input.actor?.adminUserId);
+  }
 
   let managedDevice: any;
   if (standaloneIsOrphan) {
@@ -2014,6 +2019,53 @@ export async function requestStandaloneInventoryDeviceUnlock(inventoryItemId: st
     autoEnrolled,
     managedDeviceId: managedDevice.id,
   };
+}
+
+/** Contract states after which the phone can go to a new customer. */
+const ENDED_CONTRACT_STATUSES = new Set(['WRITTEN_OFF', 'CANCELLED', 'COMPLETED']);
+
+/**
+ * The Knox record a new sale of this stock item may take over: one tied to no
+ * contract, or to an earlier contract that has ended (written off, cancelled
+ * or paid off — the phone came back and is being sold again). A record still
+ * tied to a live contract is never taken, so one customer's lock cannot be
+ * moved onto another's sale by mistake.
+ */
+export async function findClaimableManagedDevice(inventoryItemId: string | null | undefined, newContractId: string) {
+  if (!inventoryItemId) return null;
+  const device = await prismaAny.managedDevice.findUnique({
+    where: { inventoryItemId },
+    include: { contract: { select: { id: true, contractNumber: true, status: true } } },
+  });
+  if (!device) return null;
+  if (!device.contractId || device.contractId === newContractId) return device;
+  return device.contract && ENDED_CONTRACT_STATUSES.has(device.contract.status) ? device : null;
+}
+
+/**
+ * Move a resold phone's Knox record from its ended contract to the new one.
+ * Without this the record kept following the old contract — a written-off one
+ * is never paid, so the new customer's phone stayed locked whatever they paid.
+ * Returns the device when it is (now) on the new contract.
+ */
+export async function claimManagedDeviceForContract(inventoryItemId: string | null | undefined, newContractId: string, actorId?: string | null) {
+  const device = await findClaimableManagedDevice(inventoryItemId, newContractId);
+  if (!device) return null;
+  if (device.contractId === newContractId) return device;
+  const previous = device.contract;
+  const linked = await linkManagedDeviceToContract(device.id, newContractId);
+  if (previous) {
+    console.log(`Knox device ${device.deviceUid} moved from ended contract ${previous.contractNumber} (${previous.status}) to ${newContractId}`);
+    await createAuditLog({
+      userId: actorId || undefined,
+      action: 'MANAGED_DEVICE_RELINKED',
+      entity: 'ManagedDevice',
+      entityId: device.id,
+      oldValues: { contractId: previous.id, contractNumber: previous.contractNumber, contractStatus: previous.status },
+      newValues: { contractId: newContractId },
+    }).catch((err: unknown) => console.error('Audit log for Knox relink failed', err));
+  }
+  return linked;
 }
 
 export async function linkManagedDeviceToContract(managedDeviceId: string, contractId: string) {

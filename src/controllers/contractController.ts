@@ -7,6 +7,8 @@ import {
   safelyEvaluateManagedDeviceForContract,
   enrollManagedDeviceForContract,
   linkManagedDeviceToContract,
+  findClaimableManagedDevice,
+  claimManagedDeviceForContract,
   requestManagedDeviceUnlock,
   requestStandaloneInventoryDeviceLock,
 } from '../services/deviceControlPolicyService';
@@ -101,14 +103,11 @@ async function handleContractCreateDeviceUnlock(options: {
   let via: ContractCreateDeviceUnlockResult['via'] = 'existing_contract_device';
 
   try {
-    const standaloneManagedDevice = await prisma.managedDevice.findUnique({
-      where: { inventoryItemId },
-      select: { id: true, contractId: true },
-    });
+    const standaloneManagedDevice = await findClaimableManagedDevice(inventoryItemId, contractId);
 
-    if (standaloneManagedDevice?.id && !standaloneManagedDevice.contractId) {
+    if (standaloneManagedDevice?.id && standaloneManagedDevice.contractId !== contractId) {
       try {
-        await linkManagedDeviceToContract(standaloneManagedDevice.id, contractId);
+        await claimManagedDeviceForContract(inventoryItemId, contractId);
         via = 'linked_standalone_device';
       } catch (linkError) {
         console.error(`Failed to link standalone managed device to contract ${contractId}:`, linkError);
@@ -614,13 +613,11 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     // This ensures the evaluate/auto-unlock cron can find the device even when
     // unlockOnContract=false or the device was not locked at creation time.
     if (completeContract) {
-      const standaloneMd = await prisma.managedDevice.findUnique({
-        where: { inventoryItemId },
-        select: { id: true, contractId: true, customerId_uuid: true },
-      });
-      if (standaloneMd && !standaloneMd.contractId) {
+      // Also takes over a resold phone's record from its ended contract.
+      const standaloneMd = await findClaimableManagedDevice(inventoryItemId, completeContract.id);
+      if (standaloneMd && standaloneMd.contractId !== completeContract.id) {
         try {
-          await linkManagedDeviceToContract(standaloneMd.id, completeContract.id);
+          await claimManagedDeviceForContract(inventoryItemId, completeContract.id, req.user?.id);
         } catch (linkErr) {
           console.error(`Failed to link standalone managed device to contract ${completeContract.contractNumber}:`, linkErr);
         }
