@@ -20,6 +20,20 @@ export type TemporaryUnlockStatus = typeof TEMPORARY_UNLOCK_STATUS[keyof typeof 
 
 export const DEFAULT_MAX_TEMPORARY_UNLOCK_WEEKS = 4;
 
+/**
+ * Whether a defaulted unlock stops the selling agent from creating contracts.
+ * An admin setting, on by default. Answers "on" if the setting cannot be read,
+ * so a database hiccup never quietly lets a blocked agent sell.
+ */
+export async function defaultedUnlockBlocksSales(): Promise<boolean> {
+  try {
+    const settings = await prismaAny.knoxGuardSettings.findFirst({ select: { temporaryUnlockDefaultBlocksSales: true } });
+    return settings?.temporaryUnlockDefaultBlocksSales ?? true;
+  } catch {
+    return true;
+  }
+}
+
 export interface ActiveTemporaryUnlock {
   id: string;
   contractId: string;
@@ -446,8 +460,10 @@ async function notifyAgentOfBar(agentId: string, contract: any): Promise<void> {
       to: agent.phone,
       message:
         `AIDOO TECH: Hello ${agent.firstName}, the temporary unlock guaranteed for ${name} ` +
-        `(${contract?.contractNumber ?? ''}) has ended with the arrears unpaid. Their phone is locked again and ` +
-        `you cannot create new contracts until they clear what they owe.`,
+        `(${contract?.contractNumber ?? ''}) has ended with the arrears unpaid. Their phone is locked again. ` +
+        ((await defaultedUnlockBlocksSales())
+          ? `You cannot create new contracts until they clear what they owe.`
+          : `Please follow up so they clear what they owe.`),
     });
   } catch (error) {
     console.error('Failed to notify agent of contract bar:', error);

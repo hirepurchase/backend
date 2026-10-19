@@ -116,6 +116,9 @@ model TemporaryUnlockRequest {
   reviewedAt        DateTime?
   reviewNote        String?
   resolvedAt        DateTime?
+  // Reopened by an admin after the window ran out unpaid.
+  extensionCount   Int       @default(0)
+  lastExtendedAt   DateTime?
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -655,6 +658,8 @@ model KnoxGuardSettings {
   lockAfterOverdueDays         Int      @default(1)
   blockOnUnpaidPenalties       Boolean  @default(false)
   temporaryUnlockMaxWeeks      Int      @default(4)
+  // Agent cannot create contracts while a customer whose unlock ran out unpaid still owes.
+  temporaryUnlockDefaultBlocksSales Boolean @default(true)
   maxCommandRetries            Int      @default(3)
   commandCron                  String   @default("*/5 * * * *")
   commandBatchSize             Int      @default(10)

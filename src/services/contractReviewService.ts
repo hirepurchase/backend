@@ -1,7 +1,7 @@
 import prisma from '../config/database';
 import { sanitizePhoneNumber } from '../utils/helpers';
 import { isSellingAgentRole } from '../constants/roles';
-import { getAgentDefaultedTemporaryUnlocks } from './temporaryUnlockService';
+import { defaultedUnlockBlocksSales, getAgentDefaultedTemporaryUnlocks } from './temporaryUnlockService';
 import { getSupervisionBlockers } from './supervisionService';
 import { payTriggerSaleBlocker } from './payTrigger/guard';
 
@@ -192,7 +192,7 @@ function assessContractContext(input: {
   mobileMoneyNumber?: string | null;
   excludeContractId?: string;
   agentOutstandingDeposits?: { count: number; total: number } | null;
-  defaultedTemporaryUnlocks?: Array<{ contractNumber: string; customerName: string }> | null;
+  defaultedTemporaryUnlocks?: Array<{ contractNumber: string; customerName: string; blocksSales?: boolean }> | null;
   supervisionBlockers?: string[] | null;
 }): ContractGuardrailAssessment {
   const {
@@ -247,9 +247,17 @@ function assessContractContext(input: {
     const names = defaultedTemporaryUnlocks
       .map((row) => `${row.customerName} (${row.contractNumber})`)
       .join(', ');
-    blockers.push(
-      `A temporary unlock guaranteed for ${names} expired with the overdue payments still unpaid. You cannot create another contract until that customer clears their arrears.`
-    );
+    // With the admin switch off the agent may still sell, but is told.
+    const blocks = defaultedTemporaryUnlocks.some((row) => row.blocksSales !== false);
+    if (blocks) {
+      blockers.push(
+        `A temporary unlock guaranteed for ${names} expired with the overdue payments still unpaid. You cannot create another contract until that customer clears their arrears.`
+      );
+    } else {
+      warnings.push(
+        `A temporary unlock for ${names} ended with the overdue payments still unpaid. Follow up this customer: new contracts are allowed for now, but an administrator can switch the block back on.`
+      );
+    }
   }
 
   if (!customer) {
@@ -429,8 +437,11 @@ export async function evaluateContractSubmissionGuardrails(input: {
           select: { outstandingBalance: true },
         })
       : Promise.resolve([]),
+    // Switchable by an admin on the Temporary Unlocks page.
     isSellingAgentRole(agentRole) && agentId
-      ? getAgentDefaultedTemporaryUnlocks(agentId)
+      ? Promise.all([defaultedUnlockBlocksSales(), getAgentDefaultedTemporaryUnlocks(agentId)]).then(([on, rows]) =>
+          rows.map((row) => ({ ...row, blocksSales: on })),
+        )
       : Promise.resolve([]),
     isSellingAgentRole(agentRole) && agentId
       ? getSupervisionBlockers(agentId, agentRole)
@@ -462,6 +473,7 @@ export async function evaluateContractSubmissionGuardrails(input: {
     defaultedTemporaryUnlocks: defaultedUnlocks.map((row) => ({
       contractNumber: row.contractNumber,
       customerName: row.customerName,
+      blocksSales: row.blocksSales,
     })),
     supervisionBlockers,
   });

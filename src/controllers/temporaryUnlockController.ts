@@ -9,6 +9,7 @@ import {
   TEMPORARY_UNLOCK_STATUS,
   DEFAULT_MAX_TEMPORARY_UNLOCK_WEEKS,
   computeExpiry,
+  defaultedUnlockBlocksSales,
 } from '../services/temporaryUnlockService';
 import { evaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { sendSMS } from '../services/notificationService';
@@ -80,6 +81,12 @@ async function getSupervisedAgentIds(clusterAgentId: string): Promise<string[]> 
   return rows.map((row: { agentId: string }) => row.agentId);
 }
 
+/** A window that has run out with the customer still behind: defaulted, or approved and past its end but not yet swept. */
+function isExpiredUnpaid(row: any): boolean {
+  if (row.status === TEMPORARY_UNLOCK_STATUS.DEFAULTED) return true;
+  return row.status === TEMPORARY_UNLOCK_STATUS.APPROVED && !!row.expiresAt && new Date(row.expiresAt).getTime() <= Date.now();
+}
+
 function serialize(row: any) {
   return {
     id: row.id,
@@ -108,6 +115,10 @@ function serialize(row: any) {
     reviewedAt: row.reviewedAt,
     reviewNote: row.reviewNote,
     resolvedAt: row.resolvedAt,
+    extensionCount: row.extensionCount ?? 0,
+    lastExtendedAt: row.lastExtendedAt ?? null,
+    // Ran out unpaid — an approver may reopen it.
+    canExtend: isExpiredUnpaid(row),
     createdAt: row.createdAt,
     daysRemaining:
       row.status === TEMPORARY_UNLOCK_STATUS.APPROVED && row.expiresAt
@@ -328,6 +339,75 @@ export async function createTemporaryUnlockRequest(req: AuthenticatedRequest, re
   }
 }
 
+/**
+ * Open the phone for a window that has just been granted (approved or
+ * extended): cancel any lock still queued for it, re-evaluate, and read the
+ * device back so the approver is told plainly if the phone did not open.
+ */
+async function openPhoneForWindow(
+  contractId: string,
+  managedDeviceId: string | null | undefined,
+): Promise<{ action: string | null; success: boolean; warning: string | null }> {
+  // Cancel any lock still sitting in the retry queue for this device, then
+  // let the evaluator recompute — it will see the live override and unlock.
+  if (managedDeviceId) {
+    await prismaAny.managedDeviceCommand.updateMany({
+      where: {
+        managedDeviceId,
+        type: 'LOCK_DEVICE',
+        status: { in: ['QUEUED', 'PENDING', 'FAILED'] },
+      },
+      data: {
+        status: 'CANCELLED',
+        completedAt: new Date(),
+        nextAttemptAt: null,
+        errorMessage: 'Cancelled — temporary unlock granted.',
+      },
+    });
+  }
+
+  let deviceResult: { action: string | null; success: boolean; warning: string | null } = {
+    action: null,
+    success: false,
+    warning: null,
+  };
+  try {
+    const evaluation: any = await evaluateManagedDeviceForContract(contractId);
+    deviceResult = {
+      action: evaluation?.actionType ?? evaluation?.action ?? null,
+      success: Boolean(evaluation?.actionSuccess ?? evaluation?.success ?? evaluation?.actionDryRun),
+      warning: null,
+    };
+
+    // An approval that cannot reach the handset is worse than a rejection:
+    // the cluster agent tells the customer their phone is open, and it is
+    // not. Read the device back and say so plainly rather than letting
+    // "it will open on the next run" stand for a device that will never
+    // receive the command.
+    const device = await prismaAny.managedDevice.findUnique({
+      where: { contractId: contractId },
+      select: { actualState: true, enrollmentStatus: true, isActive: true },
+    });
+    if (!device || !device.isActive) {
+      deviceResult.warning =
+        'This contract has no active managed device, so nothing was sent to the handset.';
+    } else if (!['PENDING', 'APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(device.enrollmentStatus)) {
+      deviceResult.warning = `The device is ${device.enrollmentStatus} in Knox and cannot accept an unlock. It must be re-enrolled before the phone will open.`;
+    } else if (!deviceResult.success && device.actualState === 'LOCKED') {
+      deviceResult.warning =
+        'The unlock command did not succeed. The phone is still locked — the scheduler will retry, but check the device before telling the customer.';
+    }
+  } catch (error: any) {
+    console.error('Temporary unlock approved but device evaluation failed:', error?.message);
+    deviceResult = {
+      action: null,
+      success: false,
+      warning: `The unlock could not be sent (${error?.message || 'unknown error'}). The approval stands and the scheduler will retry.`,
+    };
+  }
+  return deviceResult;
+}
+
 // POST /temporary-unlocks/:id/approve
 export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
@@ -427,63 +507,7 @@ export async function approveTemporaryUnlockRequest(req: AuthenticatedRequest, r
       include: LIST_INCLUDE,
     });
 
-    // Cancel any lock still sitting in the retry queue for this device, then
-    // let the evaluator recompute — it will see the live override and unlock.
-    if (request.contract.managedDevice?.id) {
-      await prismaAny.managedDeviceCommand.updateMany({
-        where: {
-          managedDeviceId: request.contract.managedDevice.id,
-          type: 'LOCK_DEVICE',
-          status: { in: ['QUEUED', 'PENDING', 'FAILED'] },
-        },
-        data: {
-          status: 'CANCELLED',
-          completedAt: new Date(),
-          nextAttemptAt: null,
-          errorMessage: 'Cancelled — temporary unlock approved.',
-        },
-      });
-    }
-
-    let deviceResult: { action: string | null; success: boolean; warning: string | null } = {
-      action: null,
-      success: false,
-      warning: null,
-    };
-    try {
-      const evaluation: any = await evaluateManagedDeviceForContract(request.contractId);
-      deviceResult = {
-        action: evaluation?.actionType ?? evaluation?.action ?? null,
-        success: Boolean(evaluation?.actionSuccess ?? evaluation?.success ?? evaluation?.actionDryRun),
-        warning: null,
-      };
-
-      // An approval that cannot reach the handset is worse than a rejection:
-      // the cluster agent tells the customer their phone is open, and it is
-      // not. Read the device back and say so plainly rather than letting
-      // "it will open on the next run" stand for a device that will never
-      // receive the command.
-      const device = await prismaAny.managedDevice.findUnique({
-        where: { contractId: request.contractId },
-        select: { actualState: true, enrollmentStatus: true, isActive: true },
-      });
-      if (!device || !device.isActive) {
-        deviceResult.warning =
-          'This contract has no active managed device, so nothing was sent to the handset.';
-      } else if (!['PENDING', 'APPROVED', 'APPROVAL_QUEUED', 'ACTIVE'].includes(device.enrollmentStatus)) {
-        deviceResult.warning = `The device is ${device.enrollmentStatus} in Knox and cannot accept an unlock. It must be re-enrolled before the phone will open.`;
-      } else if (!deviceResult.success && device.actualState === 'LOCKED') {
-        deviceResult.warning =
-          'The unlock command did not succeed. The phone is still locked — the scheduler will retry, but check the device before telling the customer.';
-      }
-    } catch (error: any) {
-      console.error('Temporary unlock approved but device evaluation failed:', error?.message);
-      deviceResult = {
-        action: null,
-        success: false,
-        warning: `The unlock could not be sent (${error?.message || 'unknown error'}). The approval stands and the scheduler will retry.`,
-      };
-    }
+    const deviceResult = await openPhoneForWindow(request.contractId, request.contract.managedDevice?.id);
     notifyPayTrigger(request.contractId, 'TEMP_UNLOCK_APPROVED');
 
     await notifyRequester(updated, 'APPROVED', deviceResult.warning);
@@ -892,5 +916,271 @@ export async function revokeTemporaryUnlockRequest(req: AuthenticatedRequest, re
   } catch (error) {
     console.error('Revoke temporary unlock error:', error);
     res.status(500).json({ error: 'Failed to end the window' });
+  }
+}
+
+// ─── Settings shown on the Temporary Unlocks page ────────────────────────────
+
+/** GET /temporary-unlocks/settings — what the page needs to explain the rules. */
+export async function getTemporaryUnlockSettings(_req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const settings = await prismaAny.knoxGuardSettings.findFirst({
+      select: { temporaryUnlockMaxWeeks: true, temporaryUnlockDefaultBlocksSales: true },
+    });
+    res.json({
+      maxWeeks: settings?.temporaryUnlockMaxWeeks ?? DEFAULT_MAX_TEMPORARY_UNLOCK_WEEKS,
+      defaultBlocksSales: settings?.temporaryUnlockDefaultBlocksSales ?? true,
+    });
+  } catch (error) {
+    console.error('Get temporary unlock settings error:', error);
+    res.status(500).json({ error: 'Failed to load temporary unlock settings' });
+  }
+}
+
+/**
+ * PUT /temporary-unlocks/settings — switch the rule that stops an agent
+ * selling while a customer whose unlock ran out unpaid still owes.
+ */
+export async function updateTemporaryUnlockSettings(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const value = req.body?.defaultBlocksSales;
+    if (typeof value !== 'boolean') {
+      res.status(400).json({ error: 'defaultBlocksSales must be true or false' });
+      return;
+    }
+    let settings = await prismaAny.knoxGuardSettings.findFirst();
+    if (!settings) settings = await prismaAny.knoxGuardSettings.create({ data: { id: 'singleton' } });
+    const before = settings.temporaryUnlockDefaultBlocksSales;
+    const updated = await prismaAny.knoxGuardSettings.update({
+      where: { id: settings.id },
+      data: { temporaryUnlockDefaultBlocksSales: value },
+    });
+    await createAuditLog({
+      userId: (req.user as AdminUserPayload).id,
+      action: 'UPDATE_TEMPORARY_UNLOCK_SETTINGS',
+      entity: 'KnoxGuardSettings',
+      entityId: updated.id,
+      oldValues: { defaultBlocksSales: before },
+      newValues: { defaultBlocksSales: value },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({
+      maxWeeks: updated.temporaryUnlockMaxWeeks ?? DEFAULT_MAX_TEMPORARY_UNLOCK_WEEKS,
+      defaultBlocksSales: updated.temporaryUnlockDefaultBlocksSales,
+    });
+  } catch (error) {
+    console.error('Update temporary unlock settings error:', error);
+    res.status(500).json({ error: 'Failed to update temporary unlock settings' });
+  }
+}
+
+// ─── Extending a window that ran out unpaid ──────────────────────────────────
+
+/**
+ * POST /temporary-unlocks/:id/extend — reopen a window that has run out with
+ * the customer still behind. The phone opens again for the weeks granted,
+ * the sales block on the selling agent lifts (the request is no longer
+ * defaulted), and when the new window ends the usual check runs again.
+ */
+export async function extendTemporaryUnlockRequest(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const caller = getCaller(req);
+    const { id } = req.params;
+    const { weeks: rawWeeks, note } = req.body ?? {};
+
+    if (typeof note !== 'string' || note.trim().length < 5) {
+      res.status(400).json({ error: 'Give a reason for extending (at least 5 characters)' });
+      return;
+    }
+    const request = await prismaAny.temporaryUnlockRequest.findUnique({
+      where: { id },
+      include: {
+        contract: {
+          include: {
+            installments: true,
+            customer: { select: { firstName: true, lastName: true } },
+            managedDevice: { select: { id: true } },
+          },
+        },
+      },
+    });
+    if (!request) {
+      res.status(404).json({ error: 'Request not found' });
+      return;
+    }
+    if (!isExpiredUnpaid(request)) {
+      res.status(400).json({ error: 'Only a temporary unlock that has run out unpaid can be extended' });
+      return;
+    }
+    if (request.contract?.status !== 'ACTIVE') {
+      res.status(400).json({ error: 'The contract is no longer active' });
+      return;
+    }
+
+    const maxWeeks = await getMaxWeeks();
+    const weeks = Number(rawWeeks);
+    if (!Number.isInteger(weeks) || weeks < 1 || weeks > maxWeeks) {
+      res.status(400).json({ error: `Extend by a whole number of weeks between 1 and ${maxWeeks}` });
+      return;
+    }
+
+    const arrears = computeOverdue(request.contract);
+    if (arrears.overdueAmount <= 0) {
+      res.status(400).json({
+        error: 'This customer has cleared their overdue payments, so there is nothing to extend. The agent is released automatically.',
+      });
+      return;
+    }
+
+    // One window per contract at a time.
+    const other = await prismaAny.temporaryUnlockRequest.findFirst({
+      where: {
+        contractId: request.contractId,
+        id: { not: id },
+        OR: [
+          { status: TEMPORARY_UNLOCK_STATUS.PENDING },
+          { status: TEMPORARY_UNLOCK_STATUS.APPROVED, expiresAt: { gt: new Date() } },
+        ],
+      },
+      select: { status: true },
+    });
+    if (other) {
+      res.status(400).json({
+        error: other.status === TEMPORARY_UNLOCK_STATUS.PENDING
+          ? 'Another request for this contract is awaiting approval — decide that one instead'
+          : 'This contract already has a live unlock window',
+      });
+      return;
+    }
+
+    const previous = { status: request.status, expiresAt: request.expiresAt, approvedWeeks: request.approvedWeeks };
+    const expiresAt = computeExpiry(weeks);
+    const updated = await prismaAny.temporaryUnlockRequest.update({
+      where: { id },
+      data: {
+        status: TEMPORARY_UNLOCK_STATUS.APPROVED,
+        approvedWeeks: weeks,
+        expiresAt,
+        arrearsAtApproval: arrears.overdueAmount,
+        resolvedAt: null,
+        reviewedById: caller.id,
+        reviewedAt: new Date(),
+        reviewNote: note.trim(),
+        extensionCount: { increment: 1 },
+        lastExtendedAt: new Date(),
+      },
+      include: LIST_INCLUDE,
+    });
+
+    const deviceResult = await openPhoneForWindow(request.contractId, request.contract.managedDevice?.id);
+    notifyPayTrigger(request.contractId, 'TEMP_UNLOCK_APPROVED');
+    await notifyOfExtension(updated, deviceResult.warning);
+
+    await createAuditLog({
+      userId: caller.id,
+      action: 'EXTEND_TEMPORARY_UNLOCK',
+      entity: 'TemporaryUnlockRequest',
+      entityId: id,
+      oldValues: previous,
+      newValues: {
+        contractNumber: request.contract.contractNumber,
+        weeks,
+        expiresAt,
+        arrearsAtExtension: arrears.overdueAmount,
+        extensionCount: updated.extensionCount,
+        note: note.trim(),
+        deviceAction: deviceResult.action,
+      },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    res.json({ request: serialize(updated), device: deviceResult });
+  } catch (error) {
+    console.error('Extend temporary unlock error:', error);
+    res.status(500).json({ error: 'Failed to extend the temporary unlock' });
+  }
+}
+
+/** Tells the cluster leader who vouched, and the selling agent, that the window was reopened. */
+async function notifyOfExtension(request: any, warning: string | null): Promise<void> {
+  try {
+    const people = await prismaAny.adminUser.findMany({
+      where: { id: { in: [...new Set([request.requestedById, request.agentId])] } },
+      select: { phone: true },
+    });
+    const customer = request.contract?.customer
+      ? `${request.contract.customer.firstName} ${request.contract.customer.lastName}`.trim()
+      : 'the customer';
+    const message =
+      `AIDOO TECH: The temporary unlock for ${customer} (${request.contract?.contractNumber ?? ''}) has been EXTENDED by ` +
+      `${request.approvedWeeks} week(s), until ${new Date(request.expiresAt).toLocaleDateString()}.` +
+      `${warning ? ' NOTE: ' + warning : ' The phone has been opened.'} The overdue amount must be cleared by then or the phone relocks.`;
+    for (const person of people) {
+      if (person.phone) await sendSMS({ to: person.phone, message });
+    }
+  } catch (error) {
+    console.error('Failed to send temporary unlock extension SMS:', error);
+  }
+}
+
+// ─── Customers still owing after an unlock ───────────────────────────────────
+
+/**
+ * GET /temporary-unlocks/owing — customers whose unlock ran out unpaid and who
+ * still owe, for the caller's dashboard: an agent sees their own customers, a
+ * cluster leader their agents' and their own, an approver everyone's.
+ */
+export async function getOwingAfterUnlock(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const caller = getCaller(req);
+    const seeAll = callerCan(req, PERMISSIONS.APPROVE_TEMPORARY_UNLOCK);
+    let agentIds: string[] | null = null;
+    if (!seeAll) {
+      agentIds = [caller.id];
+      if (caller.role === 'CLUSTER_AGENT') agentIds.push(...(await getSupervisedAgentIds(caller.id)));
+    }
+    const rows = await prismaAny.temporaryUnlockRequest.findMany({
+      where: {
+        status: TEMPORARY_UNLOCK_STATUS.DEFAULTED,
+        ...(agentIds ? { agentId: { in: agentIds } } : {}),
+      },
+      include: {
+        contract: {
+          select: {
+            id: true,
+            contractNumber: true,
+            status: true,
+            installments: { select: { dueDate: true, amount: true, paidAmount: true, status: true } },
+            customer: { select: { firstName: true, lastName: true, phone: true } },
+          },
+        },
+        agent: { select: { firstName: true, lastName: true, phone: true } },
+      },
+      orderBy: { resolvedAt: 'asc' },
+      take: 200,
+    });
+    const items = rows
+      .map((row: any) => ({
+        id: row.id,
+        contractId: row.contractId,
+        contractNumber: row.contract?.contractNumber ?? '',
+        customerName: row.contract?.customer ? `${row.contract.customer.firstName} ${row.contract.customer.lastName}`.trim() : '',
+        customerPhone: row.contract?.customer?.phone ?? null,
+        agentId: row.agentId,
+        agentName: row.agent ? `${row.agent.firstName} ${row.agent.lastName}`.trim() : '',
+        agentPhone: row.agent?.phone ?? null,
+        isOwn: row.agentId === caller.id,
+        overdueNow: row.contract?.status === 'ACTIVE' ? computeOverdue(row.contract).overdueAmount : 0,
+        endedAt: row.resolvedAt ?? row.expiresAt,
+        daysSinceEnded: row.resolvedAt ? Math.floor((Date.now() - new Date(row.resolvedAt).getTime()) / 86400000) : null,
+      }))
+      // Paid since the last sweep: the hourly release will clear it.
+      .filter((item: any) => item.overdueNow > 0);
+    res.json({ blocksSales: await defaultedUnlockBlocksSales(), items });
+  } catch (error) {
+    console.error('Owing after unlock error:', error);
+    res.status(500).json({ error: 'Failed to load customers still owing after an unlock' });
   }
 }
