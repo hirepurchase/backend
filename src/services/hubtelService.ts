@@ -485,7 +485,11 @@ export async function checkHubtelPaymentStatus(clientReference: string): Promise
 
     return response.data;
   } catch (error: any) {
-    console.error('Hubtel Status Check error:', error.response?.data || error.message);
+    // "Not found" is normal for a payment the customer has not approved yet;
+    // log it quietly rather than as an error on every poll.
+    const notFound = error.response?.status === 404 || String(error.response?.data?.responseCode) === '404';
+    if (notFound) console.log(`Hubtel status: ${clientReference} not found yet`);
+    else console.error('Hubtel Status Check error:', error.response?.data || error.message);
     throw new Error('Failed to check payment status');
   }
 }

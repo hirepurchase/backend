@@ -1049,9 +1049,20 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
       return;
     }
 
-    // Check status with Hubtel if pending
+    // Check status with Hubtel if pending. The status API looks payments up
+    // by OUR ClientReference (transactionRef) — Hubtel's own TransactionId in
+    // that field always came back "payment record not found". A payment the
+    // customer has not approved yet can also be unknown to it for a while:
+    // that is "still pending", not an error, since the app polls every few
+    // seconds. The callback completes the payment either way.
     if (payment.externalRef) {
-      const hubtelStatus = await checkHubtelPaymentStatus(payment.externalRef);
+      let hubtelStatus: any;
+      try {
+        hubtelStatus = await checkHubtelPaymentStatus(payment.transactionRef);
+      } catch {
+        res.json({ transactionRef: payment.transactionRef, status: payment.status, amount: payment.amount });
+        return;
+      }
 
       // Normalize Hubtel status — check both data.status and top-level ResponseCode
       const rawHubtelStatus = String(
