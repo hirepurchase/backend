@@ -1886,23 +1886,40 @@ function ussdRelease(sessionId: string, message: string) {
   };
 }
 
-/**
- * End the session with an item for Hubtel to charge — Hubtel's USSD checkout
- * (the shape of the official Programmable Services SDK: a Release carrying an
- * Item, plus the legacy AddToCart object older gateways still read).
- */
-function ussdCheckout(sessionId: string, message: string, itemName: string, amount: number, itemId: string) {
-  return {
-    SessionId: sessionId,
-    Type: 'Release',
-    Message: message,
-    Label: message,
-    ClientState: '',
-    DataType: 'display',
-    FieldType: 'text',
-    Item: { ItemName: itemName, Qty: 1, Price: amount, ItemId: itemId, ServiceData: {} },
-    AddToCart: { Amount: amount, Description: itemName, ItemId: itemId, ServiceData: {} },
-  };
+/** Seconds between closing the USSD session and sending the Mobile Money prompt. */
+const USSD_PROMPT_DELAY_MS = Number(process.env.USSD_PROMPT_DELAY_MS || '4000');
+
+/** Send the Mobile Money prompt for a USSD payment once the session has closed. */
+async function sendUssdPaymentPrompt(paymentId: string, p: {
+  amount: number; customerName: string; customerEmail?: string; phone: string; network: string; contractNumber: string; transactionRef: string;
+}): Promise<void> {
+  try {
+    const hubtel = await initiateHubtelReceiveMoney({
+      amount: p.amount,
+      customerName: p.customerName,
+      customerPhone: p.phone,
+      customerEmail: p.customerEmail,
+      network: p.network,
+      description: `Hire purchase payment for contract ${p.contractNumber}`,
+      transactionRef: p.transactionRef,
+    });
+    const existing = await prisma.paymentTransaction.findUnique({ where: { id: paymentId }, select: { metadata: true } });
+    await prisma.paymentTransaction.update({
+      where: { id: paymentId },
+      data: {
+        externalRef: hubtel.transactionId,
+        metadata: JSON.stringify({ ...JSON.parse(existing?.metadata || '{}'), hubtelTransactionId: hubtel.transactionId, promptSentAt: new Date().toISOString() }),
+      },
+    });
+  } catch (error: any) {
+    // The customer has already been told to expect a prompt; record why it
+    // did not come so support can see it.
+    await prisma.paymentTransaction.update({
+      where: { id: paymentId },
+      data: { status: 'FAILED', failureReason: `Mobile Money prompt not sent: ${error?.message || 'unknown error'}`.slice(0, 250) },
+    }).catch(() => undefined);
+    throw error;
+  }
 }
 
 function ussdResponse(sessionId: string, message: string, label: string, clientState: string, fieldType = 'text') {
@@ -2098,7 +2115,12 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
       // payment provider as a GHS 245,064,424 charge.
       const contract = await prisma.hirePurchaseContract.findUnique({
         where: { id: contractId },
-        select: { status: true, outstandingBalance: true, penaltyOutstanding: true },
+        select: {
+          status: true,
+          outstandingBalance: true,
+          penaltyOutstanding: true,
+          customer: { select: { firstName: true, lastName: true, email: true } },
+        },
       });
       if (!contract || contract.status !== 'ACTIVE') {
         res.json(ussdRelease(SessionId, 'This contract cannot receive payments. Please contact customer service.'));
@@ -2118,9 +2140,8 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         exists = await prisma.paymentTransaction.findUnique({ where: { transactionRef } });
       }
 
-      // Recorded as pending; the fulfilment callback below finds it by
-      // session and phone and completes it once the customer has paid.
-      await prisma.paymentTransaction.create({
+      // Recorded as pending; Hubtel's payment callback completes it.
+      const payment = await prisma.paymentTransaction.create({
         data: {
           transactionRef,
           contractId,
@@ -2132,26 +2153,34 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
           status: 'PENDING',
           metadata: JSON.stringify({
             initiatedAt: new Date().toISOString(),
-            gateway: 'HUBTEL_USSD_CHECKOUT',
+            gateway: 'HUBTEL_REGULAR',
             channel: 'USSD',
             sessionId: SessionId,
           }),
         },
       });
 
-      // Hand the payment to Hubtel's checkout. Hubtel closes the session and
-      // sends the Mobile Money prompt itself, then calls the fulfilment URL.
-      // Calling Receive Money ourselves here, while the customer was still
-      // inside the USSD session, never produced a payment: the prompt cannot
-      // reach a phone that is mid-session, and a slow call timed the session
-      // out ("service not available").
-      res.json(ussdCheckout(
+      // Close the USSD session first, then ask Hubtel for the Mobile Money
+      // prompt. A prompt cannot reach a phone that is still inside a USSD
+      // session, and waiting on Hubtel before answering timed the session out
+      // ("service not available"). Hubtel's own checkout was tried instead but
+      // never produced a prompt. The prompt goes to the number that dialled,
+      // which may differ from the registered one.
+      res.json(ussdRelease(
         SessionId,
-        `Pay GHS ${paymentAmount.toFixed(2)} for ${contractNumber}. Approve the Mobile Money prompt that follows.`,
-        `Aidoo Tech ${contractNumber}`,
-        paymentAmount,
-        transactionRef,
+        `Payment of GHS ${paymentAmount.toFixed(2)} for ${contractNumber}. You will receive a Mobile Money prompt on ${phone} shortly. Enter your PIN to approve.`,
       ));
+      setTimeout(() => {
+        sendUssdPaymentPrompt(payment.id, {
+          amount: paymentAmount,
+          customerName: contract.customer ? `${contract.customer.firstName} ${contract.customer.lastName}`.trim() : 'Customer',
+          customerEmail: contract.customer?.email || undefined,
+          phone,
+          network,
+          contractNumber,
+          transactionRef,
+        }).catch((err) => console.error('USSD payment prompt failed:', err?.message || err));
+      }, USSD_PROMPT_DELAY_MS).unref?.();
       return;
     }
 

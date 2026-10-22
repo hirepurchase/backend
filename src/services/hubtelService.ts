@@ -54,7 +54,8 @@ export const HUBTEL_AGENT_DEPOSIT_CALLBACK_URL = appendWebhookToken(
 );
 
 // API Endpoints
-const RECEIVE_MONEY_URL = `https://rmp.hubtel.com/merchantaccount/merchants/${HUBTEL_POS_SALES_ID}/receive/mobilemoney`;
+// Overridable only so tests can point it at a local mock.
+const RECEIVE_MONEY_URL = process.env.HUBTEL_RECEIVE_MONEY_URL || `https://rmp.hubtel.com/merchantaccount/merchants/${HUBTEL_POS_SALES_ID}/receive/mobilemoney`;
 const TRANSACTION_STATUS_URL = `https://api-txnstatus.hubtel.com/transactions/${HUBTEL_POS_SALES_ID}/status`;
 const PREAPPROVAL_INITIATE_URL = `https://preapproval.hubtel.com/api/v2/merchant/${HUBTEL_POS_SALES_ID}/preapproval/initiate`;
 const PREAPPROVAL_VERIFY_OTP_URL = `https://preapproval.hubtel.com/api/v2/merchant/${HUBTEL_POS_SALES_ID}/preapproval/verifyotp`;
