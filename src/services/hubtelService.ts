@@ -164,10 +164,7 @@ export async function initiateHubtelReceiveMoney(params: {
 
     console.log('Hubtel API URL:', RECEIVE_MONEY_URL);
     console.log('Hubtel Payload:', JSON.stringify(payload, null, 2));
-    console.log('Hubtel Auth Header:', getAuthHeader().substring(0, 20) + '...');
     console.log('Hubtel POS Sales ID:', HUBTEL_POS_SALES_ID);
-    console.log('Hubtel API Key:', HUBTEL_API_KEY);
-    console.log('Hubtel API Secret:', HUBTEL_API_SECRET?.substring(0, 5) + '...');
     console.log('Hubtel Callback URL:', HUBTEL_PAYMENT_CALLBACK_URL);
 
     console.log('Making POST request to Hubtel...');
@@ -203,7 +200,6 @@ export async function initiateHubtelReceiveMoney(params: {
     console.error('Response headers:', JSON.stringify(error.response?.headers, null, 2));
     console.error('Request URL:', error.config?.url);
     console.error('Request method:', error.config?.method);
-    console.error('Request headers:', JSON.stringify(error.config?.headers, null, 2));
     console.error('=== END HUBTEL SERVICE ERROR ===');
 
     throw new Error(error.response?.data?.Message || error.message || 'Failed to initiate payment');

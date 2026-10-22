@@ -1875,6 +1875,25 @@ function ussdRelease(sessionId: string, message: string) {
   };
 }
 
+/**
+ * End the session with an item for Hubtel to charge — Hubtel's USSD checkout
+ * (the shape of the official Programmable Services SDK: a Release carrying an
+ * Item, plus the legacy AddToCart object older gateways still read).
+ */
+function ussdCheckout(sessionId: string, message: string, itemName: string, amount: number, itemId: string) {
+  return {
+    SessionId: sessionId,
+    Type: 'Release',
+    Message: message,
+    Label: message,
+    ClientState: '',
+    DataType: 'display',
+    FieldType: 'text',
+    Item: { ItemName: itemName, Qty: 1, Price: amount, ItemId: itemId, ServiceData: {} },
+    AddToCart: { Amount: amount, Description: itemName, ItemId: itemId, ServiceData: {} },
+  };
+}
+
 function ussdResponse(sessionId: string, message: string, label: string, clientState: string, fieldType = 'text') {
   return {
     SessionId: sessionId,
@@ -2055,11 +2074,28 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
     // ── Step 3: Customer entered an amount ────────────────────────────────────
     if (Type === 'Response' && ClientState.startsWith('AMOUNT|')) {
       const parts = ClientState.split('|');
-      const [, contractId, network, customerId, customerName, customerEmail, phone, contractNumber] = parts;
+      const [, contractId, network, customerId, , , phone, contractNumber] = parts;
 
-      const paymentAmount = roundMoney(parseFloat(Message));
+      const paymentAmount = roundMoney(parseFloat(String(Message).replace(/,/g, '')));
       if (isNaN(paymentAmount) || paymentAmount <= 0) {
         res.json(ussdRelease(SessionId, 'Invalid amount. Please dial again and enter a valid amount.'));
+        return;
+      }
+
+      // Re-read the contract: the amount must not exceed what is owed. A
+      // phone number typed into the amount field used to go straight to the
+      // payment provider as a GHS 245,064,424 charge.
+      const contract = await prisma.hirePurchaseContract.findUnique({
+        where: { id: contractId },
+        select: { status: true, outstandingBalance: true, penaltyOutstanding: true },
+      });
+      if (!contract || contract.status !== 'ACTIVE') {
+        res.json(ussdRelease(SessionId, 'This contract cannot receive payments. Please contact customer service.'));
+        return;
+      }
+      const ceiling = payableCeiling(contract);
+      if (paymentAmount > ceiling + 0.005) {
+        res.json(ussdRelease(SessionId, `Amount is more than you owe (GHS ${ceiling.toFixed(2)}). Please dial again and enter GHS ${ceiling.toFixed(2)} or less.`));
         return;
       }
 
@@ -2071,7 +2107,8 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         exists = await prisma.paymentTransaction.findUnique({ where: { transactionRef } });
       }
 
-      // Create payment record
+      // Recorded as pending; the fulfilment callback below finds it by
+      // session and phone and completes it once the customer has paid.
       await prisma.paymentTransaction.create({
         data: {
           transactionRef,
@@ -2084,25 +2121,26 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
           status: 'PENDING',
           metadata: JSON.stringify({
             initiatedAt: new Date().toISOString(),
-            gateway: 'HUBTEL_REGULAR',
+            gateway: 'HUBTEL_USSD_CHECKOUT',
             channel: 'USSD',
             sessionId: SessionId,
           }),
         },
       });
 
-      // Trigger Hubtel Receive Money (mobile money USSD prompt)
-      await initiateHubtelReceiveMoney({
-        amount: paymentAmount,
-        customerName,
-        customerPhone: phone,
-        customerEmail: customerEmail || undefined,
-        network,
-        description: `Hire purchase payment for contract ${contractNumber}`,
+      // Hand the payment to Hubtel's checkout. Hubtel closes the session and
+      // sends the Mobile Money prompt itself, then calls the fulfilment URL.
+      // Calling Receive Money ourselves here, while the customer was still
+      // inside the USSD session, never produced a payment: the prompt cannot
+      // reach a phone that is mid-session, and a slow call timed the session
+      // out ("service not available").
+      res.json(ussdCheckout(
+        SessionId,
+        `Pay GHS ${paymentAmount.toFixed(2)} for ${contractNumber}. Approve the Mobile Money prompt that follows.`,
+        `Aidoo Tech ${contractNumber}`,
+        paymentAmount,
         transactionRef,
-      });
-
-      res.json(ussdRelease(SessionId, `Payment of GHS ${paymentAmount.toFixed(2)} initiated. Please approve the prompt on your phone.`));
+      ));
       return;
     }
 
@@ -2139,9 +2177,11 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
 
     if (payment) {
       // Use AmountAfterCharges (net merchant receives) if available, otherwise fall back to the stored payment amount
-      const amountPaid = typeof OrderInfo.Payment.AmountAfterCharges === 'number'
-        ? OrderInfo.Payment.AmountAfterCharges
-        : payment.amount;
+      const amountPaid = typeof OrderInfo.Payment.AmountPaid === 'number'
+        ? OrderInfo.Payment.AmountPaid
+        : typeof OrderInfo.Payment.AmountAfterCharges === 'number'
+          ? OrderInfo.Payment.AmountAfterCharges
+          : payment.amount;
 
       // Update transaction to SUCCESS
       await prisma.paymentTransaction.update({
@@ -2165,7 +2205,7 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
 
     // Always acknowledge fulfillment to Hubtel with 'success' — regardless of whether we found a matching
     // payment record. Hubtel requires a 200 acknowledgment; sending 'failed' causes them to retry indefinitely.
-    await fetch('https://gs-callback.hubtel.com:9055/callback', {
+    await fetch(process.env.HUBTEL_SERVICE_CALLBACK_URL || 'https://gs-callback.hubtel.com:9055/callback', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
