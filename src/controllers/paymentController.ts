@@ -36,6 +36,19 @@ import { safelyEvaluateManagedDeviceForContract } from '../services/deviceContro
 import { settleTemporaryUnlockOnPayment } from '../services/temporaryUnlockService';
 import { notifyPayTrigger } from '../services/payTrigger/events';
 
+/**
+ * What Hubtel's transaction status service says happened to a payment, from
+ * the transaction's own status ("Paid", "Unpaid", "Refunded", ...). Null while
+ * it is undecided. Never from the top-level responseCode, which only reports
+ * whether the lookup itself worked.
+ */
+export function hubtelTransactionOutcome(rawStatus: string): 'SUCCESS' | 'FAILED' | null {
+  const status = String(rawStatus || '').trim().toUpperCase();
+  if (['PAID', 'SUCCESS', 'SUCCESSFUL', 'COMPLETED'].includes(status)) return 'SUCCESS';
+  if (['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED', 'EXPIRED'].includes(status)) return 'FAILED';
+  return null;
+}
+
 function ensureContractCanAcceptPayments(status: string, res: Response): boolean {
   if (status === 'ACTIVE') {
     return true;
@@ -1072,12 +1085,14 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
         hubtelStatus.ResponseCode || hubtelStatus.responseCode || hubtelStatus.data?.ResponseCode || ''
       ).trim();
 
+      void hubtelResponseCode;
+      // Only the transaction's own status decides. The status service's
+      // responseCode "0000" means the lookup worked, not that the customer
+      // paid — reading it as paid credited contracts seconds after the
+      // prompt was sent, before anyone approved it.
       let newStatus = payment.status;
-      if (hubtelResponseCode === '0000' || ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawHubtelStatus)) {
-        newStatus = 'SUCCESS';
-      } else if (hubtelResponseCode === '2001' || ['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawHubtelStatus)) {
-        newStatus = 'FAILED';
-      }
+      const resolved = hubtelTransactionOutcome(rawHubtelStatus);
+      if (resolved) newStatus = resolved;
 
       if (newStatus !== payment.status) {
         await prisma.paymentTransaction.update({
@@ -2319,12 +2334,9 @@ export async function reconcileHubtelPayments(req: AuthenticatedRequest, res: Re
           ''
         ).trim();
 
-        let resolvedStatus: 'SUCCESS' | 'FAILED' | null = null;
-        if (responseCode === '0000' || ['SUCCESS', 'SUCCESSFUL', 'PAID', 'COMPLETED'].includes(rawStatus)) {
-          resolvedStatus = 'SUCCESS';
-        } else if (responseCode === '2001' || ['FAILED', 'FAIL', 'REJECTED', 'DECLINED', 'CANCELLED'].includes(rawStatus)) {
-          resolvedStatus = 'FAILED';
-        }
+        void responseCode;
+        // As in checkHubtelStatus: the transaction status alone decides.
+        const resolvedStatus = hubtelTransactionOutcome(rawStatus);
 
         if (!resolvedStatus) {
           results.push({
