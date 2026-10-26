@@ -877,7 +877,18 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
       return;
     }
 
-    res.json(contract);
+    // Same figures the contract list gives, so a payment screen opened on a
+    // single contract can offer exactly what is owed, late charges included.
+    const penaltyOutstanding = Math.round(
+      contract.penalties
+        .filter((row) => row.isPaid === OWED_PENALTY_WHERE.isPaid && row.isWaived === OWED_PENALTY_WHERE.isWaived)
+        .reduce((sum, row) => sum + (row.amount - row.paidAmount), 0) * 100
+    ) / 100;
+    res.json({
+      ...contract,
+      penaltyOutstanding,
+      totalDue: Math.round((contract.outstandingBalance + penaltyOutstanding) * 100) / 100,
+    });
   } catch (error) {
     console.error('Get contract error:', error);
     res.status(500).json({ error: 'Failed to fetch contract' });
