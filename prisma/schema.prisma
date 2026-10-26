@@ -188,6 +188,16 @@ model Customer {
   photoUrl            String?               // Customer passport photo
   guarantorName       String?
   guarantorPhone      String?
+  // Name the network has on record for each number (Hubtel), checked at
+  // registration. Status: MATCHED, PARTIAL, MISMATCH, NOT_REGISTERED, UNAVAILABLE.
+  phoneVerificationStatus     String?
+  phoneRegisteredName         String?
+  phoneNameScore              Int?
+  phoneVerifiedAt             DateTime?
+  guarantorVerificationStatus String?
+  guarantorRegisteredName     String?
+  guarantorNameScore          Int?
+  guarantorVerifiedAt         DateTime?
   isActivated         Boolean               @default(false)
   activatedAt         DateTime?
   createdById         String

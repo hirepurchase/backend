@@ -73,6 +73,11 @@ type CustomerContractContext = {
 
 type CustomerContext = {
   phone: string;
+  phoneVerificationStatus?: string | null;
+  phoneRegisteredName?: string | null;
+  guarantorPhone?: string | null;
+  guarantorVerificationStatus?: string | null;
+  guarantorRegisteredName?: string | null;
   contracts: CustomerContractContext[];
 };
 
@@ -93,6 +98,10 @@ function safeJsonParse(value?: string | null): Record<string, unknown> | null {
   }
 }
 
+// A number registered to someone else, or to no one, is the commonest sign
+// of a borrowed identity, so those reviews go to the top of the queue.
+const PHONE_IDENTITY_FLAGS = ['PHONE_NAME_MISMATCH', 'PHONE_NOT_REGISTERED', 'GUARANTOR_NAME_MISMATCH', 'GUARANTOR_NOT_REGISTERED'];
+
 function uniqueItems(values: string[]): string[] {
   return Array.from(new Set(values));
 }
@@ -102,7 +111,8 @@ function getPriorityFromFlags(riskFlags: string[], blockers: string[]): Approval
     blockers.length > 0 ||
     riskFlags.includes('DEFAULT_HISTORY') ||
     riskFlags.includes('HIGH_FINANCE_AMOUNT') ||
-    riskFlags.includes('REVISION_LOOP')
+    riskFlags.includes('REVISION_LOOP') ||
+    riskFlags.some((flag) => PHONE_IDENTITY_FLAGS.includes(flag))
   ) {
     return 'HIGH';
   }
@@ -123,7 +133,7 @@ function getRiskScore(riskFlags: string[], blockers: string[]): number {
   let score = blockers.length * 30;
 
   for (const flag of riskFlags) {
-    if (['DEFAULT_HISTORY', 'HIGH_FINANCE_AMOUNT', 'REVISION_LOOP'].includes(flag)) {
+    if (['DEFAULT_HISTORY', 'HIGH_FINANCE_AMOUNT', 'REVISION_LOOP', ...PHONE_IDENTITY_FLAGS].includes(flag)) {
       score += 20;
       continue;
     }
@@ -178,6 +188,27 @@ function getHistoryNote(action: string, newValues: Record<string, unknown> | nul
     return `Assigned to ${newValues.assignedApproverName}`;
   }
 
+  return null;
+}
+
+function describePhoneCheck(
+  party: 'customer' | 'guarantor',
+  status: string | null | undefined,
+  registeredName: string | null | undefined,
+): { flag: string; message: string } | null {
+  const who = party === 'customer' ? "The customer's" : "The guarantor's";
+  if (status === 'MISMATCH') {
+    return { flag: 'PARTY_NAME_MISMATCH', message: `${who} number is registered to ${registeredName}, a different name. Confirm who owns it before approving.` };
+  }
+  if (status === 'PARTIAL') {
+    return { flag: 'PARTY_NAME_PARTIAL', message: `${who} number is registered to ${registeredName}, which only partly matches.` };
+  }
+  if (status === 'NOT_REGISTERED') {
+    return { flag: 'PARTY_NOT_REGISTERED', message: `${who} number is not registered to anyone on the mobile network.` };
+  }
+  if (status === 'UNAVAILABLE') {
+    return { flag: 'PARTY_NOT_VERIFIED', message: `${who} number could not be checked against the network. Use the Re-check button on the customer page.` };
+  }
   return null;
 }
 
@@ -312,6 +343,21 @@ function assessContractContext(input: {
       warnings.push('The selected mobile money number does not match the customer phone number.');
     }
 
+    // Set when the customer was registered or their numbers changed. Customers
+    // registered before the check have none and raise nothing.
+    const phoneWarning = describePhoneCheck('customer', customer.phoneVerificationStatus, customer.phoneRegisteredName);
+    if (phoneWarning) {
+      riskFlags.push(phoneWarning.flag.replace('PARTY', 'PHONE'));
+      warnings.push(phoneWarning.message);
+    }
+    if (customer.guarantorPhone) {
+      const guarantorWarning = describePhoneCheck('guarantor', customer.guarantorVerificationStatus, customer.guarantorRegisteredName);
+      if (guarantorWarning) {
+        riskFlags.push(guarantorWarning.flag.replace('PARTY', 'GUARANTOR'));
+        warnings.push(guarantorWarning.message);
+      }
+    }
+
     const openContracts = relatedContracts.filter((contract) => OPEN_CONTRACT_STATUSES.includes(contract.status));
     const defaultedContracts = relatedContracts.filter((contract) => contract.status === 'DEFAULTED');
     const sameProductContracts = inventoryProductId
@@ -416,6 +462,11 @@ export async function evaluateContractSubmissionGuardrails(input: {
       where: { id: customerId },
       select: {
         phone: true,
+        phoneVerificationStatus: true,
+        phoneRegisteredName: true,
+        guarantorPhone: true,
+        guarantorVerificationStatus: true,
+        guarantorRegisteredName: true,
         contracts: {
           include: {
             inventoryItem: {
@@ -619,6 +670,11 @@ export async function buildApprovalSnapshots(
       select: {
         id_uuid: true,
         phone: true,
+        phoneVerificationStatus: true,
+        phoneRegisteredName: true,
+        guarantorPhone: true,
+        guarantorVerificationStatus: true,
+        guarantorRegisteredName: true,
         contracts: {
           include: {
             inventoryItem: {

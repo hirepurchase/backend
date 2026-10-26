@@ -10,6 +10,7 @@ import { uploadToSupabase, deleteFromSupabase, ImageCompressionOptions } from '.
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { resolveCustomerScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
 import { OWED_PENALTY_WHERE } from '../services/penaltyService';
+import { verifyPhoneName, phoneVerificationMode } from '../services/phoneVerificationService';
 
 const CUSTOMER_PHOTO_COMPRESSION: ImageCompressionOptions = {
   maxWidth: 800,
@@ -35,6 +36,166 @@ async function rehashDefaultPasswordOnPhoneChange(
   }
   const stillOnDefaultPassword = await bcrypt.compare(currentPhone, currentPasswordHash);
   return stillOnDefaultPassword ? bcrypt.hash(newPhone, 12) : null;
+}
+
+type PhoneCheckFields = {
+  phoneVerificationStatus?: string | null;
+  phoneRegisteredName?: string | null;
+  phoneNameScore?: number | null;
+  phoneVerifiedAt?: Date | null;
+  guarantorVerificationStatus?: string | null;
+  guarantorRegisteredName?: string | null;
+  guarantorNameScore?: number | null;
+  guarantorVerifiedAt?: Date | null;
+};
+
+/**
+ * Checks the customer's and/or guarantor's number against the name the
+ * network holds. Pass only the parties to check. Returns the fields to save,
+ * or the reason to refuse: a number no one is registered to (enforce mode),
+ * or a guarantor using the customer's own number.
+ */
+async function checkPhones(input: {
+  customer?: { phone: string; name: string };
+  guarantor?: { phone: string; name: string };
+  customerPhone: string;
+}): Promise<{ error?: string; fields: PhoneCheckFields }> {
+  const fields: PhoneCheckFields = {};
+  if (input.guarantor && sanitizePhoneNumber(input.guarantor.phone) === input.customerPhone) {
+    return { error: "The guarantor's phone number cannot be the customer's own number.", fields };
+  }
+  const mode = phoneVerificationMode();
+  if (mode === 'off') return { fields };
+
+  const [customer, guarantor] = await Promise.all([
+    input.customer ? verifyPhoneName(input.customer.phone, input.customer.name) : null,
+    input.guarantor ? verifyPhoneName(input.guarantor.phone, input.guarantor.name) : null,
+  ]);
+  if (mode === 'enforce') {
+    if (customer?.status === 'NOT_REGISTERED') {
+      return { error: `${input.customer!.phone} is not registered to anyone on the mobile network. Check the customer's number.`, fields };
+    }
+    if (guarantor?.status === 'NOT_REGISTERED') {
+      return { error: `${input.guarantor!.phone} is not registered to anyone on the mobile network. Check the guarantor's number.`, fields };
+    }
+  }
+  if (customer) {
+    Object.assign(fields, {
+      phoneVerificationStatus: customer.status,
+      phoneRegisteredName: customer.registeredName,
+      phoneNameScore: customer.score,
+      phoneVerifiedAt: customer.checkedAt,
+    });
+  }
+  if (guarantor) {
+    Object.assign(fields, {
+      guarantorVerificationStatus: guarantor.status,
+      guarantorRegisteredName: guarantor.registeredName,
+      guarantorNameScore: guarantor.score,
+      guarantorVerifiedAt: guarantor.checkedAt,
+    });
+  }
+  return { fields };
+}
+
+const CLEARED_GUARANTOR_CHECK: PhoneCheckFields = {
+  guarantorVerificationStatus: null,
+  guarantorRegisteredName: null,
+  guarantorNameScore: null,
+  guarantorVerifiedAt: null,
+};
+
+function phoneCheckSummary(customer: PhoneCheckFields) {
+  return {
+    phoneVerificationStatus: customer.phoneVerificationStatus ?? null,
+    phoneRegisteredName: customer.phoneRegisteredName ?? null,
+    phoneNameScore: customer.phoneNameScore ?? null,
+    phoneVerifiedAt: customer.phoneVerifiedAt ?? null,
+    guarantorVerificationStatus: customer.guarantorVerificationStatus ?? null,
+    guarantorRegisteredName: customer.guarantorRegisteredName ?? null,
+    guarantorNameScore: customer.guarantorNameScore ?? null,
+    guarantorVerifiedAt: customer.guarantorVerifiedAt ?? null,
+  };
+}
+
+/**
+ * The registration form calls this as staff type a number, so they see the
+ * registered name before saving. Nothing is stored.
+ */
+export async function previewPhoneVerification(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const phone = sanitizePhoneNumber(String(req.body?.phone || ''));
+    const name = String(req.body?.name || '').trim();
+    if (!validatePhoneNumber(phone)) {
+      res.status(400).json({ error: 'Invalid phone number format' });
+      return;
+    }
+    if (phoneVerificationMode() === 'off') {
+      res.json({ status: 'UNAVAILABLE', registeredName: null, score: null, reason: 'Phone verification is switched off', mode: 'off' });
+      return;
+    }
+    const result = await verifyPhoneName(phone, name);
+    res.json({ ...result, mode: phoneVerificationMode() });
+  } catch (error) {
+    console.error('Phone verification preview error:', error);
+    res.status(500).json({ error: 'Failed to check phone number' });
+  }
+}
+
+/** Re-checks a saved customer's numbers, e.g. one registered before checks existed. */
+export async function reverifyCustomerPhones(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const { id } = req.params;
+    const customer = await prisma.customer.findUnique({ where: { id } });
+    if (!customer) {
+      res.status(404).json({ error: 'Customer not found' });
+      return;
+    }
+    if (!(await canViewAnyCustomer(req.user as AdminUserPayload, customer.createdById))) {
+      res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+    if (phoneVerificationMode() === 'off') {
+      res.status(400).json({ error: 'Phone verification is switched off' });
+      return;
+    }
+    // Saved customers are only flagged, never refused, so an unregistered
+    // number shows up as such rather than blocking the check.
+    const [own, guarantor] = await Promise.all([
+      verifyPhoneName(customer.phone, `${customer.firstName} ${customer.lastName}`),
+      customer.guarantorPhone && customer.guarantorName
+        ? verifyPhoneName(customer.guarantorPhone, customer.guarantorName)
+        : null,
+    ]);
+    const fields: PhoneCheckFields = {
+      phoneVerificationStatus: own.status,
+      phoneRegisteredName: own.registeredName,
+      phoneNameScore: own.score,
+      phoneVerifiedAt: own.checkedAt,
+      ...(guarantor
+        ? {
+            guarantorVerificationStatus: guarantor.status,
+            guarantorRegisteredName: guarantor.registeredName,
+            guarantorNameScore: guarantor.score,
+            guarantorVerifiedAt: guarantor.checkedAt,
+          }
+        : CLEARED_GUARANTOR_CHECK),
+    };
+    const updated = await prisma.customer.update({ where: { id: customer.id }, data: fields });
+    await createAuditLog({
+      userId: req.user!.id,
+      action: 'VERIFY_CUSTOMER_PHONES',
+      entity: 'Customer',
+      entityId: customer.id,
+      newValues: phoneCheckSummary(fields),
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+    res.json({ ...phoneCheckSummary(updated), reasons: { customer: own.reason, guarantor: guarantor?.reason } });
+  } catch (error) {
+    console.error('Re-verify customer phones error:', error);
+    res.status(500).json({ error: 'Failed to check phone numbers' });
+  }
 }
 
 async function canViewAnyCustomer(adminUser: AdminUserPayload | undefined, customerCreatedById: string | null | undefined): Promise<boolean> {
@@ -87,6 +248,28 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
       }
     }
 
+    const trimmedGuarantorName = guarantorName ? String(guarantorName).trim() : '';
+    const trimmedGuarantorPhone = guarantorPhone ? String(guarantorPhone).trim() : '';
+    if (trimmedGuarantorPhone && !validatePhoneNumber(trimmedGuarantorPhone)) {
+      res.status(400).json({ error: 'Invalid guarantor phone number format' });
+      return;
+    }
+    if (trimmedGuarantorPhone && !trimmedGuarantorName) {
+      res.status(400).json({ error: "Enter the guarantor's name, so their number can be checked against it" });
+      return;
+    }
+    const phoneCheck = await checkPhones({
+      customerPhone: normalizedPhone,
+      customer: { phone: normalizedPhone, name: `${firstName} ${lastName}` },
+      guarantor: trimmedGuarantorPhone
+        ? { phone: sanitizePhoneNumber(trimmedGuarantorPhone), name: trimmedGuarantorName }
+        : undefined,
+    });
+    if (phoneCheck.error) {
+      res.status(400).json({ error: phoneCheck.error });
+      return;
+    }
+
     // Generate unique membership ID
     let membershipId = generateMembershipId();
 
@@ -129,8 +312,9 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
         nationalId,
         dateOfBirth: dateOfBirth ? new Date(dateOfBirth) : null,
         photoUrl,
-        guarantorName: guarantorName ? String(guarantorName).trim() : null,
-        guarantorPhone: guarantorPhone ? String(guarantorPhone).trim() : null,
+        guarantorName: trimmedGuarantorName || null,
+        guarantorPhone: trimmedGuarantorPhone ? sanitizePhoneNumber(trimmedGuarantorPhone) : null,
+        ...phoneCheck.fields,
         createdById: req.user!.id,
       },
     });
@@ -140,7 +324,7 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
       action: 'CREATE_CUSTOMER',
       entity: 'Customer',
       entityId: customer.id,
-      newValues: { membershipId, firstName, lastName, phone, email },
+      newValues: { membershipId, firstName, lastName, phone, email, ...phoneCheckSummary(phoneCheck.fields) },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
@@ -171,6 +355,7 @@ export async function createCustomer(req: AuthenticatedRequest, res: Response): 
       photoUrl: customer.photoUrl,
       guarantorName: customer.guarantorName,
       guarantorPhone: customer.guarantorPhone,
+      ...phoneCheckSummary(customer),
       isActivated: customer.isActivated,
       createdAt: customer.createdAt,
     });
@@ -439,7 +624,50 @@ export async function updateCustomer(req: AuthenticatedRequest, res: Response): 
       updateData.dateOfBirth = dateOfBirth ? new Date(dateOfBirth) : null;
     }
     if (guarantorName !== undefined) updateData.guarantorName = guarantorName ? String(guarantorName).trim() : null;
-    if (guarantorPhone !== undefined) updateData.guarantorPhone = guarantorPhone ? String(guarantorPhone).trim() : null;
+    if (guarantorPhone !== undefined) {
+      const trimmed = guarantorPhone ? String(guarantorPhone).trim() : '';
+      if (trimmed && !validatePhoneNumber(trimmed)) {
+        res.status(400).json({ error: 'Invalid guarantor phone number format' });
+        return;
+      }
+      updateData.guarantorPhone = trimmed ? sanitizePhoneNumber(trimmed) : null;
+    }
+
+    // Re-check a party only when their number or name actually changed, so
+    // resaving an untouched form costs no Hubtel query.
+    const next = {
+      phone: (updateData.phone as string | undefined) ?? existingCustomer.phone,
+      firstName: (updateData.firstName as string | undefined) ?? existingCustomer.firstName,
+      lastName: (updateData.lastName as string | undefined) ?? existingCustomer.lastName,
+      guarantorName: (updateData.guarantorName as string | null | undefined) !== undefined ? (updateData.guarantorName as string | null) : existingCustomer.guarantorName,
+      guarantorPhone: (updateData.guarantorPhone as string | null | undefined) !== undefined ? (updateData.guarantorPhone as string | null) : existingCustomer.guarantorPhone,
+    };
+    const customerChanged =
+      next.phone !== existingCustomer.phone ||
+      next.firstName !== existingCustomer.firstName ||
+      next.lastName !== existingCustomer.lastName;
+    const guarantorChanged =
+      next.guarantorPhone !== existingCustomer.guarantorPhone ||
+      next.guarantorName !== existingCustomer.guarantorName;
+    if (next.guarantorPhone && next.guarantorPhone === next.phone) {
+      res.status(400).json({ error: "The guarantor's phone number cannot be the customer's own number." });
+      return;
+    }
+    if (customerChanged || guarantorChanged) {
+      const phoneCheck = await checkPhones({
+        customerPhone: next.phone,
+        customer: customerChanged ? { phone: next.phone, name: `${next.firstName} ${next.lastName}` } : undefined,
+        guarantor: guarantorChanged && next.guarantorPhone
+          ? { phone: next.guarantorPhone, name: next.guarantorName || '' }
+          : undefined,
+      });
+      if (phoneCheck.error) {
+        res.status(400).json({ error: phoneCheck.error });
+        return;
+      }
+      Object.assign(updateData, phoneCheck.fields);
+      if (guarantorChanged && !next.guarantorPhone) Object.assign(updateData, CLEARED_GUARANTOR_CHECK);
+    }
 
     // Handle photo upload if file is provided
     if (req.file) {
@@ -921,6 +1149,7 @@ export async function getCustomerStatement(req: AuthenticatedRequest, res: Respo
         photoUrl: customer.photoUrl,
         guarantorName: customer.guarantorName,
         guarantorPhone: customer.guarantorPhone,
+        ...phoneCheckSummary(customer),
         isActivated: customer.isActivated,
         activatedAt: customer.activatedAt,
         createdAt: customer.createdAt,

@@ -13,6 +13,8 @@ import {
   getCustomerUpcomingInstallments,
   getCustomerStatement,
   resetCustomerAccount,
+  previewPhoneVerification,
+  reverifyCustomerPhones,
 } from '../controllers/customerController';
 import { getCustomerContracts, getContractById } from '../controllers/contractController';
 import { downloadContractStatement } from '../controllers/statementController';
@@ -39,12 +41,14 @@ router.post('/profile/change-password', authenticateCustomer, changeCustomerPass
 
 // Admin routes for customer management
 router.post('/', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CUSTOMER), customerUpload, createCustomer);
+router.post('/verify-phone', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CUSTOMER, PERMISSIONS.UPDATE_CUSTOMER), previewPhoneVerification);
 router.get('/', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getAllCustomers);
 router.get('/membership/:membershipId', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getCustomerByMembershipId);
 router.get('/:id/statement', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getCustomerStatement);
 router.get('/:id', authenticateAdmin, requireAnyPermission(...CUSTOMER_ACCESS_PERMISSIONS), getCustomerById);
 router.put('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CUSTOMER), customerUpload, updateCustomer);
 router.delete('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.DELETE_CUSTOMER), deleteCustomer);
+router.post('/:id/verify-phones', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CUSTOMER), reverifyCustomerPhones);
 router.post('/:id/reset-account', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CUSTOMER), resetCustomerAccount);
 
 export default router;

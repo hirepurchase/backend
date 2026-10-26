@@ -277,6 +277,12 @@ export async function getPendingApprovals(req: AuthenticatedRequest, res: Respon
             photoUrl: true,
             guarantorName: true,
             guarantorPhone: true,
+            phoneVerificationStatus: true,
+            phoneRegisteredName: true,
+            phoneNameScore: true,
+            guarantorVerificationStatus: true,
+            guarantorRegisteredName: true,
+            guarantorNameScore: true,
           },
         },
         inventoryItem: {
