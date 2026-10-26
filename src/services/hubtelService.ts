@@ -63,6 +63,11 @@ const PREAPPROVAL_STATUS_URL = `https://preapproval.hubtel.com/api/v2/merchant/$
 const PREAPPROVAL_CANCEL_URL = `https://preapproval.hubtel.com/api/v2/merchant/${HUBTEL_POS_SALES_ID}/preapproval`;
 const PREAPPROVAL_REACTIVATE_URL = `https://preapproval.hubtel.com/api/v2/merchant/${HUBTEL_POS_SALES_ID}/preapproval/reactivate`;
 
+// The callback URLs carry the webhook token; keep it out of the logs.
+function maskToken(text: string): string {
+  return text.replace(/([?&]token=)[^&"\s]+/g, '$1***');
+}
+
 // Helper to create Basic Auth header
 function getAuthHeader(): string {
   const credentials = Buffer.from(`${HUBTEL_API_KEY}:${HUBTEL_API_SECRET}`).toString('base64');
@@ -164,9 +169,9 @@ export async function initiateHubtelReceiveMoney(params: {
     };
 
     console.log('Hubtel API URL:', RECEIVE_MONEY_URL);
-    console.log('Hubtel Payload:', JSON.stringify(payload, null, 2));
+    console.log('Hubtel Payload:', maskToken(JSON.stringify(payload, null, 2)));
     console.log('Hubtel POS Sales ID:', HUBTEL_POS_SALES_ID);
-    console.log('Hubtel Callback URL:', HUBTEL_PAYMENT_CALLBACK_URL);
+    console.log('Hubtel Callback URL:', maskToken(HUBTEL_PAYMENT_CALLBACK_URL));
 
     console.log('Making POST request to Hubtel...');
 
