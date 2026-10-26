@@ -1949,7 +1949,13 @@ function ussdResponse(sessionId: string, message: string, label: string, clientS
   };
 }
 
-async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: string, network: string) {
+type UssdPayer = 'SELF' | 'OTHER';
+
+/**
+ * The balance menu for the customer being paid for, or — when there is
+ * nothing to pay — the reason, worded for whoever is paying.
+ */
+async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: string, network: string, payer: UssdPayer) {
   const contract = await prisma.hirePurchaseContract.findFirst({
     where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
     include: {
@@ -1961,10 +1967,10 @@ async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: 
   });
 
   if (!contract) {
-    return ussdRelease(sessionId, 'You have no active hire purchase contract.');
+    return { missing: payer === 'SELF' ? 'You have no active hire purchase contract.' : 'That customer has no active hire purchase contract.' };
   }
   if (contract.installments.length === 0) {
-    return ussdRelease(sessionId, 'You have no outstanding payments.');
+    return { missing: payer === 'SELF' ? 'You have no outstanding payments.' : 'That customer has no outstanding payments.' };
   }
 
   const now = new Date();
@@ -1982,6 +1988,7 @@ async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: 
     customerEmail: customer.email || '',
     phone: paymentPhone, // dialing number — used for Hubtel payment prompt
     network,
+    payer,
   });
 
   const formattedDueDate = new Date(next.dueDate).toLocaleDateString('en-GB', {
@@ -1990,23 +1997,39 @@ async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: 
   const overdueWarning = overdueInstallments.length > 0
     ? `Overdue: ${overdueInstallments.length} PMT(s)\n`
     : '';
+  // Someone paying for another person sees whose account it is, so a
+  // mistyped number is noticed before any money moves.
+  const greeting = payer === 'SELF'
+    ? `Hi ${customer.firstName}, (${contract.contractNumber})\n`
+    : `For: ${customer.firstName} ${String(customer.lastName || '').charAt(0)}. (${contract.contractNumber})\n`;
 
   const message =
     `AIDOO TECH\n` +
-    `Hi ${customer.firstName}, (${contract.contractNumber})\n` +
+    greeting +
     overdueWarning +
     `Bal: GHS ${contract.outstandingBalance.toFixed(2)}\n` +
     `Due: GHS ${totalDueAmount.toFixed(2)} (${contract.installments.length})\n` +
     `Next: GHS ${(next.amount - next.paidAmount).toFixed(2)}, ${formattedDueDate}\n` +
     `1. Pay  0. Cancel`;
 
-  return ussdResponse(sessionId, message, 'Aidoo Tech Hire Purchase', state);
+  return { response: ussdResponse(sessionId, message, 'Aidoo Tech Hire Purchase', state) };
+}
+
+function askForOtherNumber(sessionId: string, dialingPhone: string, network: string) {
+  return ussdResponse(sessionId, "Enter the customer's registered phone number:", 'Pay For Others', `OTHER|${dialingPhone}|${network}`, 'phone');
 }
 
 // POST /payments/ussd/session  — Hubtel Service Interaction URL
+//
+//   Dial → 1. Pay for self   → balance → amount → Mobile Money prompt
+//          2. Pay for others → their number → balance → amount → prompt
+// "Pay for self" from a number with nothing to pay offers "pay for others"
+// instead. The prompt always goes to the number that dialled.
 export async function handleUssdSession(req: Request, res: Response): Promise<void> {
   try {
-    const { Type, Mobile, SessionId, Message, Operator, ClientState } = req.body;
+    const { Type, Mobile, SessionId, Message, Operator } = req.body;
+    const ClientState: string = req.body.ClientState || '';
+    const choice = String(Message ?? '').trim();
 
     // Handle session timeout
     if (Type === 'Timeout') {
@@ -2014,88 +2037,96 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
       return;
     }
 
-    // ── Step 1: Initiation ────────────────────────────────────────────────────
+    // ── Step 1: Initiation — pay for self or for others ──────────────────────
     if (Type === 'Initiation') {
       const dialingPhone = sanitizePhoneNumber(Mobile);
       const networkMap: Record<string, string> = {
         mtn: 'MTN', vodafone: 'VODAFONE', telecel: 'VODAFONE', tigo: 'AIRTELTIGO', airtel: 'AIRTELTIGO',
       };
       const network = networkMap[Operator?.toLowerCase()] || 'MTN';
-
-      const customer = await prisma.customer.findFirst({
-        where: { phone: dialingPhone },
-      });
-
-      // Unregistered dialing number — offer alternative lookup
-      if (!customer) {
-        const unregState = `UNREGISTERED|${dialingPhone}|${network}`;
-        res.json(ussdResponse(
-          SessionId,
-          `AIDOO TECH\nNumber not found.\n1. Enter registered number\n0. Cancel`,
-          'Number Not Found',
-          unregState,
-        ));
-        return;
-      }
-
-      if (!customer.isActivated) {
-        res.json(ussdRelease(SessionId, 'Your account is not active. Please contact us.'));
-        return;
-      }
-
-      res.json(await buildBalanceMenu(SessionId, customer, dialingPhone, network));
+      res.json(ussdResponse(
+        SessionId,
+        `AIDOO TECH\n1. Pay for self\n2. Pay for others\n0. Cancel`,
+        'Aidoo Tech Hire Purchase',
+        `MENU|${dialingPhone}|${network}`,
+      ));
       return;
     }
 
-    // ── Step 2a: Unregistered number — chose 1 (enter registered phone) or 0 ──
-    if (Type === 'Response' && ClientState.startsWith('UNREGISTERED|')) {
-      if (Message === '0') {
+    // ── Step 2: Chose self (1), others (2) or cancel (0) ─────────────────────
+    if (Type === 'Response' && ClientState.startsWith('MENU|')) {
+      const [, dialingPhone, network] = ClientState.split('|');
+      if (choice === '0') {
         res.json(ussdRelease(SessionId, 'Thank you. Goodbye.'));
         return;
       }
-      if (Message !== '1') {
+      if (choice === '2') {
+        res.json(askForOtherNumber(SessionId, dialingPhone, network));
+        return;
+      }
+      if (choice !== '1') {
         res.json(ussdRelease(SessionId, 'Invalid option. Please dial again.'));
         return;
       }
-      const parts = ClientState.split('|');
-      const [, dialingPhone, network] = parts;
-      const verifyState = `VERIFY|${dialingPhone}|${network}`;
-      res.json(ussdResponse(SessionId, 'Enter your registered phone number:', 'Verify Identity', verifyState, 'phone'));
+
+      const customer = await prisma.customer.findFirst({ where: { phone: dialingPhone } });
+      const menu = customer ? await buildBalanceMenu(SessionId, customer, dialingPhone, network, 'SELF') : null;
+      if (menu && 'response' in menu) {
+        res.json(menu.response);
+        return;
+      }
+      // Nothing to pay on this number: perhaps they are paying for a relative.
+      const reason = menu?.missing || 'This number is not registered.';
+      res.json(ussdResponse(
+        SessionId,
+        `AIDOO TECH\n${reason}\n1. Pay for others\n0. Cancel`,
+        'Nothing To Pay',
+        `NOSELF|${dialingPhone}|${network}`,
+      ));
       return;
     }
 
-    // ── Step 2b: Verify registered phone number ───────────────────────────────
-    if (Type === 'Response' && ClientState.startsWith('VERIFY|')) {
-      const parts = ClientState.split('|');
-      const [, dialingPhone, network] = parts;
+    // ── Step 2a: Nothing to pay for self — pay for others (1) or cancel (0) ──
+    // UNREGISTERED is the same menu from before this flow; it can still
+    // arrive from a session open during a deploy.
+    if (Type === 'Response' && (ClientState.startsWith('NOSELF|') || ClientState.startsWith('UNREGISTERED|'))) {
+      const [, dialingPhone, network] = ClientState.split('|');
+      if (choice === '0') {
+        res.json(ussdRelease(SessionId, 'Thank you. Goodbye.'));
+        return;
+      }
+      if (choice !== '1') {
+        res.json(ussdRelease(SessionId, 'Invalid option. Please dial again.'));
+        return;
+      }
+      res.json(askForOtherNumber(SessionId, dialingPhone, network));
+      return;
+    }
 
-      const enteredPhone = sanitizePhoneNumber(Message);
-      const customer = await prisma.customer.findFirst({
-        where: { phone: enteredPhone },
-      });
-
+    // ── Step 2b: Pay for others — the customer's registered number ───────────
+    if (Type === 'Response' && (ClientState.startsWith('OTHER|') || ClientState.startsWith('VERIFY|'))) {
+      const [, dialingPhone, network] = ClientState.split('|');
+      const enteredPhone = sanitizePhoneNumber(choice);
+      const customer = validatePhoneNumber(enteredPhone)
+        ? await prisma.customer.findFirst({ where: { phone: enteredPhone } })
+        : null;
       if (!customer) {
-        res.json(ussdRelease(SessionId, 'Number not recognised. Please dial again.'));
+        res.json(ussdRelease(SessionId, 'Number not recognised. Please check the number and dial again.'));
         return;
       }
-      if (!customer.isActivated) {
-        res.json(ussdRelease(SessionId, 'Your account is not active. Please contact us.'));
-        return;
-      }
-
-      // Verified — proceed using the DIALING number for payment prompt
-      res.json(await buildBalanceMenu(SessionId, customer, dialingPhone, network));
+      const menu = await buildBalanceMenu(SessionId, customer, dialingPhone, network, 'OTHER');
+      res.json('response' in menu ? menu.response : ussdRelease(SessionId, menu.missing));
       return;
     }
 
-    // ── Step 3: Customer chose 1 (Pay) or 0 (Cancel) ─────────────────────────
-    if (Type === 'Response' && !ClientState.startsWith('AMOUNT|') && !ClientState.startsWith('UNREGISTERED|') && !ClientState.startsWith('VERIFY|')) {
-      if (Message === '0') {
+    // ── Step 3: Balance shown — chose 1 (Pay) or 0 (Cancel) ──────────────────
+    if (Type === 'Response' && ClientState.startsWith('{')) {
+      if (choice === '0') {
         res.json(ussdRelease(SessionId, 'Thank you. Goodbye.'));
         return;
       }
 
-      if (Message !== '1') {
+      if (choice !== '1') {
         res.json(ussdRelease(SessionId, 'Invalid option. Please try again.'));
         return;
       }
@@ -2108,7 +2139,7 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         return;
       }
 
-      const nextState = `AMOUNT|${state.contractId}|${state.network}|${state.customerId}|${state.customerName}|${state.customerEmail}|${state.phone}|${state.contractNumber}`;
+      const nextState = `AMOUNT|${state.contractId}|${state.network}|${state.customerId}|${state.customerName}|${state.customerEmail}|${state.phone}|${state.contractNumber}|${state.payer || 'SELF'}`;
 
       res.json(ussdResponse(SessionId, 'Enter amount to pay (GHS):', 'Payment Amount', nextState, 'decimal'));
       return;
@@ -2117,9 +2148,9 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
     // ── Step 3: Customer entered an amount ────────────────────────────────────
     if (Type === 'Response' && ClientState.startsWith('AMOUNT|')) {
       const parts = ClientState.split('|');
-      const [, contractId, network, customerId, , , phone, contractNumber] = parts;
+      const [, contractId, network, customerId, , , phone, contractNumber, payer = 'SELF'] = parts;
 
-      const paymentAmount = roundMoney(parseFloat(String(Message).replace(/,/g, '')));
+      const paymentAmount = roundMoney(parseFloat(choice.replace(/,/g, '')));
       if (isNaN(paymentAmount) || paymentAmount <= 0) {
         res.json(ussdRelease(SessionId, 'Invalid amount. Please dial again and enter a valid amount.'));
         return;
@@ -2171,6 +2202,9 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
             gateway: 'HUBTEL_REGULAR',
             channel: 'USSD',
             sessionId: SessionId,
+            // OTHER: someone paid from their own number for this customer.
+            paidFor: payer === 'OTHER' ? 'OTHER' : 'SELF',
+            payerPhone: phone,
           }),
         },
       });
