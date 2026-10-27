@@ -133,6 +133,42 @@ async function main() {
     assert.match(r.message, /Already enrolled/);
   });
 
+  console.log('Phone deleted from inventory and added again');
+  const ghostImei = imei();
+  const { randomUUID } = await import('crypto');
+  await prisma.payTriggerDevice.create({ data: { inventoryItemId: randomUUID(), imei: ghostImei, enrollmentStatus: 'FAILED', lastError: 'Our server IP is not on the PayTrigger whitelist.' } });
+  const readded = await prisma.inventoryItem.create({ data: { productId: product.id, serialNumber: ghostImei, status: 'AVAILABLE' } });
+  await check('the old record moves to the new item and enrolment goes through', async () => {
+    const [r] = await admin.enrolItems([readded.id], 'tester');
+    assert.ok(r.ok, r.message);
+    const rows = await prisma.payTriggerDevice.findMany({ where: { imei: ghostImei } });
+    assert.strictEqual(rows.length, 1);
+    assert.deepStrictEqual([rows[0].inventoryItemId, rows[0].orderRef, rows[0].enrollmentStatus, rows[0].lastError], [readded.id, readded.id, 'QUEUED', null]);
+  });
+
+  const corrected = await stock();
+  const correctedImei = corrected.serialNumber;
+  await prisma.payTriggerDevice.create({ data: { inventoryItemId: corrected.id, imei: correctedImei, enrollmentStatus: 'FAILED' } });
+  await prisma.inventoryItem.update({ where: { id: corrected.id }, data: { serialNumber: imei() } });
+  const rightful = await prisma.inventoryItem.create({ data: { productId: product.id, serialNumber: correctedImei, status: 'AVAILABLE' } });
+  await check('an item whose IMEI was corrected leaves its record to the phone that has that IMEI', async () => {
+    const [r] = await admin.enrolItems([rightful.id], 'tester');
+    assert.ok(r.ok, r.message);
+    assert.strictEqual((await prisma.payTriggerDevice.findUniqueOrThrow({ where: { imei: correctedImei } })).inventoryItemId, rightful.id);
+  });
+
+  const activeImei = imei();
+  const oldOrder = randomUUID();
+  await prisma.payTriggerDevice.create({ data: { inventoryItemId: oldOrder, imei: activeImei, orderRef: oldOrder, enrollmentStatus: 'ACTIVE' } });
+  const readdedActive = await prisma.inventoryItem.create({ data: { productId: product.id, serialNumber: activeImei, status: 'AVAILABLE' } });
+  await check('an already-active phone re-added is attached, not re-enrolled, and keeps its PayTrigger order number', async () => {
+    const [r] = await admin.enrolItems([readdedActive.id], 'tester');
+    assert.ok(!r.ok);
+    assert.match(r.message, /Already active/);
+    const d = await prisma.payTriggerDevice.findUniqueOrThrow({ where: { imei: activeImei } });
+    assert.deepStrictEqual([d.inventoryItemId, d.orderRef, d.enrollmentStatus], [readdedActive.id, oldOrder, 'ACTIVE']);
+  });
+
   console.log('Verify');
   await check('verify on a pre-enrolled phone → waiting for activation', async () => {
     const v = await admin.verifyDevice((await deviceOf(a.id)).id, 'tester');

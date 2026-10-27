@@ -192,7 +192,46 @@ export async function enrolItems(inventoryItemIds: string[], actorId: string) {
   const existing = new Map(
     (await prisma.payTriggerDevice.findMany({ where: { inventoryItemId: { in: items.map((i) => i.id) } } })).map((d) => [d.inventoryItemId, d]),
   );
+
+  // A phone deleted from inventory and added again keeps its PayTrigger
+  // record under the old item, and the IMEI is unique, so saving a record
+  // for the new item failed. Move such a record to the new item. If the old
+  // item still exists, the same IMEI is in stock twice: refuse that one.
+  const duplicateImei = new Set<string>();
+  const strays = await prisma.payTriggerDevice.findMany({
+    where: { imei: { in: items.map((i) => i.serialNumber) }, inventoryItemId: { notIn: items.map((i) => i.id) } },
+  });
+  if (strays.length) {
+    // Only an old item that still carries this IMEI is a real duplicate; one
+    // deleted, or whose IMEI was since corrected, has simply left a stray record.
+    const stillInStock = new Map(
+      (await prisma.inventoryItem.findMany({ where: { id: { in: strays.map((d) => d.inventoryItemId) } }, select: { id: true, serialNumber: true } })).map((i) => [i.id, i.serialNumber]),
+    );
+    for (const stray of strays) {
+      const item = items.find((i) => i.serialNumber === stray.imei);
+      if (!item || existing.has(item.id)) continue;
+      if (stillInStock.get(stray.inventoryItemId) === stray.imei) {
+        duplicateImei.add(item.id);
+        continue;
+      }
+      const moved = await prisma.payTriggerDevice.update({
+        where: { id: stray.id },
+        data: {
+          inventoryItemId: item.id,
+          contractId: item.contractId,
+          // PayTrigger knows an enrolled phone by the order number it was sent with.
+          ...(['ACTIVE', 'UNENFORCEABLE', 'REMOVED'].includes(stray.enrollmentStatus) ? {} : { orderRef: item.id }),
+        },
+      });
+      existing.set(item.id, moved);
+    }
+  }
+
   const eligible = items.filter((item) => {
+    if (duplicateImei.has(item.id)) {
+      results.push({ inventoryItemId: item.id, imei: item.serialNumber, ok: false, message: 'Another inventory item already has this IMEI. Remove the duplicate first.' });
+      return false;
+    }
     const current = existing.get(item.id);
     if (current && ['ACTIVE', 'UNENFORCEABLE', 'REMOVED'].includes(current.enrollmentStatus)) {
       results.push({ inventoryItemId: item.id, imei: item.serialNumber, ok: false, message: 'Already active on PayTrigger — use Verify instead.' });
