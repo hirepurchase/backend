@@ -142,11 +142,11 @@ export async function computeIndicators(month: string, opts: { depositRemitDays:
   });
 }
 
-type Lead = (agentId: string, at: Date) => string | null;
-type Add = (leaderId: string | null, key: IndicatorKey, sum: number, count?: number, extra?: Record<string, number>) => void;
+export type Lead = (agentId: string, at: Date) => string | null;
+export type Add = (leaderId: string | null, key: IndicatorKey, sum: number, count?: number, extra?: Record<string, number>) => void;
 
 /** COLLECTIONS and ARREARS_RECOVERED: successful payments dated in the month. */
-async function measurePayments(range: MonthRange, agentIds: string[], lead: Lead, add: Add) {
+export async function measurePayments(range: MonthRange, agentIds: string[], lead: Lead, add: Add) {
   const payments = await prisma.paymentTransaction.findMany({
     where: {
       status: 'SUCCESS',
@@ -182,7 +182,7 @@ async function measurePayments(range: MonthRange, agentIds: string[], lead: Lead
 }
 
 /** COLLECTION_RATE: instalment value due in the month against what has been paid of it. */
-async function measureCollectionRate(range: MonthRange, asOf: Date, agentIds: string[], lead: Lead, add: Add) {
+export async function measureCollectionRate(range: MonthRange, asOf: Date, agentIds: string[], lead: Lead, add: Add) {
   const due = await prisma.installmentSchedule.findMany({
     where: {
       dueDate: { gte: range.from, lt: range.to < asOf ? range.to : asOf },
@@ -197,7 +197,7 @@ async function measureCollectionRate(range: MonthRange, asOf: Date, agentIds: st
 }
 
 /** NEW_CONTRACTS and ACTIVE_AGENTS: sales approved in the month. */
-async function measureSales(range: MonthRange, agentIds: string[], lead: Lead, add: Add) {
+export async function measureSales(range: MonthRange, agentIds: string[], lead: Lead, add: Add) {
   const sales = await prisma.hirePurchaseContract.findMany({
     where: { createdById: { in: agentIds }, approvedAt: { gte: range.from, lt: range.to }, status: { not: 'CANCELLED' } },
     select: { createdById: true, approvedAt: true },
@@ -210,7 +210,7 @@ async function measureSales(range: MonthRange, agentIds: string[], lead: Lead, a
 }
 
 /** QUALITY_CONTRACTS: sales approved two months earlier that are still healthy. */
-async function measureQualitySales(range: MonthRange, asOf: Date, agentIds: string[], lead: Lead, add: Add) {
+export async function measureQualitySales(range: MonthRange, asOf: Date, agentIds: string[], lead: Lead, add: Add) {
   const from = new Date(range.from.getFullYear(), range.from.getMonth() - 2, 1);
   const to = new Date(range.from.getFullYear(), range.from.getMonth() - 1, 1);
   const sales = await prisma.hirePurchaseContract.findMany({
@@ -233,7 +233,7 @@ async function measureQualitySales(range: MonthRange, asOf: Date, agentIds: stri
 }
 
 /** DEPOSIT_REMITTANCE: deposits raised in the month, fully paid within the allowed days. */
-async function measureDeposits(range: MonthRange, agentIds: string[], lead: Lead, add: Add, allowedDays: number) {
+export async function measureDeposits(range: MonthRange, agentIds: string[], lead: Lead, add: Add, allowedDays: number) {
   const entries = await prisma.agentDepositLedger.findMany({
     where: { agentId: { in: agentIds }, createdAt: { gte: range.from, lt: range.to }, status: { not: 'CANCELLED' }, amountDueCompany: { gt: 0 } },
     select: { agentId: true, createdAt: true, status: true, payments: { where: { status: 'SUCCESS' }, select: { paidAt: true } } },
@@ -246,7 +246,7 @@ async function measureDeposits(range: MonthRange, agentIds: string[], lead: Lead
 }
 
 /** WRITE_OFFS: balance written off in the month. */
-async function measureWriteOffs(range: MonthRange, agentIds: string[], lead: Lead, add: Add) {
+export async function measureWriteOffs(range: MonthRange, agentIds: string[], lead: Lead, add: Add) {
   const rows = await prisma.hirePurchaseContract.findMany({
     where: { createdById: { in: agentIds }, writtenOffAt: { gte: range.from, lt: range.to } },
     select: { createdById: true, writtenOffAt: true, outstandingBalance: true },
@@ -280,7 +280,7 @@ async function measureUnlocks(range: MonthRange, leaderIds: string[], add: Add) 
 }
 
 /** FOLLOW_UP_CALLS: collection and follow-up calls the leader logged. */
-async function measureCalls(range: MonthRange, leaderIds: string[], add: Add) {
+export async function measureCalls(range: MonthRange, leaderIds: string[], add: Add) {
   if (!leaderIds.length) return;
   const rows = await prisma.contactAttempt.groupBy({
     by: ['officerId'],

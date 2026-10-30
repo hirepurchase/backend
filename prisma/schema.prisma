@@ -1070,3 +1070,20 @@ model AgentCompletionCommission {
   @@index([agentId, status])
   @@index([status])
 }
+
+// ============= KPI TARGETS =============
+//
+// Monthly targets for the KPI pages (agents, cluster teams, customer service).
+// The figures themselves are calculated live from contracts, payments and
+// call logs; only the target an administrator sets is stored. No relations to
+// existing models.
+model KpiTarget {
+  id          String   @id @default(uuid())
+  group       String // AGENT | TEAM | CSO
+  key         String
+  target      Float
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+
+  @@unique([group, key])
+}
