@@ -11,6 +11,37 @@ import {
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { isSellingAgentRole } from '../constants/roles';
 import { payTriggerInfoForItems } from '../services/payTrigger/admin';
+import { checkCanReceiveStock, StockBlock, StockGateError, stockGateBody } from '../services/kpi/stockGate';
+
+/**
+ * An agent below their sales or quality target last month is not given new
+ * devices; an administrator may assign anyway with a reason. `ok` is false
+ * when it has already answered the request.
+ */
+async function passesStockGate(req: AuthenticatedRequest, res: Response, agentId: string): Promise<{ ok: boolean; override: StockBlock | null }> {
+  try {
+    const override = await checkCanReceiveStock(agentId, req.user as AdminUserPayload, req.body?.overrideReason);
+    return { ok: true, override };
+  } catch (err) {
+    if (err instanceof StockGateError) {
+      res.status(err.status).json(stockGateBody(err));
+      return { ok: false, override: null };
+    }
+    throw err;
+  }
+}
+
+async function auditStockGateOverride(req: AuthenticatedRequest, itemId: string, agentId: string, block: StockBlock) {
+  await createAuditLog({
+    userId: req.user!.id,
+    action: 'STOCK_GATE_OVERRIDE',
+    entity: 'InventoryItem',
+    entityId: itemId,
+    newValues: { agentId, month: block.month, reasons: block.reasons, overrideReason: String(req.body?.overrideReason || '').trim() },
+    ipAddress: req.ip,
+    userAgent: req.headers['user-agent'],
+  });
+}
 
 const KNOX_UPLOAD_POLL_ATTEMPTS = 5;
 const KNOX_UPLOAD_POLL_DELAY_MS = 2000;
@@ -583,6 +614,13 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
       }
     }
 
+    let gateOverride: StockBlock | null = null;
+    if (assignedAgentId) {
+      const gate = await passesStockGate(req, res, assignedAgentId);
+      if (!gate.ok) return;
+      gateOverride = gate.override;
+    }
+
     const inventoryItem = await prisma.inventoryItem.create({
       data: {
         productId,
@@ -607,6 +645,7 @@ export async function addInventoryItem(req: AuthenticatedRequest, res: Response)
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+    if (gateOverride) await auditStockGateOverride(req, inventoryItem.id, assignedAgentId, gateOverride);
 
     // Mark PENDING then upload — failure is recorded, not thrown
     await prisma.inventoryItem.update({
@@ -842,6 +881,14 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
           ? assignedAgentId
           : existingItem.assignedAgentId;
 
+    // Only a move to a new agent is gated; editing a device the agent already holds is not.
+    let gateOverride: StockBlock | null = null;
+    if (newAssignedAgentId && newAssignedAgentId !== existingItem.assignedAgentId) {
+      const gate = await passesStockGate(req, res, newAssignedAgentId);
+      if (!gate.ok) return;
+      gateOverride = gate.override;
+    }
+
     const updatedItem = await prisma.inventoryItem.update({
       where: { id },
       data: {
@@ -875,6 +922,7 @@ export async function updateInventoryItem(req: AuthenticatedRequest, res: Respon
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
+    if (gateOverride && newAssignedAgentId) await auditStockGateOverride(req, updatedItem.id, newAssignedAgentId, gateOverride);
 
     res.status(200).json(updatedItem);
   } catch (error) {

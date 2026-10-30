@@ -17,6 +17,8 @@ import {
   teamCards,
   validateTarget,
 } from '../services/kpi';
+import prisma from '../config/database';
+import { canOverrideStockGate, getStockGate } from '../services/kpi/stockGate';
 
 /**
  * KPI pages, mounted at /api/kpi.
@@ -27,6 +29,8 @@ import {
  *   GET /people   everyone in a group, ranked — administrators (VIEW_REPORTS),
  *                 and a cluster leader for their own agents.
  *   GET|PUT /targets  the monthly targets (MANAGE_SETTINGS to change).
+ *   GET /stock-gate   which agents may not be given devices this month, for
+ *                 the inventory screens (MANAGE_INVENTORY or EDIT_INVENTORY).
  */
 
 const user = (req: AuthenticatedRequest) => req.user as AdminUserPayload;
@@ -135,5 +139,21 @@ export async function putKpiTargets(req: AuthenticatedRequest, res: Response) {
     res.json({ definitions: KPI_DEFINITIONS, targets, canSetTargets: true });
   } catch (err) {
     fail(res, err);
+  }
+}
+
+export async function getStockGateStatus(req: AuthenticatedRequest, res: Response) {
+  try {
+    const u = user(req);
+    if (u.role !== 'SUPER_ADMIN' && !hasAnyPermission(u.permissions, [PERMISSIONS.MANAGE_INVENTORY, PERMISSIONS.EDIT_INVENTORY])) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    const agents = await prisma.adminUser.findMany({ where: { isActive: true, role: { name: { in: KPI_SELLER_ROLES } } }, select: { id: true } });
+    const gate = await getStockGate(agents.map((a) => a.id));
+    const blocked: Record<string, { reasons: string[] }> = {};
+    for (const [id, b] of gate.blocks) if (b.blocked) blocked[id] = { reasons: b.reasons };
+    res.json({ month: gate.month, active: gate.active, canOverride: canOverrideStockGate(u.role), blocked });
+  } catch (err) {
+    fail(res, err, 500);
   }
 }

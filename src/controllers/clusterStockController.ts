@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
+import { canOverrideStockGate, checkCanReceiveStock, getStockGate, StockBlock, StockGateError, stockGateBody } from '../services/kpi/stockGate';
 
 const prismaAny = prisma as any;
 
@@ -66,8 +67,13 @@ export async function getClusterStock(req: AuthenticatedRequest, res: Response):
       counts.set(row.assignedAgentId, entry);
     }
 
+    // Who was below target last month, so a leader can see whose stock to move
+    // and who cannot receive more. Fails open: no rule, no badges.
+    const gate = await getStockGate(holders.map((h: any) => h.id));
+
     const agents = holders.map((holder: any) => {
       const held = counts.get(holder.id) ?? { inStock: 0, sold: 0 };
+      const block = gate.blocks.get(holder.id);
       return {
         id: holder.id,
         name: `${holder.firstName} ${holder.lastName}`.trim(),
@@ -79,6 +85,7 @@ export async function getClusterStock(req: AuthenticatedRequest, res: Response):
         isSelf: holder.id === admin.id,
         inStock: held.inStock,
         sold: held.sold,
+        stockBlock: block ? { blocked: block.blocked, reasons: block.reasons, exempt: block.exempt } : null,
       };
     });
 
@@ -109,6 +116,7 @@ export async function getClusterStock(req: AuthenticatedRequest, res: Response):
       pool,
       // Everything, or only this caller's cluster.
       scope: agentIds === null ? 'all' : 'cluster',
+      stockGate: { month: gate.month, active: gate.active, canOverride: canOverrideStockGate(admin.role) },
     });
   } catch (error) {
     console.error('getClusterStock error:', error);
@@ -242,6 +250,20 @@ export async function transferClusterStock(req: AuthenticatedRequest, res: Respo
       return;
     }
 
+    // An agent below their sales or quality target last month gets no new
+    // devices. Taking stock away from them is always allowed; an administrator
+    // may send them stock anyway with a reason, a cluster leader may not.
+    let gateOverride: StockBlock | null = null;
+    try {
+      gateOverride = await checkCanReceiveStock(toAgentId, admin, req.body?.overrideReason);
+    } catch (err) {
+      if (err instanceof StockGateError) {
+        res.status(err.status).json(stockGateBody(err));
+        return;
+      }
+      throw err;
+    }
+
     await prismaAny.$transaction(async (tx: any) => {
       await tx.inventoryItem.updateMany({
         where: { id: { in: toMove.map((i: any) => i.id) } },
@@ -272,6 +294,22 @@ export async function transferClusterStock(req: AuthenticatedRequest, res: Respo
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'] as string,
     });
+    if (gateOverride) {
+      await createAuditLog({
+        userId: admin.id,
+        action: 'STOCK_GATE_OVERRIDE',
+        entity: 'InventoryItem',
+        newValues: {
+          agentId: toAgentId,
+          month: gateOverride.month,
+          reasons: gateOverride.reasons,
+          overrideReason: String(req.body?.overrideReason || '').trim(),
+          serialNumbers: toMove.map((i: any) => i.serialNumber),
+        },
+        ipAddress: req.ip,
+        userAgent: req.headers['user-agent'] as string,
+      });
+    }
 
     res.json({
       message: `${toMove.length} device${toMove.length === 1 ? '' : 's'} transferred`,
