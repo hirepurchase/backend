@@ -7,7 +7,7 @@ import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, CustomerPayload } from '../types';
 import { sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import { sendSMS } from '../services/notificationService';
-import { toPermissionNames } from '../constants/permissions';
+import { effectivePermissions } from '../services/userPermissionService';
 
 // Admin Login
 export async function adminLogin(req: Request, res: Response): Promise<void> {
@@ -47,12 +47,13 @@ export async function adminLogin(req: Request, res: Response): Promise<void> {
       return;
     }
 
+    const permissions = await effectivePermissions(admin);
     const token = generateToken(
       {
         id: admin.id,
         email: admin.email,
         role: admin.role.name,
-        permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
+        permissions,
       },
       'admin'
     );
@@ -74,7 +75,7 @@ export async function adminLogin(req: Request, res: Response): Promise<void> {
         firstName: admin.firstName,
         lastName: admin.lastName,
         role: admin.role.name,
-        permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
+        permissions,
       },
     });
   } catch (error) {
@@ -494,7 +495,7 @@ export async function getCurrentAdmin(req: AuthenticatedRequest, res: Response):
       lastName: admin.lastName,
       phone: admin.phone,
       role: admin.role.name,
-      permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
+      permissions: await effectivePermissions(admin),
     });
   } catch (error) {
     console.error('Get current admin error:', error);

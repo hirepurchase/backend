@@ -1,6 +1,5 @@
 import prisma from '../../config/database';
-import { IndicatorKey } from '../clusterScorecard/definitions';
-import { MonthRange, measureCollectionRate } from '../clusterScorecard/indicators';
+import { MonthRange } from '../clusterScorecard/indicators';
 import { Measured, ratioOf, emptyAcc, Acc } from './agent';
 import { PAID_AFTER_CALL_DAYS, PAYMENT_CALL_PURPOSES, REACHED_OUTCOMES } from './definitions';
 
@@ -73,10 +72,9 @@ export async function computeCsoKpis(range: MonthRange, officerIds: string[]): P
   if (!officerIds.length) return result;
 
   const now = new Date();
-  const asOf = now < range.to ? now : range.to;
   const officers = new Set(officerIds);
 
-  const [calls, promises, followUps, verifications, assignments] = await Promise.all([
+  const [calls, promises, followUps, verifications] = await Promise.all([
     prisma.contactAttempt.findMany({
       where: { officerId: { in: officerIds }, purpose: { in: PAYMENT_CALL_PURPOSES }, contactedAt: { gte: range.from, lt: range.to } },
       select: { officerId: true, customerId_uuid: true, outcome: true },
@@ -102,7 +100,6 @@ export async function computeCsoKpis(range: MonthRange, officerIds: string[]): P
       },
       select: { officerId: true, contractId: true, customerId_uuid: true },
     }),
-    prisma.csoAgentAssignment.findMany({ where: { csoId: { in: officerIds } }, select: { csoId: true, agentId: true } }),
   ]);
 
   // ── Calls and reach ──────────────────────────────────────────────────────
@@ -214,32 +211,6 @@ export async function computeCsoKpis(range: MonthRange, officerIds: string[]): P
     s.add(v.contractId ?? `customer:${v.customerId_uuid}`);
   }
 
-  // ── Collection rate across the agents each officer covers ────────────────
-  const agentRate = new Map<string, Acc>();
-  const coveredAgents = [...new Set(assignments.map((a) => a.agentId))];
-  if (coveredAgents.length) {
-    const agents = new Set(coveredAgents);
-    await measureCollectionRate(range, asOf, coveredAgents, (agentId) => agentId, (agentId: string | null, _key: IndicatorKey, sum: number, count = 1, extra?: Record<string, number>) => {
-      if (!agentId || !agents.has(agentId)) return;
-      const a = agentRate.get(agentId) ?? emptyAcc();
-      a.sum += sum;
-      a.count += count;
-      a.numerator += extra?.numerator ?? 0;
-      a.denominator += extra?.denominator ?? 0;
-      agentRate.set(agentId, a);
-    });
-  }
-  const portfolio = new Map<string, Acc>();
-  for (const { csoId, agentId } of assignments) {
-    const r = agentRate.get(agentId);
-    if (!r) continue;
-    const a = portfolio.get(csoId) ?? emptyAcc();
-    a.count += r.count;
-    a.numerator += r.numerator;
-    a.denominator += r.denominator;
-    portfolio.set(csoId, a);
-  }
-
   for (const id of officerIds) {
     const made = callCount.get(id) ?? 0;
     const customers = called.get(id)?.size ?? 0;
@@ -254,7 +225,6 @@ export async function computeCsoKpis(range: MonthRange, officerIds: string[]): P
       PROMISES_KEPT: { value: ratioOf(promiseAcc.get(id)), count: promiseAcc.get(id)?.count ?? 0 },
       FOLLOW_UPS_ON_TIME: { value: ratioOf(followAcc.get(id)), count: followAcc.get(id)?.count ?? 0 },
       VERIFICATIONS_DONE: { value: verified.get(id)?.size ?? 0, count: verified.get(id)?.size ?? 0 },
-      PORTFOLIO_COLLECTION_RATE: { value: ratioOf(portfolio.get(id)), count: portfolio.get(id)?.count ?? 0 },
     });
   }
   return result;

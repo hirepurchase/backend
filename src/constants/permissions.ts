@@ -123,10 +123,10 @@ export const PERMISSION_DEFINITIONS: PermissionDefinition[] = [
   { name: PERMISSIONS.NULLIFY_CONTRACT, description: 'Nullify a contract — permanently delete all transactions, payments, and related records and free the device', category: 'Contracts', scope: 'action' },
   { name: PERMISSIONS.VIEW_ASSIGNED_CUSTOMERS, description: 'View customers registered by assigned agents', category: 'Customers', scope: 'own' },
   { name: PERMISSIONS.VIEW_ASSIGNED_CONTRACTS, description: 'View contracts created by assigned agents', category: 'Contracts', scope: 'own' },
-  { name: PERMISSIONS.VERIFY_CUSTOMER, description: 'Verify customer registrations by phone before contract approval', category: 'Customers', scope: 'action' },
+  { name: PERMISSIONS.VERIFY_CUSTOMER, description: 'Welcome / activation calls: call new customers, verify and approve the contracts of agents assigned to you', category: 'Customers', scope: 'action' },
   { name: PERMISSIONS.MANAGE_CONTACT_ATTEMPTS, description: 'Log and view customer call attempts', category: 'Customers', scope: 'action' },
   { name: PERMISSIONS.SEND_SMS, description: 'Send SMS messages to customers', category: 'Communication', scope: 'action' },
-  { name: PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, description: 'Assign agents to customer service officers', category: 'Administration', scope: 'action' },
+  { name: PERMISSIONS.MANAGE_CSO_ASSIGNMENTS, description: 'Assign agents for welcome calls, and share out customer service calls', category: 'Administration', scope: 'action' },
   { name: PERMISSIONS.MANAGE_CLUSTER_ASSIGNMENTS, description: 'Assign agents to cluster agents who supervise them', category: 'Administration', scope: 'action' },
   { name: PERMISSIONS.REQUEST_TEMPORARY_UNLOCK, description: 'Request a temporary unlock for an overdue customer of a supervised agent', category: 'Contracts', scope: 'action' },
   { name: PERMISSIONS.APPROVE_TEMPORARY_UNLOCK, description: 'Approve or reject temporary unlock requests', category: 'Contracts', scope: 'action' },
@@ -151,6 +151,8 @@ export const CONTRACT_ACCESS_PERMISSIONS = [
 export const CONTRACT_APPROVAL_ACCESS_PERMISSIONS = [
   PERMISSIONS.VIEW_CONTRACT_APPROVALS,
   PERMISSIONS.APPROVE_CONTRACT,
+  // A welcome-call person reviews and approves their agents' contracts.
+  PERMISSIONS.VERIFY_CUSTOMER,
 ] as const;
 
 export const DASHBOARD_ACCESS_PERMISSIONS = [

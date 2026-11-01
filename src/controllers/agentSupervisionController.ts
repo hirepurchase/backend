@@ -1,12 +1,12 @@
 import { Response } from 'express';
 import prisma from '../config/database';
+import { holdsWelcomeCalls, eligibleOfficers } from '../services/welcomeCallService';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import {
   ASSIGNABLE_AGENT_ROLES,
   CLUSTER_SUPERVISABLE_ROLES,
   CLUSTER_AGENT_ROLE,
-  CUSTOMER_SERVICE_ROLE,
 } from '../constants/roles';
 import { getSupervisionSettings } from '../services/supervisionService';
 import { getAgentPortfolioRisk, breachesParLimit } from '../services/portfolioRiskService';
@@ -48,11 +48,8 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
         select: { id: true, firstName: true, lastName: true, email: true, area: true, district: true },
         orderBy: [{ firstName: 'asc' }],
       }),
-      prismaAny.adminUser.findMany({
-        where: { isActive: true, role: { name: CUSTOMER_SERVICE_ROLE } },
-        select: { id: true, firstName: true, lastName: true, email: true },
-        orderBy: [{ firstName: 'asc' }],
-      }),
+      // Anyone who can be given agents for welcome calls, whatever their role.
+      eligibleOfficers(),
       getSupervisionSettings(),
     ]);
 
@@ -102,7 +99,7 @@ export async function getAgentSupervision(_req: AuthenticatedRequest, res: Respo
       customerServiceOfficers: csos.map((c: any) => ({
         id: c.id,
         name: `${c.firstName} ${c.lastName}`.trim(),
-        email: c.email,
+        role: c.role?.name ?? null,
       })),
       settings,
       summary: {
@@ -213,13 +210,14 @@ export async function setAgentSupervision(req: AuthenticatedRequest, res: Respon
         return;
       }
       const unique = Array.from(new Set(csoIds.map((v: unknown) => String(v)))).filter(Boolean);
-      if (unique.length > 0) {
-        const officers = await prismaAny.adminUser.findMany({
-          where: { id: { in: unique }, isActive: true, role: { name: CUSTOMER_SERVICE_ROLE } },
-          select: { id: true },
-        });
-        if (officers.length !== unique.length) {
-          res.status(400).json({ error: 'One or more officers are invalid, inactive, or not customer service' });
+      // An agent has one welcome-call person, who may be anyone given that permission.
+      if (unique.length > 1) {
+        res.status(400).json({ error: 'An agent has one welcome-call person — choose one' });
+        return;
+      }
+      for (const officerId of unique) {
+        if (!(await holdsWelcomeCalls(officerId))) {
+          res.status(400).json({ error: 'That person is inactive or does not have the welcome / activation calls permission' });
           return;
         }
       }
@@ -325,7 +323,7 @@ export async function updateSupervisionSettings(req: AuthenticatedRequest, res: 
           agentAssignedCsos: { none: {} },
         },
       });
-      if (uncovered > 0) blocking.push({ rule: 'customer service officer', uncovered });
+      if (uncovered > 0) blocking.push({ rule: 'welcome-call person', uncovered });
     }
 
     // The PAR rule is checked whenever it would end up on — being switched on,
@@ -507,8 +505,8 @@ export async function bulkSetAgentSupervision(req: AuthenticatedRequest, res: Re
           where: { id: csoId },
           include: { role: { select: { name: true } } },
         });
-        if (!officer || officer.role.name !== CUSTOMER_SERVICE_ROLE || !officer.isActive) {
-          res.status(400).json({ error: 'The chosen officer is not an active customer service user' });
+        if (!officer || !(await holdsWelcomeCalls(officer.id))) {
+          res.status(400).json({ error: 'The chosen person is inactive or does not have the welcome / activation calls permission' });
           return;
         }
         await prismaAny.csoAgentAssignment.deleteMany({ where: { agentId: { in: ids } } });

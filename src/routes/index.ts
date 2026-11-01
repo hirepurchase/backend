@@ -16,6 +16,7 @@ import knoxGuardRoutes from './knoxGuard';
 import payTriggerRoutes from './payTrigger';
 import clusterScorecardRoutes from './clusterScorecard';
 import kpiRoutes from './kpi';
+import welcomeCallRoutes from './welcomeCalls';
 import smsRoutes from './sms';
 import commissionSettingsRoutes from './commissionSettings';
 import agentDepositRoutes from './agentDeposits';
@@ -57,6 +58,7 @@ router.use('/announcements', announcementRoutes);
 router.use('/paytrigger', payTriggerRoutes);
 router.use('/cluster-scorecard', clusterScorecardRoutes);
 router.use('/kpi', kpiRoutes);
+router.use('/welcome-calls', welcomeCallRoutes);
 
 // Health check
 router.get('/health', (req, res) => {

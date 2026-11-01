@@ -13,6 +13,7 @@ import { initializeNotificationScheduler } from './services/notificationSchedule
 import { startPaymentRetryScheduler } from './services/paymentRetryScheduler';
 import { startDeviceControlScheduler } from './services/deviceControlScheduler';
 import { startPayTriggerScheduler } from './services/payTrigger/scheduler';
+import { startCallAllocationScheduler } from './services/callAllocationService';
 import { startClusterScorecardScheduler } from './services/clusterScorecard/scheduler';
 import { initializeIdleShutdown, stopIdleShutdown, getTimeUntilShutdown, getLastActivityTime, isIdleShutdownEnabled } from './services/idleShutdownService';
 import { activityTracker } from './middleware/activityTracker';
@@ -144,6 +145,7 @@ app.listen(PORT, () => {
 
   // PayTrigger (Transsion handsets): one 08:36 sweep; everything else is event-driven
   startPayTriggerScheduler();
+  startCallAllocationScheduler();
 
   // Cluster leader scorecard: hourly assignment-history sync
   startClusterScorecardScheduler();

@@ -6,6 +6,7 @@ import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 
 import { ASSIGNABLE_AGENT_ROLES, CUSTOMER_SERVICE_ROLE as CSO_ROLE } from '../constants/roles';
+import { eligibleOfficers, holdsWelcomeCalls } from '../services/welcomeCallService';
 
 // GET /admin-users/:id/assigned-agents
 export async function getAssignedAgents(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -59,6 +60,7 @@ export async function getAssignedAgents(req: AuthenticatedRequest, res: Response
         lastName: officer.lastName,
         role: officer.role.name,
         isCustomerService: officer.role.name === CSO_ROLE,
+        holdsWelcomeCalls: await holdsWelcomeCalls(officer.id),
       },
       assignedAgentIds: assignments.map((a) => a.agentId),
       assignedAgents: assignments.map((a) => ({
@@ -108,8 +110,9 @@ export async function setAssignedAgents(req: AuthenticatedRequest, res: Response
       return;
     }
 
-    if (officer.role.name !== CSO_ROLE) {
-      res.status(400).json({ error: 'Only customer service officers can be assigned agents' });
+    // Agents are assigned for welcome calls, to anyone given that permission.
+    if (!(await holdsWelcomeCalls(officer.id))) {
+      res.status(400).json({ error: 'This person does not have the welcome / activation calls permission' });
       return;
     }
 
@@ -144,6 +147,10 @@ export async function setAssignedAgents(req: AuthenticatedRequest, res: Response
 
     await prisma.$transaction(async (tx) => {
       await tx.csoAgentAssignment.deleteMany({ where: { csoId: id } });
+      // An agent has one welcome-call person: take these agents from anyone else.
+      if (uniqueAgentIds.length > 0) {
+        await tx.csoAgentAssignment.deleteMany({ where: { agentId: { in: uniqueAgentIds } } });
+      }
       if (uniqueAgentIds.length > 0) {
         await tx.csoAgentAssignment.createMany({
           data: uniqueAgentIds.map((agentId) => ({
@@ -260,11 +267,14 @@ export async function getCustomerServiceChart(
 ): Promise<void> {
   try {
     const [officers, assignments, allAgents] = await Promise.all([
-      prisma.adminUser.findMany({
-        where: { isActive: true, role: { name: CSO_ROLE } },
-        select: { id: true, firstName: true, lastName: true, email: true, phone: true },
-        orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
-      }),
+      // Everyone who makes welcome calls, whatever their role.
+      eligibleOfficers().then((list) =>
+        prisma.adminUser.findMany({
+          where: { id: { in: list.map((o) => o.id) } },
+          select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+          orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+        }),
+      ),
       prisma.csoAgentAssignment.findMany({
         include: {
           agent: {

@@ -3,7 +3,8 @@ import jwt from 'jsonwebtoken';
 import { AuthenticatedRequest, AdminUserPayload, CustomerPayload } from '../types';
 import prisma from '../config/database';
 import type { PermissionName } from '../constants/permissions';
-import { hasAnyPermission, toPermissionNames } from '../constants/permissions';
+import { hasAnyPermission } from '../constants/permissions';
+import { effectivePermissions } from '../services/userPermissionService';
 
 export type { AuthenticatedRequest } from '../types';
 
@@ -72,7 +73,7 @@ export async function authenticateAdmin(
       id: admin.id,
       email: admin.email,
       role: admin.role.name,
-      permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
+      permissions: await effectivePermissions(admin),
     };
     req.userType = 'admin';
 
@@ -178,7 +179,7 @@ export async function authenticateAny(
         id: admin.id,
         email: admin.email,
         role: admin.role.name,
-        permissions: toPermissionNames(admin.role.permissions.map(p => p.name)),
+        permissions: await effectivePermissions(admin),
       };
       req.userType = 'admin';
     } else {

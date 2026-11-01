@@ -2,14 +2,16 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { buildApprovalSnapshots } from '../services/contractReviewService';
-import { getLiveTemporaryUnlockDetails } from '../services/temporaryUnlockService';
 import {
   resolveContractScope,
   resolveCustomerScope,
   applyCreatorScope,
   scopeAllows,
 } from '../services/scopeService';
-import { getDeviceLockIssues } from '../services/deviceControlPolicyService';
+import { buildCallRows } from '../services/callQueueService';
+import { officerAllocations } from '../services/callAllocationService';
+import { reviewFilter } from '../services/welcomeCallService';
+import { CUSTOMER_SERVICE_ROLE } from '../constants/roles';
 
 function startOfToday(): Date {
   const now = new Date();
@@ -29,8 +31,8 @@ export async function getVerificationQueue(req: AuthenticatedRequest, res: Respo
     const admin = req.user as AdminUserPayload;
     const search = req.query.search as string | undefined;
 
-    const where: Record<string, unknown> = { status: 'PENDING_APPROVAL' };
-    applyCreatorScope(where, await resolveContractScope(admin));
+    // New customers are called by their agent's welcome-call person.
+    const where: Record<string, unknown> = { status: 'PENDING_APPROVAL', ...(await reviewFilter(admin)) };
 
     if (search) {
       where.OR = [
@@ -127,213 +129,56 @@ export async function getVerificationQueue(req: AuthenticatedRequest, res: Respo
 export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const admin = req.user as AdminUserPayload;
-    const now = new Date();
+
+    // Customer service work from the calls shared to them this morning;
+    // everyone else (administrators, leaders) sees the calls in their scope.
+    if (admin.role === CUSTOMER_SERVICE_ROLE) {
+      const { day, allocations } = await officerAllocations(admin.id);
+      const uuids = allocations.map((a) => a.customerUuid);
+      const built = uuids.length
+        ? await buildCallRows({ customerId_uuid: { in: uuids } }, () => false)
+        : [];
+      const byUuid = new Map(built.map((r) => [r.customer.uuid, r]));
+      // Reminders, and promises from customers not behind, are not on the
+      // arrears list: give them a plain row.
+      const missing = uuids.filter((u) => !byUuid.has(u));
+      const plain = missing.length
+        ? await prisma.customer.findMany({ where: { id_uuid: { in: missing } }, select: { id: true, id_uuid: true, firstName: true, lastName: true, phone: true, membershipId: true } })
+        : [];
+      for (const c of plain) {
+        byUuid.set(c.id_uuid, {
+          customer: { id: c.id, uuid: c.id_uuid, name: `${c.firstName} ${c.lastName}`.trim(), phone: c.phone, membershipId: c.membershipId },
+          agent: null, overdueCount: 0, amountOverdue: 0, daysOverdue: 0, oldestDueDate: null,
+          lastPaymentDate: null, lastPaymentAmount: null, lastCallAt: null, lastCallOutcome: null, promiseToPayDate: null,
+          isUrgent: false, urgentReason: null, temporaryUnlock: null, contracts: [],
+        });
+      }
+      const rows = allocations
+        .map((a) => {
+          const row = byUuid.get(a.customerUuid);
+          return row ? { ...row, allocation: { kind: a.kind, reason: a.reason, called: a.called } } : null;
+        })
+        .filter(Boolean) as any[];
+      res.json({
+        mode: 'SHARED',
+        day,
+        count: rows.length,
+        calledCount: rows.filter((r) => r.allocation.called).length,
+        urgentCount: rows.filter((row) => row.isUrgent).length,
+        temporaryUnlockCount: rows.filter((row) => row.temporaryUnlock).length,
+        overdueInstallmentCount: rows.reduce((sum, row) => sum + row.overdueCount, 0),
+        totalOverdueAmount: Math.round(rows.reduce((sum, row) => sum + row.amountOverdue, 0) * 100) / 100,
+        customers: rows,
+        installments: rows,
+      });
+      return;
+    }
 
     const scope = await resolveContractScope(admin);
     const where: Record<string, unknown> = { status: 'ACTIVE' };
     applyCreatorScope(where, scope);
 
-    const contracts = await prisma.hirePurchaseContract.findMany({
-      where,
-      include: {
-        customer: { select: { id: true, firstName: true, lastName: true, membershipId: true, phone: true } },
-        inventoryItem: { include: { product: { select: { name: true } } } },
-        createdBy: { select: { id: true, firstName: true, lastName: true, phone: true, email: true } },
-        installments: { where: { status: 'OVERDUE' }, orderBy: { dueDate: 'asc' } },
-        payments: {
-          where: { status: 'SUCCESS' },
-          orderBy: { paymentDate: 'desc' },
-          take: 1,
-          select: { paymentDate: true, amount: true },
-        },
-        contactAttempts: {
-          where: { purpose: { in: ['COLLECTION', 'FOLLOW_UP'] } },
-          orderBy: { contactedAt: 'desc' },
-          take: 1,
-          select: { contactedAt: true, outcome: true, promiseToPayDate: true },
-        },
-      },
-    });
-
-    // One row per customer, not per overdue installment. A customer 5 payments
-    // behind is still one phone call; listing them 5 times made the queue look
-    // 4x longer than the work in it.
-    const byCustomer = new Map<string, any>();
-
-    for (const contract of contracts) {
-      if (contract.installments.length === 0) continue;
-
-      const key = contract.customer.id;
-      let row = byCustomer.get(key);
-
-      if (!row) {
-        row = {
-          customer: {
-            id: contract.customer.id,
-            name: `${contract.customer.firstName} ${contract.customer.lastName}`.trim(),
-            phone: contract.customer.phone,
-            membershipId: contract.customer.membershipId,
-          },
-          agent: contract.createdBy
-            ? {
-                id: contract.createdBy.id,
-                name: `${contract.createdBy.firstName} ${contract.createdBy.lastName}`.trim(),
-                phone: contract.createdBy.phone,
-                email: contract.createdBy.email,
-              }
-            : null,
-          overdueCount: 0,
-          amountOverdue: 0,
-          daysOverdue: 0,
-          oldestDueDate: null as Date | null,
-          lastPaymentDate: null as Date | null,
-          lastPaymentAmount: null as number | null,
-          lastCallAt: null as Date | null,
-          lastCallOutcome: null as string | null,
-          promiseToPayDate: null as Date | null,
-          isUrgent: false,
-          urgentReason: null as string | null,
-          temporaryUnlock: null as { expiresAt: Date; daysRemaining: number; arrearsAtApproval: number | null } | null,
-          contracts: [] as any[],
-        };
-        byCustomer.set(key, row);
-      }
-
-      const contractOverdue = contract.installments.reduce(
-        (sum, i) => sum + (i.amount - i.paidAmount),
-        0
-      );
-      const oldest = contract.installments[0];
-      const daysOverdue = Math.max(
-        0,
-        Math.floor((now.getTime() - new Date(oldest.dueDate).getTime()) / 86400000)
-      );
-
-      row.overdueCount += contract.installments.length;
-      row.amountOverdue = Math.round((row.amountOverdue + contractOverdue) * 100) / 100;
-      row.daysOverdue = Math.max(row.daysOverdue, daysOverdue);
-      if (!row.oldestDueDate || new Date(oldest.dueDate) < new Date(row.oldestDueDate)) {
-        row.oldestDueDate = oldest.dueDate;
-      }
-
-      // Most recent across all of the customer's contracts.
-      const lastPayment = contract.payments[0] ?? null;
-      if (lastPayment?.paymentDate && (!row.lastPaymentDate || lastPayment.paymentDate > row.lastPaymentDate)) {
-        row.lastPaymentDate = lastPayment.paymentDate;
-        row.lastPaymentAmount = lastPayment.amount;
-      }
-      const lastCall = contract.contactAttempts[0] ?? null;
-      if (lastCall?.contactedAt && (!row.lastCallAt || lastCall.contactedAt > row.lastCallAt)) {
-        row.lastCallAt = lastCall.contactedAt;
-        row.lastCallOutcome = lastCall.outcome;
-        row.promiseToPayDate = lastCall.promiseToPayDate;
-      }
-
-      row.contracts.push({
-        contractId: contract.id,
-        contractNumber: contract.contractNumber,
-        product: contract.inventoryItem?.product?.name ?? null,
-        overdueCount: contract.installments.length,
-        amountOverdue: Math.round(contractOverdue * 100) / 100,
-        daysOverdue,
-        installments: contract.installments.map((i) => ({
-          installmentId: i.id,
-          installmentNo: i.installmentNo,
-          dueDate: i.dueDate,
-          amountOverdue: Math.round((i.amount - i.paidAmount) * 100) / 100,
-        })),
-      });
-    }
-
-    // Contracts with a device lock-state mismatch jump to the top of the
-    // queue — a customer who's wrongly still locked despite clearing arrears,
-    // or overdue enough to lock but Knox never applied it, needs a call
-    // regardless of where they'd otherwise rank by days overdue.
-    const contractIdToRow = new Map<string, any>();
-    for (const row of byCustomer.values()) {
-      for (const c of row.contracts) contractIdToRow.set(c.contractId, row);
-    }
-
-    const { categoryA, categoryB } = await getDeviceLockIssues();
-    for (const issue of [...categoryA, ...categoryB]) {
-      if (!scopeAllows(scope, issue.createdById)) continue;
-
-      const existingRow = contractIdToRow.get(issue.contractId);
-      if (existingRow) {
-        existingRow.isUrgent = true;
-        existingRow.urgentReason = issue.reason;
-        continue;
-      }
-
-      // Not already in the queue (typically category B — arrears cleared, so
-      // no OVERDUE installments exist to have pulled the contract in).
-      let row = byCustomer.get(issue.customerId);
-      if (!row) {
-        row = {
-          customer: { id: issue.customerId, name: issue.customerName, phone: issue.customerPhone, membershipId: null },
-          agent: null,
-          overdueCount: 0,
-          amountOverdue: 0,
-          daysOverdue: 0,
-          oldestDueDate: null,
-          lastPaymentDate: null,
-          lastPaymentAmount: null,
-          lastCallAt: null,
-          lastCallOutcome: null,
-          promiseToPayDate: null,
-          isUrgent: false,
-          urgentReason: null,
-          temporaryUnlock: null,
-          contracts: [],
-        };
-        byCustomer.set(issue.customerId, row);
-      }
-      row.isUrgent = true;
-      row.urgentReason = issue.reason;
-      contractIdToRow.set(issue.contractId, row);
-      row.contracts.push({
-        contractId: issue.contractId,
-        contractNumber: issue.contractNumber,
-        product: null,
-        overdueCount: 0,
-        amountOverdue: 0,
-        daysOverdue: 0,
-        installments: [],
-        deviceIssue: issue.reason,
-      });
-    }
-
-    // A customer inside an approved unlock window outranks everything else on
-    // the list. The window has a fixed end date and the phone relocks if the
-    // arrears are still there when it closes — and the agent who sold the
-    // contract is barred from new business at that point. These are the calls
-    // where a CSO's time actually changes the outcome.
-    const liveUnlocks = await getLiveTemporaryUnlockDetails(Array.from(contractIdToRow.keys()));
-    for (const [contractId, unlock] of liveUnlocks) {
-      const row = contractIdToRow.get(contractId);
-      if (!row) continue;
-      row.isUrgent = true;
-      row.temporaryUnlock = {
-        expiresAt: unlock.expiresAt,
-        daysRemaining: unlock.daysRemaining,
-        arrearsAtApproval: unlock.arrearsAtApproval,
-      };
-      row.urgentReason =
-        unlock.daysRemaining <= 1
-          ? 'Temporary unlock ends today — phone relocks unless arrears are cleared'
-          : `Temporary unlock ends in ${unlock.daysRemaining} days — phone relocks unless arrears are cleared`;
-    }
-
-    const rows = Array.from(byCustomer.values()).sort((a, b) => {
-      // Unlock windows first (soonest to close first), then other urgent rows,
-      // then by how far behind the customer is.
-      const aWindow = a.temporaryUnlock ? 1 : 0;
-      const bWindow = b.temporaryUnlock ? 1 : 0;
-      if (aWindow !== bWindow) return bWindow - aWindow;
-      if (aWindow && bWindow) return a.temporaryUnlock.daysRemaining - b.temporaryUnlock.daysRemaining;
-      if (a.isUrgent !== b.isUrgent) return a.isUrgent ? -1 : 1;
-      return b.daysOverdue - a.daysOverdue;
-    });
+    const rows = await buildCallRows(where, (issue) => scopeAllows(scope, issue.createdById));
 
     res.json({
       count: rows.length,
@@ -362,9 +207,17 @@ export async function getDueFollowUps(req: AuthenticatedRequest, res: Response):
     const customerWhere: Record<string, unknown> = {};
     applyCreatorScope(customerWhere, scope);
 
+    // Customer service: the follow-ups they arranged, and those of the
+    // customers shared to them today — not a portfolio of agents.
+    let whose: Record<string, unknown> = Object.keys(customerWhere).length > 0 ? { customer: customerWhere } : {};
+    if (admin.role === CUSTOMER_SERVICE_ROLE) {
+      const { allocations } = await officerAllocations(admin.id);
+      whose = { OR: [{ officerId: admin.id }, { customerId_uuid: { in: allocations.map((a) => a.customerUuid) } }] };
+    }
+
     const attempts = await prisma.contactAttempt.findMany({
       where: {
-        ...(Object.keys(customerWhere).length > 0 ? { customer: customerWhere } : {}),
+        AND: [whose],
         OR: [
           { nextFollowUpAt: { lte: endToday } },
           { promiseToPayDate: { lte: endToday } },
@@ -424,8 +277,7 @@ export async function getCsoDashboard(req: AuthenticatedRequest, res: Response):
     const contractScope = await resolveContractScope(admin);
     const customerScope = await resolveCustomerScope(admin);
 
-    const pendingWhere: Record<string, unknown> = { status: 'PENDING_APPROVAL' };
-    applyCreatorScope(pendingWhere, contractScope);
+    const pendingWhere: Record<string, unknown> = { status: 'PENDING_APPROVAL', ...(await reviewFilter(admin)) };
 
     const activeWhere: Record<string, unknown> = { status: 'ACTIVE' };
     applyCreatorScope(activeWhere, contractScope);
@@ -482,7 +334,17 @@ export async function getCsoDashboard(req: AuthenticatedRequest, res: Response):
       0
     );
 
+    // Customer service work from this morning's shared calls.
+    let todaysCalls: { day: string | null; total: number; called: number; byKind: Record<string, number> } | null = null;
+    if (admin.role === CUSTOMER_SERVICE_ROLE) {
+      const { day, allocations } = await officerAllocations(admin.id);
+      const byKind: Record<string, number> = {};
+      for (const a of allocations) byKind[a.kind] = (byKind[a.kind] ?? 0) + 1;
+      todaysCalls = { day, total: allocations.length, called: allocations.filter((a) => a.called).length, byKind };
+    }
+
     res.json({
+      todaysCalls,
       assignedAgents,
       customers: customerCount,
       verification: {

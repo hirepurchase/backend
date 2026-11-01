@@ -74,7 +74,6 @@ const CSO: KpiDefinition[] = [
   { key: 'PROMISES_KEPT', label: 'Promises kept', description: 'Share of promises to pay falling due in the month that were paid in full by the promised day.', unit: 'PERCENT', higherIsBetter: true, cumulative: false },
   { key: 'FOLLOW_UPS_ON_TIME', label: 'Follow-ups on time', description: 'Share of follow-ups due in the month that were made by the next day — or not needed because the customer paid.', unit: 'PERCENT', higherIsBetter: true, cumulative: false },
   { key: 'VERIFICATIONS_DONE', label: 'Verifications done', description: 'New contracts verified by speaking to the customer.', unit: 'COUNT', higherIsBetter: true, cumulative: true },
-  { key: 'PORTFOLIO_COLLECTION_RATE', label: 'Collection rate — my agents', description: 'Collection rate across the agents they cover.', unit: 'PERCENT', higherIsBetter: true, cumulative: false },
 ];
 
 export const KPI_DEFINITIONS: Record<KpiGroup, KpiDefinition[]> = { AGENT, TEAM, CSO };

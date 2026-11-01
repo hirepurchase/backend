@@ -1,5 +1,6 @@
 import { Response } from 'express';
 import prisma from '../config/database';
+import { canReviewContract, isAdminRole, reviewFilter } from '../services/welcomeCallService';
 import { createAuditLog } from '../services/auditService';
 import {
   buildApprovalSnapshots,
@@ -16,13 +17,7 @@ import { enrollManagedDeviceForContract } from '../services/deviceControlPolicyS
 import { createAgentDepositLedgerEntry } from './agentDepositController';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
 import { calculateInstallmentSchedule, calculateEndDate } from '../utils/helpers';
-import {
-  resolveContractScope,
-  resolveCustomerScope,
-  applyCreatorScope,
-  scopeAllows,
-  CreatorScope,
-} from '../services/scopeService';
+import { resolveCustomerScope, scopeAllows } from '../services/scopeService';
 import { isSellingAgentRole } from '../constants/roles';
 import { notifyPayTrigger } from '../services/payTrigger/events';
 
@@ -69,17 +64,16 @@ function buildAgentContractWhere(admin: AdminUserPayload, query: AuthenticatedRe
 
 function buildPendingApprovalsWhere(
   query: AuthenticatedRequest['query'],
-  scope: CreatorScope
+  review: { createdById?: { in: string[] } }
 ): Record<string, unknown> {
-  const where: Record<string, unknown> = { status: 'PENDING_APPROVAL' };
+  // Pending contracts are reviewed by the agent's welcome-call person (or an
+  // administrator) — see reviewFilter — not by whoever's role scope reaches them.
+  const where: Record<string, unknown> = { status: 'PENDING_APPROVAL', ...review };
   const { search, agentId, paymentMethod } = query;
 
-  // Scope first, so a caller-supplied agentId can only ever narrow it.
-  applyCreatorScope(where, scope);
-
   // agentId is a caller-supplied filter, not an authorization decision — it may
-  // only narrow within what the scope already allows.
-  if (agentId && scopeAllows(scope, agentId as string)) {
+  // only narrow within what the caller reviews.
+  if (agentId && (!review.createdById || review.createdById.in.includes(agentId as string))) {
     where.createdById = agentId as string;
   }
 
@@ -258,10 +252,10 @@ export async function getPendingApprovals(req: AuthenticatedRequest, res: Respon
     const sortBy = (req.query.sortBy as string) || 'age';
     const sortOrder = normalizeSortOrder(req.query.sortOrder);
 
-    const queueScope = await resolveContractScope(req.user as AdminUserPayload);
+    const review = await reviewFilter(req.user as AdminUserPayload);
 
     const contracts = await prisma.hirePurchaseContract.findMany({
-      where: buildPendingApprovalsWhere(req.query, queueScope),
+      where: buildPendingApprovalsWhere(req.query, review),
       include: {
         customer: {
           select: {
@@ -371,8 +365,7 @@ export async function getPendingApprovalsCount(req: AuthenticatedRequest, res: R
   try {
     // Must use the same scope as the queue itself, or the bell shows a
     // company-wide count to an officer who can only action a subset.
-    const where: Record<string, unknown> = { status: 'PENDING_APPROVAL' };
-    applyCreatorScope(where, await resolveContractScope(req.user as AdminUserPayload));
+    const where: Record<string, unknown> = { status: 'PENDING_APPROVAL', ...(await reviewFilter(req.user as AdminUserPayload)) };
 
     const count = await prisma.hirePurchaseContract.count({ where });
     res.json({ count });
@@ -441,9 +434,8 @@ export async function assignContractApprover(req: AuthenticatedRequest, res: Res
       return;
     }
 
-    const assignScope = await resolveContractScope(admin);
-    if (!scopeAllows(assignScope, contract.createdById)) {
-      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
+    if (!(await canReviewContract(admin, contract.createdById))) {
+      res.status(403).json({ error: 'This contract belongs to an agent who is not assigned to you for welcome calls' });
       return;
     }
 
@@ -547,27 +539,23 @@ export async function approveContract(req: AuthenticatedRequest, res: Response):
       return;
     }
 
-    const scope = await resolveContractScope(admin);
-    if (!scopeAllows(scope, contract.createdById)) {
-      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
+    // The agent's welcome-call person approves, or an administrator.
+    if (!(await canReviewContract(admin, contract.createdById))) {
+      res.status(403).json({ error: 'This contract belongs to an agent who is not assigned to you for welcome calls' });
       return;
     }
 
-    // Nobody approves their own sale. This matters for cluster agents, who both
-    // sell and supervise: their assigned scope includes their own id, so
-    // scopeAllows above passes for contracts they wrote themselves. They do not
-    // hold APPROVE_CONTRACT today, but granting it to a selling supervisor is an
-    // obvious thing to do later, and the check belongs here rather than in a
-    // permission nobody remembers is load-bearing.
+    // Nobody approves their own sale. Anyone may be given welcome calls, a
+    // seller included, so this does not rely on who holds which permission.
     if (contract.createdById === admin.id && admin.role !== 'SUPER_ADMIN') {
       res.status(403).json({ error: 'You cannot approve a contract you created. Another approver must review it.' });
       return;
     }
 
-    // Customer service officers must speak to the customer before approving.
-    // Deliberately scoped to 'assigned' — applying this to every approver would
-    // block admins from approving the contracts already in flight.
-    if (scope.mode === 'assigned') {
+    // The welcome-call person must speak to the customer before approving.
+    // Administrators are not held to it — applying it to them would block the
+    // contracts already in flight.
+    if (!isAdminRole(admin.role)) {
       const verification = await prisma.contactAttempt.findFirst({
         where: { contractId: id, purpose: 'VERIFICATION', verificationResult: 'VERIFIED' },
         orderBy: { contactedAt: 'desc' },
@@ -736,9 +724,8 @@ export async function requestContractRevision(req: AuthenticatedRequest, res: Re
       return;
     }
 
-    const scope = await resolveContractScope(admin);
-    if (!scopeAllows(scope, contract.createdById)) {
-      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
+    if (!(await canReviewContract(admin, contract.createdById))) {
+      res.status(403).json({ error: 'This contract belongs to an agent who is not assigned to you for welcome calls' });
       return;
     }
 
@@ -1194,9 +1181,8 @@ export async function editPendingContract(req: AuthenticatedRequest, res: Respon
       return;
     }
 
-    const editScope = await resolveContractScope(admin);
-    if (!scopeAllows(editScope, contract.createdById)) {
-      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
+    if (!(await canReviewContract(admin, contract.createdById))) {
+      res.status(403).json({ error: 'This contract belongs to an agent who is not assigned to you for welcome calls' });
       return;
     }
 
@@ -1379,9 +1365,8 @@ export async function cancelPendingContract(req: AuthenticatedRequest, res: Resp
       return;
     }
 
-    const scope = await resolveContractScope(admin);
-    if (!scopeAllows(scope, contract.createdById)) {
-      res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
+    if (!(await canReviewContract(admin, contract.createdById))) {
+      res.status(403).json({ error: 'This contract belongs to an agent who is not assigned to you for welcome calls' });
       return;
     }
 

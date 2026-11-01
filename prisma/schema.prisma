@@ -1087,3 +1087,50 @@ model KpiTarget {
 
   @@unique([group, key])
 }
+
+// ============= WELCOME CALLS & DAILY CALL SHARING =============
+//
+// New tables only, with plain ID columns and no relations to existing models.
+
+// A permission given to one user on top of their role's. Only the
+// permissions listed in GRANTABLE_PERMISSIONS can be granted this way.
+model AdminUserPermission {
+  id          String   @id @default(uuid())
+  adminUserId String
+  permission  String
+  grantedById String?
+  createdAt   DateTime @default(now())
+
+  @@unique([adminUserId, permission])
+  @@index([adminUserId])
+}
+
+// An agent's welcome calls moved from one person to another.
+model WelcomeCallTransfer {
+  id              String   @id @default(uuid())
+  agentId         String
+  fromOfficerId   String?
+  toOfficerId     String
+  transferredById String
+  reason          String?
+  createdAt       DateTime @default(now())
+
+  @@index([agentId, createdAt])
+  @@index([toOfficerId, createdAt])
+  @@index([fromOfficerId, createdAt])
+}
+
+// Each morning's recovery and reminder calls, shared among customer service.
+model CallAllocation {
+  id              String   @id @default(uuid())
+  day             String // YYYY-MM-DD
+  customerId_uuid String   @db.Uuid
+  officerId       String
+  kind            String // RECOVERY | REMINDER | PROMISE | FOLLOW_UP
+  priority        Int      @default(0)
+  reason          String?
+  createdAt       DateTime @default(now())
+
+  @@unique([day, customerId_uuid])
+  @@index([officerId, day])
+}

@@ -24,6 +24,7 @@ import {
   setClusterAgents,
 } from '../controllers/clusterAssignmentController';
 import { authenticateAdmin, requireAnyPermission, requireSuperAdmin } from '../middleware/auth';
+import { getExtraPermissions, putExtraPermissions } from '../controllers/userPermissionController';
 import {
   PERMISSIONS,
   ROLE_DIRECTORY_ACCESS_PERMISSIONS,
@@ -36,6 +37,9 @@ router.use(authenticateAdmin);
 
 // Admin user management (Super Admin only)
 router.get('/', requireSuperAdmin, getAllAdminUsers);
+// Single permissions given on top of a user's role (welcome / activation calls).
+router.get('/:id/extra-permissions', requireAnyPermission(PERMISSIONS.MANAGE_USERS), getExtraPermissions);
+router.put('/:id/extra-permissions', requireAnyPermission(PERMISSIONS.MANAGE_USERS), putExtraPermissions);
 router.post('/', requireSuperAdmin, createAdminUser);
 router.post('/change-password', changePassword);
 

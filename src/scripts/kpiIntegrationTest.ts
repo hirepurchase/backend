@@ -158,11 +158,9 @@ async function main() {
   await check('O1 promises kept 50% (Y kept, Z broken)', () => assert.strictEqual(line(o1, 'PROMISES_KEPT').value, 50));
   await check('O1 follow-ups on time 50% (Y paid first, Z missed)', () => assert.strictEqual(line(o1, 'FOLLOW_UPS_ON_TIME').value, 50));
   await check('O1 verifications 1 — the unanswered "verified" call is not counted', () => assert.strictEqual(line(o1, 'VERIFICATIONS_DONE').value, 1));
-  await check('O1 collection rate of covered agent 75%', () => assert.strictEqual(line(o1, 'PORTFOLIO_COLLECTION_RATE').value, 75));
   await check('O2 collected 350 (X 200 + W 150 paid in October after a September call)', () => assert.strictEqual(line(o2, 'COLLECTED_AFTER_CALL').value, 350));
   await check('O2 conversion 100%', () => assert.strictEqual(line(o2, 'CALL_CONVERSION').value, 100));
   await check('O2 no promises → not measured', () => assert.strictEqual(line(o2, 'PROMISES_KEPT').value, null));
-  await check('O2 covers no agents → not measured', () => assert.strictEqual(line(o2, 'PORTFOLIO_COLLECTION_RATE').value, null));
 
   console.log('Targets and status');
   await setTargets('AGENT', [validateTarget('AGENT', 'COLLECTIONS', 500), validateTarget('AGENT', 'COLLECTION_RATE', 80), validateTarget('AGENT', 'PAR30', 10)], L1.id);

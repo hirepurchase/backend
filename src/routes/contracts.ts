@@ -54,12 +54,13 @@ router.get('/approvals', authenticateAdmin, requireAnyPermission(...CONTRACT_APP
 router.get('/approvals/count', authenticateAdmin, requireAnyPermission(...CONTRACT_APPROVAL_ACCESS_PERMISSIONS), getPendingApprovalsCount);
 router.get('/:id/approval-history', authenticateAdmin, requireAnyPermission(...CONTRACT_APPROVAL_ACCESS_PERMISSIONS, PERMISSIONS.VIEW_CONTRACTS), getContractApprovalHistory);
 router.post('/:id/assign-approver', authenticateAdmin, requireAnyPermission(...CONTRACT_APPROVAL_ACCESS_PERMISSIONS), assignContractApprover);
-router.post('/:id/approve', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), approveContract);
-router.post('/:id/request-revision', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), requestContractRevision);
-router.post('/:id/reject', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), requestContractRevision);
+// The agent's welcome-call person (VERIFY_CUSTOMER) or an approver; the controller checks which contracts.
+router.post('/:id/approve', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT, PERMISSIONS.VERIFY_CUSTOMER), approveContract);
+router.post('/:id/request-revision', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT, PERMISSIONS.VERIFY_CUSTOMER), requestContractRevision);
+router.post('/:id/reject', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT, PERMISSIONS.VERIFY_CUSTOMER), requestContractRevision);
 // Scoped inside the handler, and only ever reaches a contract that is not yet approved.
 router.post('/:id/cancel-pending', authenticateAdmin, requireAnyPermission(PERMISSIONS.CANCEL_PENDING_CONTRACT, PERMISSIONS.CANCEL_CONTRACT), cancelPendingContract);
-router.patch('/:id/pending-edit', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT), editPendingContract);
+router.patch('/:id/pending-edit', authenticateAdmin, requireAnyPermission(PERMISSIONS.APPROVE_CONTRACT, PERMISSIONS.VERIFY_CUSTOMER), editPendingContract);
 
 // Admin routes
 router.post('/preflight', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CONTRACT), createContractPreflight);

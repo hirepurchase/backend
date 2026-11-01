@@ -108,7 +108,7 @@ export async function getSupervisionBlockers(
   }
   if (settings.requireCso && csoNames.length === 0) {
     blockers.push(
-      'You are not assigned to a customer service officer, so your contracts cannot be verified. An administrator must assign you before you can create contracts.'
+      'Nobody is assigned to make welcome calls for your customers, so your contracts cannot be verified. An administrator must assign you before you can create contracts.'
     );
   }
 
