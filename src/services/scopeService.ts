@@ -92,6 +92,17 @@ async function resolveScope(
     return { mode: 'none' };
   }
 
+  // Anyone given welcome calls must reach the customers and contracts of the
+  // agents assigned to them, whatever their role allows otherwise — a sales
+  // agent making welcome calls still keeps their own customers too.
+  if (hasPermission(permissions, PERMISSIONS.VERIFY_CUSTOMER)) {
+    const agentIds = await getAssignedAgentIds(admin.id);
+    if (agentIds.length > 0) {
+      if (hasPermission(permissions, viewOwn) && !agentIds.includes(admin.id)) agentIds.push(admin.id);
+      return { mode: 'assigned', agentIds };
+    }
+  }
+
   if (hasPermission(permissions, viewOwn)) {
     return { mode: 'own', userId: admin.id };
   }

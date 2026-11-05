@@ -27,6 +27,8 @@ import { dayKey, officerAllocations, reshareDay, shareDay } from '../services/ca
 import { transferWelcomeCalls } from '../controllers/welcomeCallController';
 import { approveContract, getPendingApprovals } from '../controllers/contractApprovalController';
 import { getVerificationQueue, getCsoCallQueue } from '../controllers/customerServiceController';
+import { createContactAttempt } from '../controllers/contactAttemptController';
+import { resolveCustomerScope } from '../services/scopeService';
 
 const TAG = `wc${Date.now()}`;
 let failures = 0;
@@ -269,6 +271,46 @@ async function main() {
     assert.ok(left.every((x) => made.has(x.customerId_uuid)));
     const mineNow = (await officerAllocations(C3.id, today)).allocations;
     assert.ok(mineNow.length >= 1 && mineNow.every((a) => a.called));
+  });
+
+  console.log('Logging calls');
+  const csoPerms = ['MANAGE_CONTACT_ATTEMPTS', 'VIEW_ASSIGNED_CUSTOMERS', 'VIEW_ASSIGNED_CONTRACTS'];
+  const c1Agents = (await prisma.csoAgentAssignment.findMany({ where: { csoId: C1.id }, select: { agentId: true } })).map((a) => a.agentId);
+  const sharedRows = await prisma.callAllocation.findMany({ where: { day: dayKey(today) } });
+  const customersOf = async (officerId: string) => {
+    const uuids = sharedRows.filter((r) => r.officerId === officerId).map((r) => r.customerId_uuid);
+    return prisma.customer.findMany({ where: { id_uuid: { in: uuids }, createdById: { notIn: c1Agents } }, select: { id: true } });
+  };
+  await check('a CSO can log a call for a customer shared to them, though not one of their agents’', async () => {
+    const [cust] = await customersOf(C1.id);
+    assert.ok(cust, 'no shared customer outside CsoOne’s agents');
+    const r = await call(createContactAttempt, { id: C1.id, role: 'CUSTOMER_SERVICE', permissions: csoPerms }, { body: { customerId: cust.id, purpose: 'COLLECTION', outcome: 'NO_ANSWER' } });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+  });
+  await check('…but not for a customer that is neither on their list nor one of their agents’', async () => {
+    const [cust] = await customersOf(C2.id);
+    assert.ok(cust, 'no customer of CsoTwo to try');
+    const r = await call(createContactAttempt, { id: C1.id, role: 'CUSTOMER_SERVICE', permissions: csoPerms }, { body: { customerId: cust.id, purpose: 'COLLECTION', outcome: 'NO_ANSWER' } });
+    assert.strictEqual(r.status, 403);
+  });
+  await check('a sales agent given welcome calls reaches their welcome-call agents’ customers, and keeps their own', async () => {
+    const sellerRole = await role(`${TAG}_SELLER`);
+    const S = await mk('SellerWelcomer', sellerRole.id);
+    await setGrantedPermissions(S.id, ['VERIFY_CUSTOMER'], C3.id);
+    await prisma.csoAgentAssignment.deleteMany({ where: { agentId: A2.id } });
+    await prisma.csoAgentAssignment.create({ data: { csoId: S.id, agentId: A2.id, assignedById: C3.id } });
+    const sPerms = ['VIEW_OWN_CUSTOMERS', 'VIEW_OWN_CONTRACTS', 'MANAGE_CONTACT_ATTEMPTS', 'VERIFY_CUSTOMER'];
+    const scope = await resolveCustomerScope({ id: S.id, email: 'x', role: `${TAG}_SELLER`, permissions: sPerms as any });
+    assert.strictEqual(scope.mode, 'assigned');
+    assert.ok(scope.mode === 'assigned' && scope.agentIds.includes(A2.id) && scope.agentIds.includes(S.id), JSON.stringify(scope));
+    const pending = await contract(A2.id, 'PENDING_APPROVAL');
+    const cust = await prisma.customer.findUnique({ where: { id_uuid: pending.uuid }, select: { id: true } });
+    const r = await call(createContactAttempt, { id: S.id, role: `${TAG}_SELLER`, permissions: sPerms }, {
+      body: { customerId: cust!.id, contractId: pending.c.id, purpose: 'VERIFICATION', outcome: 'REACHED', verificationResult: 'VERIFIED' },
+    });
+    assert.strictEqual(r.status, 201, JSON.stringify(r.body));
+    const ok = await call(approveContract, { id: S.id, role: `${TAG}_SELLER`, permissions: sPerms }, { params: { id: pending.c.id } });
+    assert.strictEqual(ok.status, 200, JSON.stringify(ok.body));
   });
 
   await prisma.adminUser.updateMany({ where: { role: { name: 'CUSTOMER_SERVICE' }, lastName: TAG }, data: { isActive: false } });

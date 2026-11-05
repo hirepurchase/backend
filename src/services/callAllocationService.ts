@@ -220,6 +220,25 @@ export async function workingDay(now = new Date()): Promise<string | null> {
   return last?.day ?? null;
 }
 
+/** Is this customer on the officer's current call list? False on any error. */
+export async function isSharedTo(officerId: string, customerUuid: string, now = new Date()): Promise<boolean> {
+  try {
+    const day = await workingDayIfShared(now);
+    if (!day) return false;
+    return !!(await prisma.callAllocation.findFirst({ where: { day, officerId, customerId_uuid: customerUuid }, select: { id: true } }));
+  } catch {
+    return false;
+  }
+}
+
+/** As workingDay, but never shares a day as a side effect. */
+async function workingDayIfShared(now: Date): Promise<string | null> {
+  const today = dayKey(now);
+  if (await prisma.callAllocation.findFirst({ where: { day: today }, select: { id: true } })) return today;
+  const last = await prisma.callAllocation.findFirst({ where: { day: { lt: today } }, orderBy: { day: 'desc' }, select: { day: true } });
+  return last?.day ?? null;
+}
+
 /** One officer's calls for the working day, in priority order, with whether each has been made. */
 export async function officerAllocations(officerId: string, now = new Date()) {
   const day = await workingDay(now);

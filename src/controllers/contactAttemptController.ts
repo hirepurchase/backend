@@ -3,6 +3,7 @@ import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { resolveCustomerScope, resolveContractScope, scopeAllows } from '../services/scopeService';
+import { isSharedTo } from '../services/callAllocationService';
 
 const PURPOSES = ['VERIFICATION', 'COLLECTION', 'FOLLOW_UP', 'OTHER'];
 const OUTCOMES = [
@@ -80,8 +81,11 @@ export async function createContactAttempt(req: AuthenticatedRequest, res: Respo
       return;
     }
 
+    // A customer shared to this officer on today's call list can always be
+    // logged, whoever's agent sold to them.
+    const sharedToMe = await isSharedTo(admin.id, customer.id_uuid);
     const customerScope = await resolveCustomerScope(admin);
-    if (!scopeAllows(customerScope, customer.createdById)) {
+    if (!sharedToMe && !scopeAllows(customerScope, customer.createdById)) {
       res.status(403).json({ error: 'This customer belongs to an agent outside your assigned portfolio' });
       return;
     }
@@ -104,7 +108,7 @@ export async function createContactAttempt(req: AuthenticatedRequest, res: Respo
       }
 
       const contractScope = await resolveContractScope(admin);
-      if (!scopeAllows(contractScope, contract.createdById)) {
+      if (!sharedToMe && !scopeAllows(contractScope, contract.createdById)) {
         res.status(403).json({ error: 'This contract belongs to an agent outside your assigned portfolio' });
         return;
       }
