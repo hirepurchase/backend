@@ -134,7 +134,13 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
     // everyone else (administrators, leaders) sees the calls in their scope.
     if (admin.role === CUSTOMER_SERVICE_ROLE) {
       const { day, allocations } = await officerAllocations(admin.id);
-      const uuids = allocations.map((a) => a.customerUuid);
+      // A customer leaves the list once their call is logged, and comes back in
+      // tomorrow's share if they still need one. A call that did not reach
+      // them stays, at the bottom, to try again.
+      const toCall = allocations.filter((a) => !a.called);
+      const retries = allocations.filter((a) => a.retry);
+      const listed = [...toCall, ...retries];
+      const uuids = listed.map((a) => a.customerUuid);
       const built = uuids.length
         ? await buildCallRows({ customerId_uuid: { in: uuids } }, () => false)
         : [];
@@ -153,17 +159,19 @@ export async function getCsoCallQueue(req: AuthenticatedRequest, res: Response):
           isUrgent: false, urgentReason: null, temporaryUnlock: null, contracts: [],
         });
       }
-      const rows = allocations
+      const rows = listed
         .map((a) => {
           const row = byUuid.get(a.customerUuid);
-          return row ? { ...row, allocation: { kind: a.kind, reason: a.reason, called: a.called } } : null;
+          return row ? { ...row, allocation: { kind: a.kind, reason: a.reason, retry: a.retry } } : null;
         })
         .filter(Boolean) as any[];
       res.json({
         mode: 'SHARED',
         day,
         count: rows.length,
-        calledCount: rows.filter((r) => r.allocation.called).length,
+        sharedCount: allocations.length,
+        calledCount: allocations.length - toCall.length,
+        retryCount: retries.length,
         urgentCount: rows.filter((row) => row.isUrgent).length,
         temporaryUnlockCount: rows.filter((row) => row.temporaryUnlock).length,
         overdueInstallmentCount: rows.reduce((sum, row) => sum + row.overdueCount, 0),

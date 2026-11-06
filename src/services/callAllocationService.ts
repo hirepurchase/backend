@@ -192,15 +192,21 @@ export async function shareDay(now = new Date()): Promise<ShareSummary> {
   return { day, created, total: created, officers: officers.length, alreadyShared: false };
 }
 
-/** Customers on a day's list that someone has already called about payment today. */
-async function calledToday(customerUuids: string[], now: Date): Promise<Set<string>> {
-  if (!customerUuids.length) return new Set();
+/** The call did not reach the customer, so it stays on the list to try again. */
+const RETRY_OUTCOMES = ['NO_ANSWER', 'UNREACHABLE'];
+
+/**
+ * The latest outcome today for each customer someone has called (a welcome
+ * call does not count). A customer with no entry has not been called today.
+ */
+async function callsToday(customerUuids: string[], now: Date): Promise<Map<string, string>> {
+  if (!customerUuids.length) return new Map();
   const rows = await prisma.contactAttempt.findMany({
-    where: { customerId_uuid: { in: customerUuids }, contactedAt: { gte: startOfDay(now) }, purpose: { in: ['COLLECTION', 'FOLLOW_UP'] } },
-    select: { customerId_uuid: true },
-    distinct: ['customerId_uuid'],
+    where: { customerId_uuid: { in: customerUuids }, contactedAt: { gte: startOfDay(now) }, purpose: { not: 'VERIFICATION' } },
+    select: { customerId_uuid: true, outcome: true },
+    orderBy: { contactedAt: 'asc' },
   });
-  return new Set(rows.map((r) => r.customerId_uuid));
+  return new Map(rows.map((r) => [r.customerId_uuid, r.outcome]));
 }
 
 /**
@@ -242,12 +248,22 @@ async function workingDayIfShared(now: Date): Promise<string | null> {
 /** One officer's calls for the working day, in priority order, with whether each has been made. */
 export async function officerAllocations(officerId: string, now = new Date()) {
   const day = await workingDay(now);
-  if (!day) return { day: null, allocations: [] as Array<{ customerUuid: string; kind: string; reason: string | null; priority: number; called: boolean }> };
+  if (!day) return { day: null, allocations: [] as Array<{ customerUuid: string; kind: string; reason: string | null; priority: number; called: boolean; retry: boolean }> };
   const rows = await prisma.callAllocation.findMany({ where: { day, officerId }, orderBy: { priority: 'asc' } });
-  const called = await calledToday(rows.map((r) => r.customerId_uuid), now);
+  const calls = await callsToday(rows.map((r) => r.customerId_uuid), now);
   return {
     day,
-    allocations: rows.map((r) => ({ customerUuid: r.customerId_uuid, kind: r.kind, reason: r.reason, priority: r.priority, called: called.has(r.customerId_uuid) })),
+    allocations: rows.map((r) => {
+      const outcome = calls.get(r.customerId_uuid);
+      return {
+        customerUuid: r.customerId_uuid,
+        kind: r.kind,
+        reason: r.reason,
+        priority: r.priority,
+        called: outcome !== undefined,
+        retry: !!outcome && RETRY_OUTCOMES.includes(outcome),
+      };
+    }),
   };
 }
 
@@ -261,7 +277,7 @@ export async function daySummary(now = new Date()) {
   });
   if (!day) return { day: null, officers: officers.map((o) => ({ id: o.id, name: `${o.firstName} ${o.lastName}`.trim(), total: 0, called: 0, byKind: {} })) };
   const rows = await prisma.callAllocation.findMany({ where: { day }, select: { officerId: true, kind: true, customerId_uuid: true } });
-  const called = await calledToday(rows.map((r) => r.customerId_uuid), now);
+  const called = await callsToday(rows.map((r) => r.customerId_uuid), now);
   const ids = new Set([...officers.map((o) => o.id), ...rows.map((r) => r.officerId)]);
   const extra = await prisma.adminUser.findMany({ where: { id: { in: [...ids].filter((id) => !officers.some((o) => o.id === id)) } }, select: { id: true, firstName: true, lastName: true } });
   return {
@@ -285,7 +301,7 @@ export async function reshareDay(officerIds: string[], now = new Date()): Promis
   const valid = (await customerServiceOfficerIds()).filter((id) => officerIds.includes(id));
   if (!valid.length) throw new Error('Choose at least one active customer service officer');
   const rows = await prisma.callAllocation.findMany({ where: { day }, select: { id: true, officerId: true, customerId_uuid: true, priority: true } });
-  const called = await calledToday(rows.map((r) => r.customerId_uuid), now);
+  const called = await callsToday(rows.map((r) => r.customerId_uuid), now);
   // Officers who are in keep their lists (and their promises); only the calls
   // not yet made by someone who is out move, to whoever has the fewest.
   const stranded = rows.filter((r) => !valid.includes(r.officerId) && !called.has(r.customerId_uuid));

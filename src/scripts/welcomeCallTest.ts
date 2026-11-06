@@ -240,16 +240,60 @@ async function main() {
     assert.strictEqual(again.alreadyShared, true);
     assert.strictEqual(await prisma.callAllocation.count({ where: { day: dayKey(today) } }), rows.length);
   });
-  await check('a CSO’s call queue is their share, in order, marked when called', async () => {
+  await check('a CSO’s call queue is their share, in order, without calls already logged', async () => {
     const r = await call(getCsoCallQueue, { id: C2.id, role: 'CUSTOMER_SERVICE', permissions: ['MANAGE_CONTACT_ATTEMPTS'] });
     assert.strictEqual(r.body.mode, 'SHARED');
     const theirs = rows.filter((x) => x.officerId === C2.id).length;
-    assert.strictEqual(r.body.count, theirs);
+    assert.strictEqual(r.body.sharedCount, theirs);
+    assert.strictEqual(r.body.count - r.body.retryCount + r.body.calledCount, theirs);
     const promised = r.body.customers.find((c: any) => c.customer.uuid === overdue[0].uuid);
     assert.strictEqual(promised?.allocation.kind, 'PROMISE');
     // In the order of the share, which puts promises before ordinary recoveries and reminders.
-    const order = r.body.customers.map((c: any) => rows.find((x) => x.customerId_uuid === c.customer.uuid)!.priority);
+    const order = r.body.customers.filter((c: any) => !c.allocation.retry).map((c: any) => rows.find((x) => x.customerId_uuid === c.customer.uuid)!.priority);
     assert.deepStrictEqual(order, [...order].sort((a: number, b: number) => a - b));
+  });
+  await check('a call that reached the customer takes them off the list, whatever its purpose', async () => {
+    const who = { id: C2.id, role: 'CUSTOMER_SERVICE', permissions: ['MANAGE_CONTACT_ATTEMPTS'] };
+    const before = await call(getCsoCallQueue, who);
+    const [first, second] = before.body.customers;
+    await prisma.contactAttempt.create({ data: { customerId_uuid: first.customer.uuid, officerId: C2.id, purpose: 'COLLECTION', outcome: 'PROMISE_TO_PAY' } });
+    await prisma.contactAttempt.create({ data: { customerId_uuid: second.customer.uuid, officerId: C2.id, purpose: 'OTHER', outcome: 'REACHED' } });
+    const after = await call(getCsoCallQueue, who);
+    const left = after.body.customers.map((c: any) => c.customer.uuid);
+    assert.ok(!left.includes(first.customer.uuid) && !left.includes(second.customer.uuid));
+    assert.strictEqual(after.body.count, before.body.count - 2);
+    assert.strictEqual(after.body.calledCount, before.body.calledCount + 2);
+    assert.strictEqual(after.body.sharedCount, before.body.sharedCount);
+  });
+  await check('no answer or unreachable: stays at the bottom to try again; answered on retry: leaves', async () => {
+    const who = { id: C2.id, role: 'CUSTOMER_SERVICE', permissions: ['MANAGE_CONTACT_ATTEMPTS'] };
+    const before = await call(getCsoCallQueue, who);
+    const [first, second] = before.body.customers;
+    await prisma.contactAttempt.create({ data: { customerId_uuid: first.customer.uuid, officerId: C2.id, purpose: 'COLLECTION', outcome: 'NO_ANSWER' } });
+    await prisma.contactAttempt.create({ data: { customerId_uuid: second.customer.uuid, officerId: C2.id, purpose: 'COLLECTION', outcome: 'UNREACHABLE' } });
+    const after = await call(getCsoCallQueue, who);
+    assert.strictEqual(after.body.count, before.body.count);
+    assert.strictEqual(after.body.retryCount, before.body.retryCount + 2);
+    assert.strictEqual(after.body.calledCount, before.body.calledCount + 2);
+    // Every call to retry sits below every call not yet made (earlier runs in this database may have left some).
+    const firstRetry = after.body.customers.findIndex((c: any) => c.allocation.retry);
+    const bottom = after.body.customers.slice(firstRetry);
+    assert.ok(bottom.every((c: any) => c.allocation.retry));
+    const bottomIds = bottom.map((c: any) => c.customer.uuid);
+    assert.ok(bottomIds.includes(first.customer.uuid) && bottomIds.includes(second.customer.uuid));
+    await prisma.contactAttempt.create({ data: { customerId_uuid: first.customer.uuid, officerId: C2.id, purpose: 'COLLECTION', outcome: 'REACHED' } });
+    const done = await call(getCsoCallQueue, who);
+    assert.ok(!done.body.customers.some((c: any) => c.customer.uuid === first.customer.uuid));
+    assert.strictEqual(done.body.retryCount, after.body.retryCount - 1);
+    assert.strictEqual(done.body.calledCount, after.body.calledCount);
+  });
+  await check('a welcome call does not take a customer off the list', async () => {
+    const who = { id: C2.id, role: 'CUSTOMER_SERVICE', permissions: ['MANAGE_CONTACT_ATTEMPTS'] };
+    const before = await call(getCsoCallQueue, who);
+    const [first] = before.body.customers;
+    await prisma.contactAttempt.create({ data: { customerId_uuid: first.customer.uuid, officerId: C2.id, purpose: 'VERIFICATION', outcome: 'REACHED', verificationResult: 'VERIFIED' } });
+    const after = await call(getCsoCallQueue, who);
+    assert.strictEqual(after.body.count, before.body.count);
   });
   await check('reshare: CsoThree is off — their calls not yet made go to the other two', async () => {
     const before = rows.filter((r) => r.officerId === C3.id);
@@ -260,7 +304,7 @@ async function main() {
     start.setHours(0, 0, 0, 0);
     const made = new Set(
       (await prisma.contactAttempt.findMany({
-        where: { customerId_uuid: { in: before.map((b) => b.customerId_uuid) }, contactedAt: { gte: start }, purpose: { in: ['COLLECTION', 'FOLLOW_UP'] } },
+        where: { customerId_uuid: { in: before.map((b) => b.customerId_uuid) }, contactedAt: { gte: start }, purpose: { not: 'VERIFICATION' } },
         select: { customerId_uuid: true },
       })).map((x) => x.customerId_uuid),
     );
