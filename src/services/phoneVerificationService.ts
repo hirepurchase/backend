@@ -28,8 +28,11 @@ export interface PhoneVerificationResult {
 
 /** enforce (default): refuse unregistered numbers · warn: save and flag them · off: no checks. */
 export function phoneVerificationMode(): 'enforce' | 'warn' | 'off' {
-  const mode = String(process.env.PHONE_VERIFICATION_MODE || 'enforce').trim().toLowerCase();
-  return mode === 'warn' || mode === 'off' ? mode : 'enforce';
+  // Off unless switched on: management turned the registered-name check off
+  // (9 Nov 2026). Set PHONE_VERIFICATION_MODE=enforce (refuse mismatches) or
+  // warn (save and flag) on the server to bring it back.
+  const mode = String(process.env.PHONE_VERIFICATION_MODE || 'off').trim().toLowerCase();
+  return mode === 'warn' || mode === 'enforce' ? mode : 'off';
 }
 
 // Hubtel's "Collection Account Number" is the same POS sales ID payments use.

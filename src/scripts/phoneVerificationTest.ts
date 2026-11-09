@@ -72,6 +72,17 @@ async function main() {
   await prisma.customer.deleteMany({ where: { phone: { startsWith: '024111000' } } });
 
   console.log('Name comparison');
+  await check('the check is off unless switched on', () => {
+    const saved = process.env.PHONE_VERIFICATION_MODE;
+    delete process.env.PHONE_VERIFICATION_MODE;
+    assert.equal(svc.phoneVerificationMode(), 'off');
+    process.env.PHONE_VERIFICATION_MODE = 'nonsense';
+    assert.equal(svc.phoneVerificationMode(), 'off');
+    process.env.PHONE_VERIFICATION_MODE = saved;
+  });
+  // The rest of this file exercises the check itself, so it runs switched on.
+  process.env.PHONE_VERIFICATION_MODE = 'enforce';
+
   await check('surname-first SIM name still matches', () => assert.equal(svc.compareNames('Kwame Mensah', 'MENSAH KWAME ASANTE').status, 'MATCHED'));
   await check('one slip in a long name is allowed', () => assert.equal(svc.compareNames('Kwami Mensah', 'MENSAH KWAME').status, 'MATCHED'));
   await check('short form matches (Emma / Emmanuel)', () => assert.equal(svc.compareNames('Emma Owusu', 'EMMANUEL OWUSU').status, 'MATCHED'));
@@ -137,7 +148,7 @@ async function main() {
       assert.equal(r.status, 201, JSON.stringify(r.body));
       assert.equal(r.body.phoneVerificationStatus, 'NOT_REGISTERED');
     } finally {
-      delete process.env.PHONE_VERIFICATION_MODE;
+      process.env.PHONE_VERIFICATION_MODE = 'enforce';
     }
   });
 
@@ -150,7 +161,7 @@ async function main() {
       assert.equal(r.body.phoneVerificationStatus, null);
       assert.equal(hits.length, before);
     } finally {
-      delete process.env.PHONE_VERIFICATION_MODE;
+      process.env.PHONE_VERIFICATION_MODE = 'enforce';
     }
   });
 
