@@ -21,6 +21,17 @@ export type TemporaryUnlockStatus = typeof TEMPORARY_UNLOCK_STATUS[keyof typeof 
 export const DEFAULT_MAX_TEMPORARY_UNLOCK_WEEKS = 4;
 
 /**
+ * Approved temporary unlocks — a cluster leader vouches, an admin approves a
+ * window of weeks — are retired. A locked customer now pays part of what is
+ * overdue to open the phone for a while (paidUnlockService). No new request,
+ * approval or extension is accepted; windows already running can still be
+ * ended early, one at a time or all together, and history stays readable.
+ */
+export const APPROVED_UNLOCKS_RETIRED = true;
+export const APPROVED_UNLOCKS_RETIRED_MESSAGE =
+  'Temporary unlock requests have ended. A locked customer can now pay part of what is overdue to open their phone: on the short code, in the app, or with cash at the office.';
+
+/**
  * Whether a defaulted unlock stops the selling agent from creating contracts.
  * An admin setting, on by default. Answers "on" if the setting cannot be read,
  * so a database hiccup never quietly lets a blocked agent sell.

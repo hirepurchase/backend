@@ -92,6 +92,7 @@ export async function downloadContractStatement(req: AuthenticatedRequest, res: 
       payments: contract.payments.map(p => ({
         transactionRef: p.transactionRef,
         amount: p.amount,
+        unlockFee: p.unlockFee,
         paymentDate: p.paymentDate,
         status: p.status,
         paymentMethod: p.paymentMethod,

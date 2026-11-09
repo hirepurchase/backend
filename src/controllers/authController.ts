@@ -564,7 +564,8 @@ export async function getCurrentCustomer(req: AuthenticatedRequest, res: Respons
     const activeContracts = customer.contracts.filter(c => c.status === 'ACTIVE').length;
 
     // Calculate total amount paid
-    const totalPaid = customer.payments.reduce((sum, payment) => sum + payment.amount, 0);
+    // Towards the contracts: a temporary unlock's charge is not part of it.
+    const totalPaid = customer.payments.reduce((sum, payment) => sum + payment.amount - (payment.unlockFee ?? 0), 0);
 
     res.json({
       id: customer.id_uuid || customer.id,

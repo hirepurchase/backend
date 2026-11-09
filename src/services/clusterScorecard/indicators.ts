@@ -156,7 +156,7 @@ export async function measurePayments(range: MonthRange, agentIds: string[], lea
         { paymentDate: null, createdAt: { gte: range.from, lt: range.to } },
       ],
     },
-    select: { amount: true, paymentDate: true, createdAt: true, contractId: true, contract: { select: { createdById: true } } },
+    select: { amount: true, unlockFee: true, paymentDate: true, createdAt: true, contractId: true, contract: { select: { createdById: true } } },
   });
 
   // Contracts already 30+ days behind when the month began: an instalment
@@ -177,7 +177,8 @@ export async function measurePayments(range: MonthRange, agentIds: string[], lea
     const at = p.paymentDate ?? p.createdAt;
     const leader = lead(p.contract.createdById, at);
     add(leader, 'COLLECTIONS', p.amount);
-    if (lateContracts.has(p.contractId)) add(leader, 'ARREARS_RECOVERED', p.amount);
+    // An unlock charge is money in, but not arrears paid off.
+    if (lateContracts.has(p.contractId)) add(leader, 'ARREARS_RECOVERED', p.amount - (p.unlockFee ?? 0));
   }
 }
 

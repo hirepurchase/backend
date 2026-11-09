@@ -36,7 +36,7 @@ async function main() {
   Object.assign(process.env, {
     HUBTEL_RECEIVE_MONEY_URL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/receive`,
     HUBTEL_POS_SALES_ID: 'test', HUBTEL_API_KEY: 'test', HUBTEL_API_SECRET: 'test',
-    USSD_PROMPT_DELAY_MS: '50', ENABLE_SMS_NOTIFICATIONS: 'false', NALO_API_KEY: '',
+    USSD_PROMPT_DELAY_MS: '50', ENABLE_SMS_NOTIFICATIONS: 'false', ENABLE_EMAIL_NOTIFICATIONS: 'false', NALO_API_KEY: '',
   });
   const { default: prisma } = require('../config/database');
   const { handleUssdSession } = require('../controllers/paymentController');
@@ -79,7 +79,7 @@ async function main() {
   await check('dialling shows pay for self / pay for others / cancel', async () => {
     const [first] = await session(phones.stranger, []);
     assert.equal(first.Type, 'response');
-    assert.match(first.Message, /1\. Pay for self\n2\. Pay for others\n0\. Cancel/);
+    assert.match(first.Message, /1\. Pay for self\n2\. Pay for others\n3\. Agent deposits\n0\. Cancel/);
   });
 
   await check('pay for self: owner sees their own balance (not-yet-activated account included)', async () => {

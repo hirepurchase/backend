@@ -19,6 +19,7 @@ import {
 import { getCustomerContracts, getContractById } from '../controllers/contractController';
 import { downloadContractStatement } from '../controllers/statementController';
 import { authenticateAdmin, authenticateCustomer, requireAnyPermission } from '../middleware/auth';
+import { customerRequestTemporaryUnlock } from '../controllers/paidUnlockController';
 import { customerUpload } from '../config/upload';
 import {
   CUSTOMER_ACCESS_PERMISSIONS,
@@ -33,6 +34,7 @@ router.put('/me', authenticateCustomer, updateOwnProfile);
 router.put('/me/password', authenticateCustomer, changeCustomerPassword);
 router.get('/me/contracts', authenticateCustomer, getCustomerContracts);
 router.get('/me/contracts/:id', authenticateCustomer, getContractById);
+router.post('/me/contracts/:id/temporary-unlock', authenticateCustomer, customerRequestTemporaryUnlock);
 router.get('/me/contracts/:contractId/statement', authenticateCustomer, downloadContractStatement);
 router.get('/me/payments', authenticateCustomer, getCustomerPayments);
 router.get('/me/installments/upcoming', authenticateCustomer, getCustomerUpcomingInstallments);

@@ -19,7 +19,10 @@ import * as crypto from 'crypto';
  *     `lockAfterOverdueDays` past its due date + grace — the same day Knox's
  *     morning run would lock it;
  *   - late charges never cause a lock; with holdOnUnpaidPenalties on they keep
- *     an existing one in place.
+ *     an existing one in place;
+ *   - a paid temporary unlock opens the phone to the window's end — on a
+ *     defaulted contract too — but never over the deposit hold, and never
+ *     cuts short a schedule that already runs later.
  */
 
 export type DecisionAction = 'EXTEND' | 'HOLD' | 'LOCK' | 'RELEASE' | 'CANCEL' | 'NONE';
@@ -38,6 +41,8 @@ export interface DecideInput {
   };
   installments: Array<{ installmentNo: number; dueDate: Date; amount: number; paidAmount: number; status: string }>;
   tempUnlocks: Array<{ status: string; expiresAt: Date | null }>;
+  /** End of the latest paid temporary unlock still running (paidUnlockService), or null. */
+  paidUnlockUntil?: Date | null;
   /** null when no ledger row exists for the contract. */
   depositLedger: { outstandingBalance: number } | null;
   penaltiesOwed: number;
@@ -85,7 +90,7 @@ const DAY_MS = 86400_000;
 const HORIZON_REFRESH_MS = 7 * DAY_MS;
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
-function lockMomentFor(dueDate: Date, graceDays: number, lockAfterDays: number): Date {
+export function lockMomentFor(dueDate: Date, graceDays: number, lockAfterDays: number): Date {
   const d = new Date(dueDate);
   d.setDate(d.getDate() + graceDays + lockAfterDays);
   d.setHours(LOCK_HOUR, LOCK_MINUTE, 0, 0);
@@ -157,6 +162,17 @@ export function decide(input: DecideInput): Decision {
       ? result('LOCK', 'Cancelled — the phone is locked like any unsold stock.', { nextRepayTime: lockNow(), lockNow: true })
       : result('NONE', 'Cancelled after activation — lock date is never extended, so the phone stays locked.');
   }
+  // A paid window is honoured only if it ends beyond the "lock now" margin.
+  const paidEnd =
+    input.paidUnlockUntil && input.paidUnlockUntil.getTime() > now.getTime() + LOCK_NOW_LEAD_MS ? input.paidUnlockUntil : null;
+  const horizon = new Date(now.getTime() + settings.maxUnlockHorizonDays * DAY_MS);
+
+  // A defaulted contract is otherwise never extended; a window the customer
+  // has paid for is the one exception, and it ends exactly when it says.
+  if (contract.status === 'DEFAULTED' && paidEnd) {
+    const target = new Date(Math.min(paidEnd.getTime(), horizon.getTime()));
+    return result('EXTEND', 'Paid temporary unlock in force (defaulted contract).', { nextRepayTime: target });
+  }
   if (contract.status === 'WRITTEN_OFF' || contract.status === 'DEFAULTED') {
     return result('NONE', `Contract ${contract.status.toLowerCase().replace('_', ' ')} — lock date is never extended.`);
   }
@@ -165,7 +181,6 @@ export function decide(input: DecideInput): Decision {
   }
 
   // ── ACTIVE ───────────────────────────────────────────────────────────────
-  const horizon = new Date(now.getTime() + settings.maxUnlockHorizonDays * DAY_MS);
   const contractEnd = lockMomentFor(contract.endDate, contract.gracePeriodDays, settings.lockAfterOverdueDays);
   const clamp = (d: Date) => new Date(Math.min(d.getTime(), horizon.getTime(), Math.max(contractEnd.getTime(), now.getTime() + LOCK_NOW_LEAD_MS)));
 
@@ -195,6 +210,13 @@ export function decide(input: DecideInput): Decision {
         { nextRepayTime: at, scheduleExpiresAt: schedule, depositHold: true, lockNow: true },
       );
     }
+  }
+
+  // A paid window, after the deposit hold so it can never override it. Only
+  // when it ends later than the schedule would — otherwise the schedule wins.
+  if (paidEnd && paidEnd.getTime() > schedule.getTime()) {
+    const target = new Date(Math.min(paidEnd.getTime(), horizon.getTime()));
+    return result('EXTEND', 'Paid temporary unlock in force.', { nextRepayTime: target, scheduleExpiresAt: schedule });
   }
 
   if (schedule.getTime() <= now.getTime()) {

@@ -5,6 +5,7 @@ import {
   rejectTemporaryUnlockRequest,
   cancelTemporaryUnlockRequest,
   revokeTemporaryUnlockRequest,
+  endAllTemporaryUnlocks,
   listTemporaryUnlockRequests,
   getPendingTemporaryUnlockCount,
   getEligibleContracts,
@@ -38,5 +39,7 @@ router.post('/:id/cancel', requireAnyPermission(PERMISSIONS.REQUEST_TEMPORARY_UN
 // Ending a live window is an approver's decision, not the requester's.
 router.post('/:id/extend', requireAnyPermission(PERMISSIONS.APPROVE_TEMPORARY_UNLOCK), extendTemporaryUnlockRequest);
 router.post('/:id/revoke', requireAnyPermission(PERMISSIONS.APPROVE_TEMPORARY_UNLOCK), revokeTemporaryUnlockRequest);
+// The feature is retired: end every window still running in one go.
+router.post('/end-all', requireAnyPermission(PERMISSIONS.APPROVE_TEMPORARY_UNLOCK), endAllTemporaryUnlocks);
 
 export default router;

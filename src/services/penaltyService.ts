@@ -135,7 +135,7 @@ interface AccrualContract {
  */
 function balanceOnDay(
   contract: AccrualContract,
-  payments: Array<{ amount: number; paymentDate: Date }>,
+  payments: Array<{ amount: number; unlockFee?: number | null; paymentDate: Date }>,
   day: Date
 ): number {
   if (contract.totalPrice === undefined || contract.depositAmount === undefined) {
@@ -145,7 +145,7 @@ function balanceOnDay(
   const endOfDay = atEndOfDay(day);
   const paidBy = payments
     .filter((row) => new Date(row.paymentDate).getTime() <= endOfDay.getTime())
-    .reduce((sum, row) => sum + row.amount, 0);
+    .reduce((sum, row) => sum + row.amount - (row.unlockFee ?? 0), 0); // an unlock's charge is not towards the balance
   return Math.max(0, roundMoney(contract.totalPrice - (contract.depositAmount + paidBy)));
 }
 
@@ -168,7 +168,7 @@ export async function planExpiryPenaltiesForContract(
   existingCharges?: Array<{ dedupeKey: string | null; amount: number }>,
   /** Successful payments on this contract, so a backfilled day can be priced
    *  on the balance that actually stood on it. */
-  paymentHistory?: Array<{ amount: number; paymentDate: Date }>
+  paymentHistory?: Array<{ amount: number; unlockFee?: number | null; paymentDate: Date }>
 ): Promise<Array<{ dedupeKey: string; periodDate: Date; amount: number; reason: string }>> {
   if (!settings.expiryPenaltyEnabled || settings.expiryPenaltyRate <= 0) return [];
   if (contract.status !== 'ACTIVE') return [];
@@ -400,18 +400,19 @@ export async function accrueExpiryPenalties(options: {
 
   // Only DAILY prices per-day, so only DAILY pays for the payment history —
   // again as one query for the whole book rather than one per contract.
-  const paymentsByContract = new Map<string, Array<{ amount: number; paymentDate: Date }>>();
+  const paymentsByContract = new Map<string, Array<{ amount: number; unlockFee?: number | null; paymentDate: Date }>>();
   if (settings.expiryPenaltyMode === PENALTY_MODE.DAILY) {
     const payments = await prismaAny.paymentTransaction.findMany({
       where: {
         status: 'SUCCESS',
         contractId: { in: contracts.map((c: AccrualContract) => c.id) },
       },
-      select: { contractId: true, amount: true, paymentDate: true },
+      select: { contractId: true, amount: true, unlockFee: true, paymentDate: true },
     });
     for (const row of payments) {
       const list = paymentsByContract.get(row.contractId) ?? [];
-      list.push({ amount: row.amount, paymentDate: row.paymentDate });
+      // The unlock charge travels with the payment so balanceOnDay can leave it out.
+      list.push({ amount: row.amount, unlockFee: row.unlockFee, paymentDate: row.paymentDate });
       paymentsByContract.set(row.contractId, list);
     }
   }

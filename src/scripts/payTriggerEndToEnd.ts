@@ -357,27 +357,23 @@ async function main() {
     assert.ok(phones.get(imeiA)!.expiration! > nowS() + 3600, `lock date ${hoursFromNow(phones.get(imeiA)!.expiration).toFixed(2)}h away`);
   });
 
-  // ── 10. Temporary unlock ───────────────────────────────────────────────
-  console.log('\n10. Overdue again; an admin approves a temporary unlock');
-  let unlockId = '';
+  // ── 10. Temporary unlock (approved requests are retired) ───────────────
+  console.log('\n10. Overdue again; approved temporary unlocks are retired');
   await step('instalment 2 goes overdue → sweep locks', async () => {
     await prisma.installmentSchedule.updateMany({ where: { contractId: contractA.id, installmentNo: 2 }, data: { dueDate: day(-3), status: 'OVERDUE' } });
     await sweep();
     assert.ok(phones.get(imeiA)!.expiration! - nowS() <= 61);
   });
-  await step('temporary unlock requested and approved → phone opens for the window', async () => {
-    let r = await call('POST', '/temporary-unlocks', admin.token, { contractId: contractA.id, requestedWeeks: 1, reason: 'Customer travelling, will pay on return' });
-    assert.ok(r.status < 300, `request: ${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
-    unlockId = r.json.id || r.json.request?.id;
-    r = await call('POST', `/temporary-unlocks/${unlockId}/approve`, admin.token, { approvedWeeks: 1, note: 'ok' });
-    assert.ok(r.status < 300, `approve: ${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
-    await sleep(2500);
-    const h = hoursFromNow(phones.get(imeiA)!.expiration);
-    assert.ok(h > 24 * 6 && h < 24 * 8.5, `open for ${h.toFixed(1)}h`);
+  await step('a new temporary unlock request is refused', async () => {
+    const r = await call('POST', '/temporary-unlocks', admin.token, { contractId: contractA.id, requestedWeeks: 1, reason: 'Customer travelling, will pay on return' });
+    assert.equal(r.status, 410, `request: ${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
   });
-  await step('window revoked → phone locks again', async () => {
-    const r = await call('POST', `/temporary-unlocks/${unlockId}/revoke`, admin.token, { reason: 'Customer unreachable' });
-    assert.ok(r.status < 300, `${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
+  await step('a window left from before is ended by "end all" → phone stays locked', async () => {
+    await prisma.temporaryUnlockRequest.create({ data: {
+      contractId: contractA.id, agentId: contractA.createdById, requestedById: admin.u.id, requestedWeeks: 1, reason: 'From before the change',
+      status: 'APPROVED', approvedWeeks: 1, expiresAt: day(7), reviewedById: admin.u.id, reviewedAt: new Date() } });
+    const r = await call('POST', '/temporary-unlocks/end-all', admin.token, { reason: 'Replaced by paid temporary unlock' });
+    assert.ok(r.status < 300 && r.json.revoked >= 1, `${r.status} ${JSON.stringify(r.json).slice(0, 200)}`);
     await sleep(2500);
     assert.ok(phones.get(imeiA)!.expiration! - nowS() <= 61, `lock date ${hoursFromNow(phones.get(imeiA)!.expiration).toFixed(2)}h away`);
   });

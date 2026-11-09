@@ -31,6 +31,7 @@ import { hasAnyPermission, hasPermission, PERMISSIONS } from '../constants/permi
 import { resolveContractScope, applyCreatorScope, scopeAllows } from '../services/scopeService';
 import { isSellingAgentRole } from '../constants/roles';
 import { notifyPayTrigger } from '../services/payTrigger/events';
+import { getTemporaryUnlockOffer } from '../services/paidUnlockService';
 
 async function canViewAnyContract(adminUser: AdminUserPayload | undefined, contractCreatedById: string | null | undefined): Promise<boolean> {
   const scope = await resolveContractScope(adminUser);
@@ -888,6 +889,8 @@ export async function getContractById(req: AuthenticatedRequest, res: Response):
       ...contract,
       penaltyOutstanding,
       totalDue: Math.round((contract.outstandingBalance + penaltyOutstanding) * 100) / 100,
+      // Paid temporary unlock: the offer, or null when there is nothing to say.
+      temporaryUnlock: await getTemporaryUnlockOffer(contract.id),
     });
   } catch (error) {
     console.error('Get contract error:', error);
@@ -935,7 +938,7 @@ export async function getCustomerContracts(req: AuthenticatedRequest, res: Respo
     });
 
     // Calculate next payment for each contract
-    const contractsWithNextPayment = contracts.map(contract => {
+    const contractsWithNextPayment = await Promise.all(contracts.map(async contract => {
       const nextInstallment = contract.installments.find(
         i => i.status === 'PENDING' || i.status === 'PARTIAL' || i.status === 'OVERDUE'
       );
@@ -967,8 +970,10 @@ export async function getCustomerContracts(req: AuthenticatedRequest, res: Respo
           isOverdue: true,
           isPenaltyOnly: true,
         } : null,
+        // Paid temporary unlock: the offer, or null when there is nothing to say.
+        temporaryUnlock: await getTemporaryUnlockOffer(contract.id),
       };
-    });
+    }));
 
     res.json({ contracts: contractsWithNextPayment });
   } catch (error) {
@@ -2575,9 +2580,9 @@ export async function payInstallment(req: AuthenticatedRequest, res: Response): 
       // dropped the deposit and overstated what the customer still owed.
       const successfulPayments = await prisma.paymentTransaction.findMany({
         where: { contractId, status: 'SUCCESS' },
-        select: { amount: true },
+        select: { amount: true, unlockFee: true },
       });
-      const paymentsSum = successfulPayments.reduce((sum, p) => sum + p.amount, 0);
+      const paymentsSum = successfulPayments.reduce((sum, p) => sum + p.amount - (p.unlockFee ?? 0), 0);
       const totalPaid = roundMoneyShared(updatedContract.depositAmount + paymentsSum);
       const outstandingBalance = roundMoneyShared(updatedContract.totalPrice - totalPaid);
       const isFullyPaid = outstandingBalance <= 0.005;

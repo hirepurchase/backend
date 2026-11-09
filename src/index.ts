@@ -11,6 +11,7 @@ import routes from './routes';
 import prisma from './config/database';
 import { initializeNotificationScheduler } from './services/notificationScheduler';
 import { startPaymentRetryScheduler } from './services/paymentRetryScheduler';
+import { startAgentDepositSweepScheduler } from './services/agentDepositSweepScheduler';
 import { startDeviceControlScheduler } from './services/deviceControlScheduler';
 import { startPayTriggerScheduler } from './services/payTrigger/scheduler';
 import { startCallAllocationScheduler } from './services/callAllocationService';
@@ -139,6 +140,9 @@ app.listen(PORT, () => {
 
   // Initialize payment retry scheduler
   startPaymentRetryScheduler();
+
+  // Agent deposit charges Hubtel never called back about
+  startAgentDepositSweepScheduler();
 
   // Initialize Knox Guard device control scheduler
   startDeviceControlScheduler();

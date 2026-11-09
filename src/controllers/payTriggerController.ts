@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import prisma from '../config/database';
+import { getPaidUnlockSettings, maxUnlockHours, validateTiers } from '../services/paidUnlockService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { createAuditLog } from '../services/auditService';
 import * as client from '../services/payTrigger/client';
@@ -362,6 +363,14 @@ export async function putSettings(req: AuthenticatedRequest, res: Response) {
           return fail(res, new Error(`${label}: {${unknown[0]}} is not something we can fill in. Use ${messages.PLACEHOLDERS.map((name) => `{${name}}`).join(', ')}.`));
         }
         data[key] = text || null;
+      }
+    }
+    // A shorter horizon must still cover every paid temporary unlock tier.
+    if (typeof data.maxUnlockHorizonDays === 'number') {
+      const { tiers } = await getPaidUnlockSettings();
+      const problem = validateTiers(tiers, await maxUnlockHours(data.maxUnlockHorizonDays));
+      if (problem) {
+        return fail(res, new Error(`That horizon is shorter than a temporary unlock tier. Shorten the tiers in Knox Guard settings first. (${problem})`));
       }
     }
     const settings = await prisma.payTriggerSettings.update({ where: { id: 'singleton' }, data: { ...data, updatedById: actor(req).id } });

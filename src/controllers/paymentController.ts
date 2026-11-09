@@ -12,6 +12,7 @@ import {
   processHubtelCallback,
   processPreapprovalCallback,
   formatPhoneForHubtel,
+  HUBTEL_AGENT_DEPOSIT_CALLBACK_URL,
 } from '../services/hubtelService';
 import { AdminUserPayload, AuthenticatedRequest, WebhookPayload } from '../types';
 import { validateWebhookRequest } from '../utils/callbackSecurity';
@@ -34,6 +35,32 @@ function payableCeiling(contract: { outstandingBalance: number; penaltyOutstandi
 import { hasPermission, PERMISSIONS } from '../constants/permissions';
 import { safelyEvaluateManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { settleTemporaryUnlockOnPayment } from '../services/temporaryUnlockService';
+import {
+  applyTemporaryUnlock,
+  formatPeriod,
+  formatShortDateTime,
+  getTemporaryUnlockOffer,
+  PAID_UNLOCK_CHANNEL,
+  requestTemporaryUnlock,
+  TemporaryUnlockError,
+  TemporaryUnlockOffer,
+} from '../services/paidUnlockService';
+import { SELLING_AGENT_ROLES } from '../constants/roles';
+import {
+  agentSessionTag,
+  clearPinFailures,
+  findAgentByPin,
+  isPhoneLockedOut,
+  isValidAgentSessionTag,
+  recordPinFailure,
+} from '../services/agentPinService';
+import {
+  AgentDepositError,
+  agentDepositsToPay,
+  DepositToPay,
+  failUssdRemittance,
+  openUssdRemittance,
+} from '../services/agentDepositUssdService';
 import { notifyPayTrigger } from '../services/payTrigger/events';
 
 /**
@@ -399,6 +426,15 @@ export async function processSuccessfulPaymentForTest(paymentId: string): Promis
   return processSuccessfulPayment(paymentId);
 }
 
+/**
+ * Post a payment already saved as SUCCESS — allocate it, update the contract,
+ * open any paid unlock it was for and judge the device. For callers outside
+ * this file that record money themselves (cash for a temporary unlock).
+ */
+export async function postRecordedPayment(paymentId: string): Promise<void> {
+  return processSuccessfulPayment(paymentId);
+}
+
 async function processSuccessfulPayment(paymentId: string): Promise<void> {
   const payment = await prisma.paymentTransaction.findUnique({
     where: { id: paymentId },
@@ -421,7 +457,8 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
 
   if (!payment || !payment.contract) return;
 
-  let remainingAmount = roundMoney(payment.amount);
+  // An unlock's charge is the company's fee, not money towards the contract.
+  let remainingAmount = roundMoney(payment.amount - (payment.unlockFee ?? 0));
   const contract = payment.contract;
 
   await prisma.$transaction(async (tx) => {
@@ -442,7 +479,7 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
       },
     });
 
-    const paymentsSum = allSuccessfulPayments.reduce((sum, p) => sum + p.amount, 0);
+    const paymentsSum = allSuccessfulPayments.reduce((sum, p) => sum + p.amount - (p.unlockFee ?? 0), 0);
     const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
     const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
 
@@ -474,6 +511,10 @@ async function processSuccessfulPayment(paymentId: string): Promise<void> {
       data: contractUpdate,
     });
   });
+
+  // A charge made for a paid temporary unlock opens the window now that the
+  // money is in; the evaluation below is what actually opens the phone.
+  await applyTemporaryUnlock(payment.transactionRef, payment.id);
 
   // Close any unlock window or agent bar this payment has just settled,
   // before the device is judged — otherwise both wait for tomorrow's cron.
@@ -646,6 +687,13 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
       return;
     }
 
+    // Part of an unlock payment is the unlock charge, which an edited amount
+    // could fall below. Delete it (which also cancels the unlock) and record again.
+    if ((payment.unlockFee ?? 0) > 0 || metadata.temporaryUnlock) {
+      res.status(400).json({ error: 'This payment opened a phone for a temporary unlock and cannot be edited. Delete it and record the payment again.' });
+      return;
+    }
+
     const oldAmount = payment.amount;
     const newAmount = amount !== undefined ? Number(amount) : oldAmount;
     const amountDiff = newAmount - oldAmount;
@@ -672,7 +720,7 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
         const allPayments = await tx.paymentTransaction.findMany({
           where: { contractId: payment.contractId, status: 'SUCCESS' },
         });
-        const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount, 0);
+        const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount - (p.unlockFee ?? 0), 0);
         const contract = payment.contract;
         const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
         const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
@@ -800,7 +848,7 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
       const allPayments = await tx.paymentTransaction.findMany({
         where: { contractId: payment.contractId, status: 'SUCCESS' },
       });
-      const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount, 0);
+      const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount - (p.unlockFee ?? 0), 0);
       const contract = payment.contract;
       const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
       const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
@@ -1956,15 +2004,37 @@ type UssdPayer = 'SELF' | 'OTHER';
  * nothing to pay — the reason, worded for whoever is paying.
  */
 async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: string, network: string, payer: UssdPayer) {
-  const contract = await prisma.hirePurchaseContract.findFirst({
-    where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
-    include: {
-      installments: {
-        where: { status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
-        orderBy: { dueDate: 'asc' },
-      },
+  const contractInclude = {
+    installments: {
+      where: { status: { in: ['PENDING', 'OVERDUE', 'PARTIAL'] } },
+      orderBy: { dueDate: 'asc' as const },
     },
+  };
+  let contract = await prisma.hirePurchaseContract.findFirst({
+    where: { customerId_uuid: customer.id_uuid, status: 'ACTIVE' },
+    include: contractInclude,
   });
+
+  // A locked phone with a paid temporary unlock on offer goes to the unlock
+  // menu first. A defaulted contract is reachable only this way: it cannot
+  // otherwise be paid on the short code.
+  let offer = contract ? await getTemporaryUnlockOffer(contract.id) : null;
+  if (!contract) {
+    const defaulted = await prisma.hirePurchaseContract.findFirst({
+      where: { customerId_uuid: customer.id_uuid, status: 'DEFAULTED' },
+      include: contractInclude,
+      orderBy: { createdAt: 'desc' },
+    });
+    const defaultedOffer = defaulted ? await getTemporaryUnlockOffer(defaulted.id) : null;
+    if (defaulted && defaultedOffer?.available) {
+      contract = defaulted;
+      offer = defaultedOffer;
+    }
+  }
+  if (contract && offer?.available) {
+    const ctx: UnlockCtx = { contractId: contract.id, network, phone: paymentPhone, payer };
+    return { response: unlockChoiceScreen(sessionId, ctx, offer, customer, contract.contractNumber) };
+  }
 
   if (!contract) {
     return { missing: payer === 'SELF' ? 'You have no active hire purchase contract.' : 'That customer has no active hire purchase contract.' };
@@ -2015,6 +2085,472 @@ async function buildBalanceMenu(sessionId: string, customer: any, paymentPhone: 
   return { response: ussdResponse(sessionId, message, 'Aidoo Tech Hire Purchase', state) };
 }
 
+// ── Paid temporary unlock on the short code ─────────────────────────────────
+//
+// UNLOCK_CHOICE → UNLOCK_TIER → UNLOCK_CONFIRM → Mobile Money prompt. Amounts
+// are recomputed from the contract at every step; the session only carries the
+// contract, the paying phone and the tier the payer picked.
+
+const USSD_MAX_CHARS = 160;
+
+interface UnlockCtx {
+  contractId: string;
+  network: string;
+  phone: string;
+  payer: UssdPayer;
+}
+
+function unlockState(kind: 'UNLOCK_CHOICE' | 'UNLOCK_TIER', ctx: UnlockCtx): string {
+  return `${kind}|${ctx.contractId}|${ctx.network}|${ctx.phone}|${ctx.payer}`;
+}
+
+function parseUnlockState(state: string): UnlockCtx & { rest: string[] } {
+  const [, contractId, network, phone, payer, ...rest] = state.split('|');
+  return { contractId, network, phone, payer: payer === 'OTHER' ? 'OTHER' : 'SELF', rest };
+}
+
+function ussdGreeting(customer: { firstName: string; lastName?: string | null }, contractNumber: string, payer: UssdPayer): string {
+  return payer === 'SELF'
+    ? `Hi ${customer.firstName}, (${contractNumber})\n`
+    : `For: ${customer.firstName} ${String(customer.lastName || '').charAt(0)}. (${contractNumber})\n`;
+}
+
+/** USSD amounts: GHS12.50, or GHS12 when there are no pesewas — tiers must fit six to a screen. */
+function ussdGhs(amount: number): string {
+  const r = roundMoney(amount);
+  return `GHS${Number.isInteger(r) ? r.toFixed(0) : r.toFixed(2)}`;
+}
+
+function unlockChoiceScreen(
+  sessionId: string,
+  ctx: UnlockCtx,
+  offer: TemporaryUnlockOffer,
+  customer: { firstName: string; lastName?: string | null },
+  contractNumber: string,
+  prefix = '',
+) {
+  const status = offer.activeUntil ? `Open until ${formatShortDateTime(offer.activeUntil)}` : 'Phone locked';
+  const tail = `${status}. Overdue ${ussdGhs(offer.overdue)}\n1. Open phone (pay part)\n2. Pay any amount`;
+  let message = `${prefix}AIDOO TECH\n${ussdGreeting(customer, contractNumber, ctx.payer)}${tail}`;
+  if (message.length > USSD_MAX_CHARS) message = `${prefix}AIDOO TECH (${contractNumber})\n${tail}`;
+  return ussdResponse(sessionId, message, 'Open Phone', unlockState('UNLOCK_CHOICE', ctx));
+}
+
+function unlockTierScreen(sessionId: string, ctx: UnlockCtx, offer: TemporaryUnlockOffer, prefix = '') {
+  const build = (period: (h: number) => string) =>
+    `${prefix}Open phone:\n` +
+    offer.options.map((o, i) => `${i + 1}. ${ussdGhs(o.total)} - ${period(o.hours)}`).join('\n') +
+    `\n0. Back`;
+  let message = build(formatPeriod);
+  // Six tiers on a large debt can overrun the screen; shorten the periods.
+  if (message.length > USSD_MAX_CHARS) message = build((h) => (h % 24 === 0 ? `${h / 24}d` : `${h}h`));
+  return ussdResponse(sessionId, message, 'Open Phone', unlockState('UNLOCK_TIER', ctx));
+}
+
+/** The confirm screen. A tier's charge is shown on its own, so nobody pays it unawares. */
+function unlockConfirmText(o: { total: number; fee: number; hours: number }, prefix = ''): string {
+  const charge = o.fee > 0 ? ` (incl. ${ussdGhs(o.fee)} charge)` : '';
+  return `${prefix}Pay ${ussdGhs(o.total)}${charge} to open phone for ${formatPeriod(o.hours)}? It locks after that unless all overdue is paid.\n1. Confirm\n2. Cancel`;
+}
+
+async function unlockCustomerFor(contractId: string) {
+  return prisma.hirePurchaseContract.findUnique({
+    where: { id: contractId },
+    select: {
+      id: true,
+      contractNumber: true,
+      customerId_uuid: true,
+      customer: { select: { firstName: true, lastName: true, email: true } },
+    },
+  });
+}
+
+async function handleUnlockStep(sessionId: string, clientState: string, choice: string) {
+  const ctx = parseUnlockState(clientState);
+  const contract = await unlockCustomerFor(ctx.contractId);
+  if (!contract?.customer) return ussdRelease(sessionId, 'Session error. Please dial again.');
+  const offer = await getTemporaryUnlockOffer(contract.id);
+  const gone = () =>
+    ussdRelease(sessionId, offer?.message && !offer.available ? offer.message : 'This option is no longer available. Please dial again.');
+
+  if (clientState.startsWith('UNLOCK_CHOICE|')) {
+    if (choice === '2') {
+      const name = `${contract.customer.firstName} ${contract.customer.lastName}`;
+      const next = `AMOUNT|${contract.id}|${ctx.network}|${contract.customerId_uuid}|${name}|${contract.customer.email || ''}|${ctx.phone}|${contract.contractNumber}|${ctx.payer}`;
+      return ussdResponse(sessionId, 'Enter amount to pay (GHS):', 'Payment Amount', next, 'decimal');
+    }
+    if (!offer?.available) return gone();
+    if (choice === '1') return unlockTierScreen(sessionId, ctx, offer);
+    return unlockChoiceScreen(sessionId, ctx, offer, contract.customer, contract.contractNumber, 'Not an option.\n');
+  }
+
+  if (clientState.startsWith('UNLOCK_TIER|')) {
+    if (!offer?.available) return gone();
+    if (choice === '0') return unlockChoiceScreen(sessionId, ctx, offer, contract.customer, contract.contractNumber);
+    const option = /^\d+$/.test(choice) ? offer.options[Number(choice) - 1] : undefined;
+    if (!option) return unlockTierScreen(sessionId, ctx, offer, 'Not on the list.\n');
+    return ussdResponse(
+      sessionId,
+      unlockConfirmText(option),
+      'Open Phone',
+      `UNLOCK_CONFIRM|${ctx.contractId}|${ctx.network}|${ctx.phone}|${ctx.payer}|${option.percent}|${option.total}|${option.fee}`,
+    );
+  }
+
+  return null;
+}
+
+/** UNLOCK_CONFIRM: record the unlock against a new reference, then charge it. */
+async function confirmUnlock(sessionId: string, clientState: string, choice: string, res: Response): Promise<void> {
+  const ctx = parseUnlockState(clientState);
+  const [percentRaw, totalRaw, feeRaw = '0'] = ctx.rest;
+  if (choice === '2') {
+    res.json(ussdRelease(sessionId, 'Thank you. Goodbye.'));
+    return;
+  }
+  if (choice !== '1') {
+    res.json(ussdResponse(
+      sessionId,
+      `Not an option.\nPay ${ussdGhs(Number(totalRaw))}${Number(feeRaw) > 0 ? ` (incl. ${ussdGhs(Number(feeRaw))} charge)` : ''} to open phone? It locks after that unless all overdue is paid.\n1. Confirm\n2. Cancel`,
+      'Open Phone',
+      clientState,
+    ));
+    return;
+  }
+
+  const contract = await unlockCustomerFor(ctx.contractId);
+  if (!contract?.customer) {
+    res.json(ussdRelease(sessionId, 'Session error. Please dial again.'));
+    return;
+  }
+
+  let requested;
+  try {
+    requested = await requestTemporaryUnlock({
+      contractId: contract.id,
+      percent: Number(percentRaw),
+      channel: PAID_UNLOCK_CHANNEL.USSD,
+      expectedAmount: Number(totalRaw),
+    });
+  } catch (error: any) {
+    if (error instanceof TemporaryUnlockError) {
+      res.json(ussdRelease(sessionId, error.message));
+      return;
+    }
+    throw error;
+  }
+
+  const { option, clientReference } = requested;
+  const payment = await prisma.paymentTransaction.create({
+    data: {
+      transactionRef: clientReference,
+      contractId: contract.id,
+      customerId_uuid: contract.customerId_uuid,
+      amount: option.total,
+      unlockFee: option.fee,
+      paymentMethod: 'HUBTEL_REGULAR',
+      // A declined unlock is not charged again later: the price was for that
+      // moment, and a retry days on would open the phone out of the blue.
+      isAutoRetryEnabled: false,
+      mobileMoneyProvider: ctx.network,
+      mobileMoneyNumber: formatPhoneForHubtel(ctx.phone),
+      status: 'PENDING',
+      metadata: JSON.stringify({
+        initiatedAt: new Date().toISOString(),
+        gateway: 'HUBTEL_REGULAR',
+        channel: 'USSD',
+        sessionId,
+        paidFor: ctx.payer,
+        payerPhone: ctx.phone,
+        temporaryUnlock: { percent: option.percent, hours: option.hours, fee: option.fee },
+      }),
+    },
+  });
+
+  res.json(ussdRelease(
+    sessionId,
+    `Payment of ${ussdGhs(option.total)} to open your phone for ${formatPeriod(option.hours)}. You will receive a Mobile Money prompt on ${ctx.phone} shortly. Enter your PIN to approve.`,
+  ));
+  setTimeout(() => {
+    sendUssdPaymentPrompt(payment.id, {
+      amount: option.total,
+      customerName: `${contract.customer!.firstName} ${contract.customer!.lastName}`.trim(),
+      customerEmail: contract.customer!.email || undefined,
+      phone: ctx.phone,
+      network: ctx.network,
+      contractNumber: contract.contractNumber,
+      transactionRef: clientReference,
+    }).catch((err) => console.error('USSD unlock prompt failed:', err?.message || err));
+  }, USSD_PROMPT_DELAY_MS).unref?.();
+}
+
+// ── Agent deposits on the short code ────────────────────────────────────────
+//
+// MENU 3 → AGENT_PIN → AGENT_CHOOSE (contracts, paged) → AGENT_AMOUNT → AGENT_CONFIRM → prompt.
+// The PIN names the agent; the money comes from the phone that dialled. What
+// is owed is re-read at every step, and nothing is credited until Hubtel's
+// callback (agentDepositController.handleAgentPaymentCallback).
+
+const MAIN_MENU = `AIDOO TECH\n1. Pay for self\n2. Pay for others\n3. Agent deposits\n0. Cancel`;
+const AGENT_PIN_PROMPT = 'Enter your agent payment PIN, or 0 to go back:';
+const PIN_LOCKOUT_MESSAGE = 'Too many wrong PINs from this phone. Please try again in an hour.';
+const NOTHING_TO_PAY_IN = 'You have nothing to pay in right now. Any payment you have just approved is still being processed.';
+/** Contracts per list screen: three fit 160 characters with "Pay all", "More" and "Back". */
+const AGENT_PAGE_SIZE = 3;
+const AGENT_MORE = '9';
+
+function mainMenu(sessionId: string, dialingPhone: string, network: string) {
+  return ussdResponse(sessionId, MAIN_MENU, 'Aidoo Tech Hire Purchase', `MENU|${dialingPhone}|${network}`);
+}
+
+function agentPinScreen(sessionId: string, dialingPhone: string, network: string, prefix = '') {
+  return ussdResponse(sessionId, `${prefix}${AGENT_PIN_PROMPT}`, 'Agent Deposits', `AGENT_PIN|${dialingPhone}|${network}`, 'number');
+}
+
+/** "Kwame M" from the ledger's "Kwame Mensah". */
+function saleLabel(customerName: string, maxFirst = 12): string {
+  const [first = '', ...rest] = String(customerName || '').trim().split(/\s+/);
+  const initial = rest.length ? ` ${rest[rest.length - 1].charAt(0).toUpperCase()}` : '';
+  const f = first.charAt(0).toUpperCase() + first.slice(1).toLowerCase();
+  return `${f.slice(0, maxFirst)}${initial}`;
+}
+
+/**
+ * The agent's contracts with a deposit to pay in, oldest first, a page at a
+ * time: "1. Pay all", then each contract by number with the customer and what
+ * is owed, "9. More" when there are more, "0. Back".
+ */
+function agentChooseScreen(sessionId: string, base: string, deposits: DepositToPay[], page = 0, prefix = '') {
+  const pages = Math.max(1, Math.ceil(deposits.length / AGENT_PAGE_SIZE));
+  const p = Math.min(Math.max(0, page), pages - 1);
+  const shown = deposits.slice(p * AGENT_PAGE_SIZE, (p + 1) * AGENT_PAGE_SIZE);
+  const total = deposits.reduce((sum, d) => sum + d.payable, 0);
+  const build = (maxFirst: number, numberChars: number) =>
+    `${prefix}You owe ${ussdGhs(total)}${pages > 1 ? ` (${p + 1}/${pages})` : ''}\n1. Pay all\n` +
+    shown
+      .map((d, i) => {
+        const num = d.contractNumber.length > numberChars ? d.contractNumber.slice(-numberChars) : d.contractNumber;
+        const name = maxFirst > 0 ? ` ${saleLabel(d.customerName, maxFirst)}` : '';
+        return `${i + 2}. ${num}${name} ${ussdGhs(d.payable)}`;
+      })
+      .join('\n') +
+    (p < pages - 1 ? `\n${AGENT_MORE}. More` : '') +
+    `\n0. Back`;
+  // Shorten names first, then drop them, and only then the contract numbers.
+  let message = build(10, 20);
+  for (const [n, c] of [[8, 20], [6, 20], [0, 20], [0, 14], [0, 10]] as const) {
+    if (message.length <= USSD_MAX_CHARS) break;
+    message = build(n, c);
+  }
+  return ussdResponse(sessionId, message, 'Agent Deposits', `AGENT_CHOOSE|${base}|${p}`);
+}
+
+/** "CON2611ABC123 (Kwame M)" — the contract the agent is paying for. */
+function depositLabel(d: DepositToPay): string {
+  return `${d.contractNumber} (${saleLabel(d.customerName)})`;
+}
+
+function agentAmountScreen(sessionId: string, base: string, target: string, owed: number, name: string, prefix = '') {
+  return ussdResponse(
+    sessionId,
+    `${prefix}You owe ${ussdGhs(owed)} for ${name}.\nEnter amount to pay:`,
+    'Agent Deposits',
+    `AGENT_AMOUNT|${base}|${target}`,
+    'decimal',
+  );
+}
+
+/** What the agent owes now, on one sale or all of them. */
+async function agentOwed(agentId: string, target: string) {
+  const deposits = await agentDepositsToPay(agentId);
+  if (target === 'ALL') {
+    return { deposits, owed: roundMoney(deposits.reduce((s, d) => s + d.payable, 0)), name: deposits.length === 1 ? depositLabel(deposits[0]) : 'all your contracts' };
+  }
+  const one = deposits.find((d) => d.ledgerId === target);
+  return { deposits, owed: one?.payable ?? 0, name: one ? depositLabel(one) : '' };
+}
+
+/** After a right PIN: the list of contracts, even when there is only one, so the agent sees what they are paying for. */
+async function agentDepositsScreen(sessionId: string, base: string, agentId: string) {
+  const deposits = await agentDepositsToPay(agentId);
+  if (deposits.length === 0) return ussdRelease(sessionId, NOTHING_TO_PAY_IN);
+  return agentChooseScreen(sessionId, base, deposits);
+}
+
+async function freshAgentReference(): Promise<string> {
+  for (;;) {
+    const ref = generateTransactionRef();
+    const [a, b, c] = await Promise.all([
+      prisma.agentDepositPayment.findFirst({ where: { OR: [{ clientReference: ref }, { transactionRef: { startsWith: ref } }] }, select: { id: true } }),
+      prisma.paymentTransaction.findUnique({ where: { transactionRef: ref }, select: { id: true } }),
+      prisma.paidTemporaryUnlock.findUnique({ where: { clientReference: ref }, select: { id: true } }),
+    ]);
+    if (!a && !b && !c) return ref;
+  }
+}
+
+async function handleAgentDepositStep(sessionId: string, clientState: string, choice: string, res: Response): Promise<void> {
+  const [kind, dialingPhone, network, agentField = '', target, amountRaw] = clientState.split('|');
+  // "agentId~tag": the tag proves the PIN was accepted for this agent on this phone.
+  const [agentId, tag] = agentField.split('~');
+  const base = `${dialingPhone}|${network}|${agentField}`;
+
+  if (kind === 'AGENT_PIN') {
+    if (choice === '0') {
+      res.json(mainMenu(sessionId, dialingPhone, network));
+      return;
+    }
+    if (await isPhoneLockedOut(dialingPhone)) {
+      res.json(ussdRelease(sessionId, PIN_LOCKOUT_MESSAGE));
+      return;
+    }
+    const agent = await findAgentByPin(choice);
+    if (!agent) {
+      const locked = await recordPinFailure(dialingPhone);
+      res.json(locked ? ussdRelease(sessionId, PIN_LOCKOUT_MESSAGE) : agentPinScreen(sessionId, dialingPhone, network, 'Wrong PIN.\n'));
+      return;
+    }
+    await clearPinFailures(dialingPhone);
+    res.json(await agentDepositsScreen(sessionId, `${dialingPhone}|${network}|${agent.id}~${agentSessionTag(agent.id, dialingPhone)}`, agent.id));
+    return;
+  }
+
+  // Every later step re-checks the agent: a forged state, or a PIN deactivated
+  // mid-session, stops here.
+  if (!agentId || !isValidAgentSessionTag(agentId, dialingPhone, tag)) {
+    res.json(ussdRelease(sessionId, 'Session error. Please dial again.'));
+    return;
+  }
+  const agent = await prisma.adminUser.findFirst({
+    where: { id: agentId, isActive: true, role: { name: { in: [...SELLING_AGENT_ROLES] } } },
+    select: { id: true, firstName: true, lastName: true },
+  });
+  if (!agent) {
+    res.json(ussdRelease(sessionId, 'Session error. Please dial again.'));
+    return;
+  }
+
+  if (kind === 'AGENT_CHOOSE') {
+    const page = Math.max(0, Number(target) || 0);
+    if (choice === '0' && page === 0) {
+      res.json(mainMenu(sessionId, dialingPhone, network));
+      return;
+    }
+    const deposits = await agentDepositsToPay(agent.id);
+    if (deposits.length === 0) {
+      res.json(ussdRelease(sessionId, NOTHING_TO_PAY_IN));
+      return;
+    }
+    if (choice === '0') {
+      res.json(agentChooseScreen(sessionId, base, deposits, page - 1));
+      return;
+    }
+    if (choice === AGENT_MORE && (page + 1) * AGENT_PAGE_SIZE < deposits.length) {
+      res.json(agentChooseScreen(sessionId, base, deposits, page + 1));
+      return;
+    }
+    if (choice === '1') {
+      const total = roundMoney(deposits.reduce((s, d) => s + d.payable, 0));
+      res.json(agentAmountScreen(sessionId, base, 'ALL', total, deposits.length === 1 ? depositLabel(deposits[0]) : 'all your contracts'));
+      return;
+    }
+    // Items on this page are numbered 2..4; re-read, so a list that moved
+    // since the screen was drawn still picks from what is owed now.
+    const index = /^\d+$/.test(choice) ? Number(choice) - 2 : -1;
+    const pick = index >= 0 && index < AGENT_PAGE_SIZE ? deposits[page * AGENT_PAGE_SIZE + index] : undefined;
+    if (!pick) {
+      res.json(agentChooseScreen(sessionId, base, deposits, page, 'Not on the list.\n'));
+      return;
+    }
+    res.json(agentAmountScreen(sessionId, base, pick.ledgerId, pick.payable, depositLabel(pick)));
+    return;
+  }
+
+  if (kind === 'AGENT_AMOUNT') {
+    const { deposits, owed, name } = await agentOwed(agent.id, target);
+    if (deposits.length === 0 || owed <= 0.005) {
+      res.json(ussdRelease(sessionId, NOTHING_TO_PAY_IN));
+      return;
+    }
+    const raw = choice.replace(/,/g, '');
+    const amount = /^\d+(\.\d{1,2})?$/.test(raw) ? roundMoney(parseFloat(raw)) : NaN;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      res.json(agentAmountScreen(sessionId, base, target, owed, name, 'Enter a valid amount.\n'));
+      return;
+    }
+    if (amount > owed + 0.005) {
+      res.json(agentAmountScreen(sessionId, base, target, owed, name, 'That is more than you owe.\n'));
+      return;
+    }
+    res.json(ussdResponse(
+      sessionId,
+      `Pay in ${ussdGhs(amount)} of your deposits?\n1. Confirm\n2. Cancel`,
+      'Agent Deposits',
+      `AGENT_CONFIRM|${base}|${target}|${amount}`,
+    ));
+    return;
+  }
+
+  if (kind === 'AGENT_CONFIRM') {
+    const amount = roundMoney(Number(amountRaw));
+    if (choice === '2') {
+      res.json(ussdRelease(sessionId, 'Thank you. Goodbye.'));
+      return;
+    }
+    if (choice !== '1') {
+      res.json(ussdResponse(sessionId, `Not an option.\nPay in ${ussdGhs(amount)} of your deposits?\n1. Confirm\n2. Cancel`, 'Agent Deposits', clientState));
+      return;
+    }
+
+    const clientReference = await freshAgentReference();
+    const hubtelPhone = formatPhoneForHubtel(dialingPhone);
+    try {
+      await openUssdRemittance({
+        agentId: agent.id,
+        amount,
+        clientReference,
+        phone: hubtelPhone,
+        network,
+        ledgerId: target === 'ALL' ? undefined : target,
+      });
+    } catch (error: any) {
+      if (error instanceof AgentDepositError) {
+        res.json(ussdRelease(sessionId, error.message));
+        return;
+      }
+      throw error;
+    }
+
+    // As for customers: close the session first, then send the prompt.
+    res.json(ussdRelease(
+      sessionId,
+      `You will receive a Mobile Money prompt on ${dialingPhone} shortly to pay in ${ussdGhs(amount)}. Enter your PIN to approve.`,
+    ));
+    setTimeout(() => {
+      initiateHubtelReceiveMoney({
+        amount,
+        customerName: `${agent.firstName} ${agent.lastName}`.trim(),
+        customerPhone: hubtelPhone,
+        network,
+        description: 'Agent deposit',
+        transactionRef: clientReference,
+        callbackUrl: HUBTEL_AGENT_DEPOSIT_CALLBACK_URL,
+      })
+        .then((hubtel) =>
+          prisma.agentDepositPayment.updateMany({ where: { clientReference }, data: { hubtelRef: hubtel.transactionId } }),
+        )
+        .catch(async (err) => {
+          console.error('USSD agent deposit prompt failed:', err?.message || err);
+          // Payable again. A success that still arrives re-claims these rows.
+          await failUssdRemittance(clientReference, `Mobile Money prompt not sent: ${err?.message || 'unknown error'}`).catch(() => undefined);
+        });
+    }, USSD_PROMPT_DELAY_MS).unref?.();
+    return;
+  }
+
+  res.json(ussdRelease(sessionId, 'Session error. Please dial again.'));
+}
+
 function askForOtherNumber(sessionId: string, dialingPhone: string, network: string) {
   return ussdResponse(sessionId, "Enter the customer's registered phone number:", 'Pay For Others', `OTHER|${dialingPhone}|${network}`, 'phone');
 }
@@ -2023,6 +2559,9 @@ function askForOtherNumber(sessionId: string, dialingPhone: string, network: str
 //
 //   Dial → 1. Pay for self   → balance → amount → Mobile Money prompt
 //          2. Pay for others → their number → balance → amount → prompt
+//          3. Agent deposits → PIN → sale(s) → amount → confirm → prompt
+//   A locked phone with a paid temporary unlock on offer sees the unlock menu
+//   in place of the balance.
 // "Pay for self" from a number with nothing to pay offers "pay for others"
 // instead. The prompt always goes to the number that dialled.
 export async function handleUssdSession(req: Request, res: Response): Promise<void> {
@@ -2044,12 +2583,7 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
         mtn: 'MTN', vodafone: 'VODAFONE', telecel: 'VODAFONE', tigo: 'AIRTELTIGO', airtel: 'AIRTELTIGO',
       };
       const network = networkMap[Operator?.toLowerCase()] || 'MTN';
-      res.json(ussdResponse(
-        SessionId,
-        `AIDOO TECH\n1. Pay for self\n2. Pay for others\n0. Cancel`,
-        'Aidoo Tech Hire Purchase',
-        `MENU|${dialingPhone}|${network}`,
-      ));
+      res.json(mainMenu(SessionId, dialingPhone, network));
       return;
     }
 
@@ -2062,6 +2596,12 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
       }
       if (choice === '2') {
         res.json(askForOtherNumber(SessionId, dialingPhone, network));
+        return;
+      }
+      if (choice === '3') {
+        res.json(await isPhoneLockedOut(dialingPhone)
+          ? ussdRelease(SessionId, PIN_LOCKOUT_MESSAGE)
+          : agentPinScreen(SessionId, dialingPhone, network));
         return;
       }
       if (choice !== '1') {
@@ -2119,6 +2659,23 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
       return;
     }
 
+    // ── Agent deposits ───────────────────────────────────────────────────────
+    if (Type === 'Response' && ClientState.startsWith('AGENT_')) {
+      await handleAgentDepositStep(SessionId, ClientState, choice, res);
+      return;
+    }
+
+    // ── Paid temporary unlock ────────────────────────────────────────────────
+    if (Type === 'Response' && (ClientState.startsWith('UNLOCK_CHOICE|') || ClientState.startsWith('UNLOCK_TIER|'))) {
+      const screen = await handleUnlockStep(SessionId, ClientState, choice);
+      res.json(screen ?? ussdRelease(SessionId, 'Session error. Please dial again.'));
+      return;
+    }
+    if (Type === 'Response' && ClientState.startsWith('UNLOCK_CONFIRM|')) {
+      await confirmUnlock(SessionId, ClientState, choice, res);
+      return;
+    }
+
     // ── Step 3: Balance shown — chose 1 (Pay) or 0 (Cancel) ──────────────────
     if (Type === 'Response' && ClientState.startsWith('{')) {
       if (choice === '0') {
@@ -2168,7 +2725,8 @@ export async function handleUssdSession(req: Request, res: Response): Promise<vo
           customer: { select: { firstName: true, lastName: true, email: true } },
         },
       });
-      if (!contract || contract.status !== 'ACTIVE') {
+      // DEFAULTED arrives only from the unlock menu's "Pay any amount".
+      if (!contract || !['ACTIVE', 'DEFAULTED'].includes(contract.status)) {
         res.json(ussdRelease(SessionId, 'This contract cannot receive payments. Please contact customer service.'));
         return;
       }

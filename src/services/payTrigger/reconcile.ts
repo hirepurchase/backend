@@ -10,6 +10,7 @@ import { addTranssionContract, removeTranssionContract } from './registry';
 import { getPayTriggerSettings, PayTriggerSettingsRow } from './settings';
 import { logAction } from './log';
 import { isUnlinkedStatus, lockMessageFor, unlinkedMessageFor } from './messages';
+import { temporaryUnlockUntil } from '../paidUnlockService';
 
 /**
  * Reconcile ONE contract: load it, decide, and send PayTrigger whatever is
@@ -124,6 +125,7 @@ export async function reconcileContract(contractId: string, options: ReconcileOp
     contract,
     installments: contract.installments,
     tempUnlocks: contract.temporaryUnlocks,
+    paidUnlockUntil: await temporaryUnlockUntil(contract.id, now),
     depositLedger: contract.agentLedger,
     penaltiesOwed: contract.penalties.reduce((s, p) => s + Math.max(0, p.amount - (p.paidAmount ?? 0)), 0),
     device: { enrollmentStatus: device.enrollmentStatus, providerExpiresAt: device.providerExpiresAt, activated },

@@ -2,6 +2,7 @@ import { Response } from 'express';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest } from '../middleware/auth';
+import { maxUnlockHours, validateMaxUses, validateTiers } from '../services/paidUnlockService';
 
 const db = prisma as any;
 const SETTINGS_ID = 'singleton';
@@ -23,7 +24,8 @@ async function getOrCreateSettings() {
 export async function getKnoxGuardSettings(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const settings = await getOrCreateSettings();
-    res.json(settings);
+    // The longest a paid temporary unlock tier may run, for the settings page.
+    res.json({ ...settings, temporaryUnlockMaxHours: await maxUnlockHours() });
   } catch (error) {
     console.error('Get Knox Guard settings error:', error);
     res.status(500).json({ error: 'Failed to load Knox Guard settings' });
@@ -55,6 +57,9 @@ export async function updateKnoxGuardSettings(req: AuthenticatedRequest, res: Re
       allowCustomerAppOnLockScreen,
       allowSupportOnLockScreen,
       allowPaymentUssdOnLockScreen,
+      temporaryUnlockEnabled,
+      temporaryUnlockMaxUses,
+      temporaryUnlockTiers,
     } = req.body;
 
     // Validate numeric fields
@@ -75,6 +80,29 @@ export async function updateKnoxGuardSettings(req: AuthenticatedRequest, res: Re
     if (commandBatchSize !== undefined && (commandBatchSize < 1 || commandBatchSize > 100)) {
       res.status(400).json({ error: 'commandBatchSize must be between 1 and 100' });
       return;
+    }
+
+    // Paid temporary unlock. No tier may promise longer than a phone can be
+    // opened ahead (PayTrigger's horizon).
+    if (temporaryUnlockMaxUses !== undefined) {
+      const problem = validateMaxUses(temporaryUnlockMaxUses);
+      if (problem) {
+        res.status(400).json({ error: problem });
+        return;
+      }
+    }
+    let tiers: Array<{ percent: number; hours: number; feePercent: number }> | undefined;
+    if (temporaryUnlockTiers !== undefined) {
+      const problem = validateTiers(temporaryUnlockTiers, await maxUnlockHours());
+      if (problem) {
+        res.status(400).json({ error: problem });
+        return;
+      }
+      tiers = (temporaryUnlockTiers as any[]).map((t) => ({
+        percent: Number(t.percent),
+        hours: Number(t.hours),
+        feePercent: Number(t.feePercent ?? 0),
+      }));
     }
 
     const updated = await db.knoxGuardSettings.update({
@@ -100,6 +128,9 @@ export async function updateKnoxGuardSettings(req: AuthenticatedRequest, res: Re
         ...(allowCustomerAppOnLockScreen !== undefined ? { allowCustomerAppOnLockScreen: Boolean(allowCustomerAppOnLockScreen) } : {}),
         ...(allowSupportOnLockScreen !== undefined ? { allowSupportOnLockScreen: Boolean(allowSupportOnLockScreen) } : {}),
         ...(allowPaymentUssdOnLockScreen !== undefined ? { allowPaymentUssdOnLockScreen: Boolean(allowPaymentUssdOnLockScreen) } : {}),
+        ...(temporaryUnlockEnabled !== undefined ? { temporaryUnlockEnabled: Boolean(temporaryUnlockEnabled) } : {}),
+        ...(temporaryUnlockMaxUses !== undefined ? { temporaryUnlockMaxUses: Number(temporaryUnlockMaxUses) } : {}),
+        ...(tiers !== undefined ? { temporaryUnlockTiers: tiers } : {}),
       },
     });
 

@@ -41,6 +41,8 @@ interface ContractStatementData {
   payments: Array<{
     transactionRef: string;
     amount: number;
+    /** A temporary unlock's charge inside `amount`; not counted in Total Paid. */
+    unlockFee?: number;
     paymentDate: Date | null;
     status: string;
     paymentMethod: string;
@@ -179,6 +181,13 @@ export function generateContractStatement(data: ContractStatementData): PDFKit.P
       doc.text(payment.paymentMethod, 270, py, { width: 80 });
       doc.text(payment.paymentDate ? new Date(payment.paymentDate).toLocaleDateString() : '-', 360, py, { width: 80 });
       doc.text(payment.status, 450, py, { width: 80 });
+
+      // Total Paid leaves an unlock charge out, so say so on the row.
+      if ((payment.unlockFee ?? 0) > 0) {
+        py += 12;
+        doc.fontSize(7).text(`incl. ${formatCurrency(payment.unlockFee!)} temporary unlock charge (not towards the balance)`, 180, py, { width: 350 });
+        doc.fontSize(9);
+      }
 
       py += 18;
     });

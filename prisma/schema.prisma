@@ -40,6 +40,9 @@ model AdminUser {
   firstName             String
   lastName              String
   phone                 String?
+  // Six digits the agent types on the short code to pay in deposits from any
+  // phone. Shown to its owner only — never select it into a staff list.
+  paymentPin            String?               @unique
   // Where this person actually works. Collected so a cluster agent can be
   // grouped with agents near them, and so stock goes to whoever is closest to
   // the customer rather than whoever asked first.
@@ -361,6 +364,10 @@ model PaymentTransaction {
   customerId_uuid     String               @db.Uuid
   customer            Customer             @relation(fields: [customerId_uuid], references: [id_uuid])
   amount              Float
+  // The part of `amount` that is a paid temporary unlock's charge: the
+  // company's fee, not money towards the contract. Allocation and paid totals
+  // use amount − unlockFee; collections count the whole amount.
+  unlockFee           Float                @default(0)
   paymentMethod       String               @default("MOBILE_MONEY")
   mobileMoneyProvider String?              // MTN, VODAFONE, AIRTELTIGO
   mobileMoneyNumber   String?
@@ -685,6 +692,13 @@ model KnoxGuardSettings {
   allowCustomerAppOnLockScreen Boolean  @default(true)
   allowSupportOnLockScreen     Boolean  @default(true)
   allowPaymentUssdOnLockScreen Boolean  @default(true)
+  // Paid temporary unlock: a locked customer pays part of what is overdue and
+  // the phone opens for a while. Off until switched on. See paidUnlockService.
+  temporaryUnlockEnabled       Boolean  @default(false)
+  temporaryUnlockMaxUses       Int      @default(2)
+  // Each tier: { percent, hours, feePercent } — the charge is a percentage of
+  // the arrears added to the share (paidUnlockService).
+  temporaryUnlockTiers         Json     @default("[{\"percent\":25,\"hours\":24,\"feePercent\":0},{\"percent\":50,\"hours\":72,\"feePercent\":0},{\"percent\":75,\"hours\":120,\"feePercent\":0},{\"percent\":90,\"hours\":168,\"feePercent\":0}]")
   createdAt                    DateTime @default(now())
   updatedAt                    DateTime @updatedAt
 }
@@ -816,6 +830,11 @@ model AgentDepositPayment {
   network       String
   hubtelRef     String?
   status        String             @default("PENDING") // PENDING | SUCCESS | FAILED
+  // WEB (agent portal) | USSD (short code) | MANUAL (cash at the office)
+  channel       String             @default("WEB")
+  // The Hubtel ClientReference. One short-code charge can pay in several sales,
+  // so several rows share it; transactionRef stays unique per row.
+  clientReference String?
   failureReason String?
   paidAt        DateTime?
   createdAt     DateTime           @default(now())
@@ -823,6 +842,43 @@ model AgentDepositPayment {
 
   @@index([agentId, status])
   @@index([ledgerEntryId, createdAt])
+  @@index([clientReference])
+}
+
+// A wrong agent payment PIN typed on the short code, by the phone that dialled.
+// Five in an hour shuts that phone out of agent deposits for the hour.
+model AgentPinFailure {
+  id        String   @id @default(uuid())
+  msisdn    String
+  createdAt DateTime @default(now())
+
+  @@index([msisdn, createdAt])
+}
+
+// A paid temporary unlock: the customer pays a tier's share of the overdue
+// amount and the phone opens for that tier's hours. Not the same thing as
+// TemporaryUnlockRequest, which an agent asks for and an admin approves.
+// Whether a row counts is read from its payment: a deleted payment takes the
+// unlock with it.
+model PaidTemporaryUnlock {
+  id              String    @id @default(uuid())
+  contractId      String
+  percent         Int
+  hours           Int
+  overdueAmount   Float
+  amount          Float     // towards the overdue instalments
+  fee             Float     @default(0) // the tier's charge, paid on top
+  channel         String    // USSD | APP | STAFF
+  status          String    @default("PENDING") // PENDING | APPLIED
+  clientReference String    @unique
+  paymentId       String?
+  requestedById   String?
+  activatedAt     DateTime?
+  expiresAt       DateTime?
+  createdAt       DateTime  @default(now())
+
+  @@index([contractId, status])
+  @@index([status, expiresAt])
 }
 
 // ============= PAYTRIGGER (Transsion device lock) =============

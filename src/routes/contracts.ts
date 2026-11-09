@@ -33,6 +33,7 @@ import {
   editPendingContract,
 } from '../controllers/contractApprovalController';
 import { downloadContractStatement } from '../controllers/statementController';
+import { getStaffTemporaryUnlockOffer, takeCashForTemporaryUnlock } from '../controllers/paidUnlockController';
 import { authenticateAdmin, authenticateCustomer, requireAnyPermission } from '../middleware/auth';
 import { contractUpload } from '../config/upload';
 import {
@@ -67,6 +68,9 @@ router.post('/preflight', authenticateAdmin, requireAnyPermission(PERMISSIONS.CR
 router.post('/', authenticateAdmin, requireAnyPermission(PERMISSIONS.CREATE_CONTRACT), contractUpload, createContract);
 router.get('/', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), getAllContracts);
 router.get('/installments/pending', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), getAllPendingInstallments);
+// Paid temporary unlock: the offer, and cash taken for it at the office.
+router.get('/:id/temporary-unlock-offer', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), getStaffTemporaryUnlockOffer);
+router.post('/:id/temporary-unlock-offer', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), takeCashForTemporaryUnlock);
 router.get('/admin/:id', authenticateAdmin, requireAnyPermission(...CONTRACT_ACCESS_PERMISSIONS), getContractById);
 router.put('/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), updateContract);
 router.post('/:id/amend', authenticateAdmin, requireAnyPermission(PERMISSIONS.UPDATE_CONTRACT), amendContract);

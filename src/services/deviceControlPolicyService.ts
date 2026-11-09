@@ -20,6 +20,20 @@ import {
   hasLiveTemporaryUnlock,
   TEMPORARY_UNLOCK_STATUS,
 } from './temporaryUnlockService';
+import { liveWindowContractIds, temporaryUnlockUntil, isLiveWindow, hadPaidWindow, formatLongDateTime } from './paidUnlockService';
+
+/**
+ * Contracts held open by a temporary unlock of either kind: one an admin
+ * approved (temporaryUnlockService) or one the customer paid for
+ * (paidUnlockService). The sweeps that relock phones must skip both.
+ */
+async function heldOpenContractIds(contractIds: string[]): Promise<Set<string>> {
+  const [approved, paid] = await Promise.all([
+    getActiveTemporaryUnlockContractIds(contractIds),
+    liveWindowContractIds(contractIds),
+  ]);
+  return new Set([...approved, ...paid]);
+}
 import { isPayTriggerProduct } from './payTrigger/guard';
 
 type ManagedDeviceState = 'LOCKED' | 'UNLOCKED' | 'PENDING' | 'UNKNOWN';
@@ -1334,7 +1348,7 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
   });
 
   // One query for the whole sweep rather than one per contract.
-  const temporarilyUnlocked = await getActiveTemporaryUnlockContractIds(
+  const temporarilyUnlocked = await heldOpenContractIds(
     contracts.map((c: any) => c.id)
   );
 
@@ -1397,7 +1411,7 @@ export async function liveVerifyAndRelockOverdueDevices(): Promise<{
       const freshDepositUnpaid = !!fresh.agentLedger && fresh.agentLedger.outstandingBalance > 0;
       // Re-read for the same reason arrears are re-read: an unlock can be
       // approved while this sweep is part way through its list.
-      const freshlyUnlocked = await getActiveTemporaryUnlockContractIds([contract.id]);
+      const freshlyUnlocked = await heldOpenContractIds([contract.id]);
       const stillOverdue =
         !freshlyUnlocked.has(contract.id) &&
         (freshDepositUnpaid ||
@@ -1525,7 +1539,7 @@ export async function stopAllActiveRemindersAndApplyLock(): Promise<{
 
       const metrics = calculateOverdueMetrics(contract, kSettings.blockOnUnpaidPenalties);
       const agentDepositUnpaid = !!contract.agentLedger && contract.agentLedger.outstandingBalance > 0;
-      const underTemporaryUnlock = (await getActiveTemporaryUnlockContractIds([contract.id])).has(contract.id);
+      const underTemporaryUnlock = (await heldOpenContractIds([contract.id])).has(contract.id);
       const isOverdueEnoughToLock =
         !underTemporaryUnlock &&
         (agentDepositUnpaid ||
@@ -2685,6 +2699,16 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   // the device does not show up in getDeviceLockIssues as a lock that failed
   // — and it lapses on the clock, so nothing has to remember to revoke it.
   const temporaryUnlockActive = isActive && hasLiveTemporaryUnlock(contract);
+  // A window the customer paid for (paidUnlockService). It opens the phone on
+  // an active or a defaulted contract, but unlike an approved unlock it never
+  // overrides the deposit hold. Once it ends on a defaulted contract the phone
+  // is shut again: a defaulted contract is otherwise never locked from here,
+  // and without that the window would quietly become permanent.
+  const isDefaulted = contract.status === 'DEFAULTED';
+  const paidWindowEnd = isActive || isDefaulted ? await temporaryUnlockUntil(contract.id) : null;
+  const paidWindowLive = isLiveWindow(paidWindowEnd) && !agentDepositUnpaid;
+  const defaultedWindowLapsed =
+    isDefaulted && !paidWindowLive && metrics.overdueAmount > 0 && (await hadPaidWindow(contract.id));
   // Late charges never cause a lock — only overdue installments and the agent
   // deposit do that. What they do is hold a lock that is already in place, via
   // arrearsGenuinelyCleared below. That leaves a case with no command of its
@@ -2696,9 +2720,11 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     !isOverdueEnoughToLock &&
     !agentDepositUnpaid &&
     !temporaryUnlockActive &&
+    !paidWindowLive &&
     metrics.overdueAmount === 0 &&
     metrics.blockingPenaltyAmount > 0;
-  const shouldLock = (isOverdueEnoughToLock || agentDepositUnpaid) && !temporaryUnlockActive;
+  const shouldLock =
+    ((isOverdueEnoughToLock && !paidWindowLive) || agentDepositUnpaid || defaultedWindowLapsed) && !temporaryUnlockActive;
   const shouldBlink = PAYMENT_REMINDER_ENABLED && hasUpcomingPaymentDue && !isOverdueEnoughToLock;
   // A blinking reminder keeps showing until Knox is told to stop, and unlock is
   // the command that stops it. Without this, a customer who cleared their
@@ -2727,7 +2753,7 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
   }
   const arrearsGenuinelyCleared =
     metrics.overdueAmount === 0 && metrics.blockingPenaltyAmount === 0 && !agentDepositUnpaid;
-  const arrearsCleared = temporaryUnlockActive || arrearsGenuinelyCleared;
+  const arrearsCleared = temporaryUnlockActive || paidWindowLive || arrearsGenuinelyCleared;
   const shouldStopBlink = deviceIsBlinking && arrearsCleared && !hasUpcomingPaymentDue;
   const shouldUnlock = (deviceIsLockedOrPending || shouldStopBlink) && arrearsCleared;
   // Also unlock if admin explicitly set desiredState=UNLOCKED but device is still
@@ -2815,7 +2841,9 @@ export async function evaluateManagedDeviceForContract(contractId: string) {
     // "payment coming up" reminder instead of the unlock they'd earned. The
     // reminder can still fire on the next evaluation once actualState reflects
     // the unlock.
-    const unlockMessage = temporaryUnlockActive && !arrearsGenuinelyCleared
+    const unlockMessage = paidWindowLive && !temporaryUnlockActive && !arrearsGenuinelyCleared
+      ? `Your phone is open until ${formatLongDateTime(paidWindowEnd as Date)}. Pay the rest of what is overdue before then or it will lock again.`
+      : temporaryUnlockActive && !arrearsGenuinelyCleared
       ? 'Your device has been opened temporarily. Please clear your overdue payments before the period ends.'
       : shouldStopBlink && actualState !== 'LOCKED'
         ? 'Thank you. Your account is up to date.'
@@ -3557,7 +3585,7 @@ export async function processPendingManagedDeviceCommands(limit: number = 10): P
     // was queued before the approval; the approval is the newer decision.
     if (command.type === 'LOCK_DEVICE' && command.managedDevice.contract) {
       const contractId = command.managedDevice.contract.id;
-      const underTemporaryUnlock = (await getActiveTemporaryUnlockContractIds([contractId])).has(contractId);
+      const underTemporaryUnlock = (await heldOpenContractIds([contractId])).has(contractId);
       if (underTemporaryUnlock) {
         await prismaAny.managedDeviceCommand.update({
           where: { id: command.id },

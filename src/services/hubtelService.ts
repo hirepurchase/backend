@@ -5,6 +5,7 @@ import { getRetrySettings, calculateNextRetryDate } from './paymentRetryService'
 import { appendWebhookToken } from '../utils/callbackSecurity';
 import { safelyEvaluateManagedDeviceForContract } from './deviceControlPolicyService';
 import { settleTemporaryUnlockOnPayment } from './temporaryUnlockService';
+import { applyTemporaryUnlock } from './paidUnlockService';
 import { roundMoney, isMoneyGte } from '../utils/helpers';
 import { allocatePaymentAcrossContract } from './paymentAllocationService';
 import { OWED_PENALTY_WHERE } from './penaltyService';
@@ -56,7 +57,7 @@ export const HUBTEL_AGENT_DEPOSIT_CALLBACK_URL = appendWebhookToken(
 // API Endpoints
 // Overridable only so tests can point it at a local mock.
 const RECEIVE_MONEY_URL = process.env.HUBTEL_RECEIVE_MONEY_URL || `https://rmp.hubtel.com/merchantaccount/merchants/${HUBTEL_POS_SALES_ID}/receive/mobilemoney`;
-const TRANSACTION_STATUS_URL = `https://api-txnstatus.hubtel.com/transactions/${HUBTEL_POS_SALES_ID}/status`;
+const TRANSACTION_STATUS_URL = process.env.HUBTEL_TRANSACTION_STATUS_URL || `https://api-txnstatus.hubtel.com/transactions/${HUBTEL_POS_SALES_ID}/status`;
 const PREAPPROVAL_INITIATE_URL = `https://preapproval.hubtel.com/api/v2/merchant/${HUBTEL_POS_SALES_ID}/preapproval/initiate`;
 const PREAPPROVAL_VERIFY_OTP_URL = `https://preapproval.hubtel.com/api/v2/merchant/${HUBTEL_POS_SALES_ID}/preapproval/verifyotp`;
 const PREAPPROVAL_STATUS_URL = `https://preapproval.hubtel.com/api/v2/merchant/${HUBTEL_POS_SALES_ID}/preapproval`;
@@ -813,7 +814,8 @@ export async function processPreapprovalCallback(callbackData: unknown): Promise
 // ==================== HELPER FUNCTIONS ====================
 
 async function processSuccessfulPayment(payment: any, contract: any): Promise<void> {
-  let remainingAmount = roundMoney(payment.amount);
+  // An unlock's charge is the company's fee, not money towards the contract.
+  let remainingAmount = roundMoney(payment.amount - (payment.unlockFee ?? 0));
 
   await prisma.$transaction(async (tx) => {
     const allocation = await allocatePaymentAcrossContract({
@@ -828,7 +830,7 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
     const allSuccessfulPayments = await tx.paymentTransaction.findMany({
       where: { contractId: contract.id, status: 'SUCCESS' },
     });
-    const paymentsSum = allSuccessfulPayments.reduce((sum: number, p: any) => sum + p.amount, 0);
+    const paymentsSum = allSuccessfulPayments.reduce((sum: number, p: any) => sum + p.amount - (p.unlockFee ?? 0), 0);
     const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
     const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
 
@@ -854,6 +856,10 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
       data: contractUpdate,
     });
   });
+
+  // A charge made for a paid temporary unlock opens the window now that the
+  // money is in; the evaluation below is what actually opens the phone.
+  await applyTemporaryUnlock(payment.transactionRef, payment.id);
 
   // Close any unlock window or agent bar this payment has just settled,
   // before the device is judged — otherwise both wait for tomorrow's cron.

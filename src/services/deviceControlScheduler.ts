@@ -2,6 +2,7 @@ import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
 import { processPendingManagedDeviceCommands, resetStuckProcessingCommands } from './deviceControlPolicyService';
 import { syncManagedDevicesFromKnoxPortal } from '../controllers/knoxGuardUploadController';
+import { relockEndedPaidWindows } from './paidUnlockRelock';
 
 const DEVICE_CONTROL_CRON = process.env.KNOX_GUARD_COMMAND_CRON || '*/5 * * * *';
 const DEVICE_CONTROL_BATCH_SIZE = Number(process.env.KNOX_GUARD_COMMAND_BATCH_SIZE || '10');
@@ -47,6 +48,18 @@ export function startDeviceControlScheduler() {
         }
       } catch (error) {
         console.error('❌ Error in Knox Guard device control scheduler:', error);
+      }
+
+      // Paid temporary unlocks that have just run out: a Knox phone has no
+      // lock date of its own and stays open until it is told to lock. Its own
+      // try, so a failed command run or portal sync never skips it.
+      try {
+        const relocked = await relockEndedPaidWindows();
+        if (relocked.contracts > 0) {
+          console.log(`🔒 Paid unlock windows ended: ${relocked.contracts} contract(s) re-judged`);
+        }
+      } catch (error) {
+        console.error('❌ Relocking ended paid unlock windows failed:', error);
       }
     });
 

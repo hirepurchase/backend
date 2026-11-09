@@ -8,13 +8,18 @@ import { unlockKnoxGuardDevice } from '../services/knoxGuardService';
 import { SELLING_AGENT_ROLES } from '../constants/roles';
 import { notifyPayTrigger } from '../services/payTrigger/events';
 import { accrueCompletionCommission } from '../services/completionCommissionService';
+import { failUssdRemittance, hasAgentDepositCharge, payableOnLedger, settleUssdRemittance } from '../services/agentDepositUssdService';
+import { issuePaymentPin } from '../services/agentPinService';
+import { isSellingAgentRole } from '../constants/roles';
+import { createAuditLog } from '../services/auditService';
+import { validateWebhookRequest } from '../utils/callbackSecurity';
 
 // Unlock the device for a contract after agent deposit is fully paid.
 // Priority order:
 //   1. ManagedDevice linked via contractId  → requestManagedDeviceUnlock (Knox + DB update)
 //   2. ManagedDevice linked via inventoryItemId only (standalone Knox enrollment) → Knox unlock directly
 //   3. No Knox enrollment at all → update inventoryItem lockStatus only
-async function unlockDeviceAfterDepositPaid(contractId: string, logPrefix: string): Promise<void> {
+export async function unlockDeviceAfterDepositPaid(contractId: string, logPrefix: string): Promise<void> {
   notifyPayTrigger(contractId, 'DEPOSIT_REMITTED');
   try {
     await requestManagedDeviceUnlock(contractId, 'Agent deposit fully remitted — device unlocked.');
@@ -252,7 +257,7 @@ export async function payDeposit(req: AuthenticatedRequest, res: Response): Prom
       return;
     }
 
-    // No duplicate pending payments
+    // No duplicate pending payments, from the portal or the short code
     const pendingPayment = await prisma.agentDepositPayment.findFirst({
       where: { ledgerEntryId: id, status: 'PENDING' },
     });
@@ -327,67 +332,56 @@ export async function payDeposit(req: AuthenticatedRequest, res: Response): Prom
 }
 
 // POST /agent-deposits/hubtel/callback  (no auth — called by Hubtel)
+//
+// Serves both the agent portal (one row per charge, keyed on transactionRef)
+// and the short code (several rows sharing a clientReference), through the
+// same settle and fail as the stuck-charge sweep. Every change is a claim — a
+// conditional update on the status it expects — so a repeated or crossing
+// callback acts once. A success that arrives after a failure still lands: the
+// money was taken.
 export async function handleAgentPaymentCallback(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
+    // The callback URL carries the shared webhook token (appendWebhookToken).
+    // A success credits the ledger and can open a phone with no one
+    // confirming it, so an unsigned call must not get that far.
+    const webhookError = validateWebhookRequest(req);
+    if (webhookError) {
+      res.status(401).json({ error: webhookError });
+      return;
+    }
+
     const body = req.body;
-    const transactionRef = body?.Data?.ClientReference || body?.ClientReference;
+    const reference = body?.Data?.ClientReference || body?.ClientReference;
     const responseCode = body?.Data?.ResponseCode || body?.ResponseCode;
     const externalRef = body?.Data?.TransactionId || body?.TransactionId;
+    const failureReason = body?.Data?.ResponseMessage || body?.ResponseMessage || body?.Message || 'Payment failed';
 
-    if (!transactionRef) {
+    if (!reference) {
       res.status(400).json({ error: 'Missing transaction reference' });
-      return;
-    }
-
-    const payment = await prisma.agentDepositPayment.findUnique({
-      where: { transactionRef },
-    });
-
-    if (!payment) {
-      res.status(404).json({ error: 'Payment not found' });
-      return;
-    }
-
-    if (payment.status !== 'PENDING') {
-      res.json({ message: 'Already processed' });
       return;
     }
 
     const isSuccess = responseCode === '0000';
 
-    await prisma.$transaction(async (tx) => {
-      await tx.agentDepositPayment.update({
-        where: { id: payment.id },
-        data: {
-          status: isSuccess ? 'SUCCESS' : 'FAILED',
-          hubtelRef: externalRef || payment.hubtelRef,
-          paidAt: isSuccess ? new Date() : null,
-          failureReason: isSuccess ? null : (body?.Data?.ResponseMessage || body?.ResponseMessage || 'Payment failed'),
-        },
-      });
+    if (!(await hasAgentDepositCharge(reference))) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
 
-      if (isSuccess) {
-        const ledger = await tx.agentDepositLedger.findUnique({ where: { id: payment.ledgerEntryId } });
-        if (ledger) {
-          const newAmountPaid = ledger.amountPaid + payment.amount;
-          const newOutstanding = Math.max(0, ledger.amountDueCompany - newAmountPaid);
-          const newStatus = newOutstanding <= 0 ? 'PAID' : 'PENDING';
-          await tx.agentDepositLedger.update({
-            where: { id: ledger.id },
-            data: {
-              amountPaid: newAmountPaid,
-              outstandingBalance: newOutstanding,
-              status: newStatus,
-            },
-          });
+    if (!isSuccess) {
+      await failUssdRemittance(reference, failureReason);
+      res.json({ message: 'Callback processed' });
+      return;
+    }
 
-          if (newStatus === 'PAID') {
-            const contractId = ledger.contractId;
-            setImmediate(() => { unlockDeviceAfterDepositPaid(contractId, 'AgentDeposit'); });
-          }
-        }
-      }
-    });
+    if (!(await settleUssdRemittance(reference, externalRef))) {
+      // Money reported for a reference with nothing we can credit. Leave a
+      // trail for staff rather than guessing where it belongs.
+      console.error(`[AgentDeposit] Success callback for ${reference} matched no remittance rows`);
+      await createAuditLog({ action: 'AGENT_DEPOSIT_UNMATCHED', entity: 'AgentDepositPayment', entityId: reference, newValues: { reference, externalRef } });
+      res.status(500).json({ error: 'No remittance to credit' });
+      return;
+    }
 
     res.json({ message: 'Callback processed' });
   } catch (error) {
@@ -431,8 +425,15 @@ export async function adminManualPay(req: AuthenticatedRequest, res: Response): 
       return;
     }
 
-    if (payAmount > ledgerEntry.outstandingBalance) {
-      res.status(400).json({ error: `Amount exceeds outstanding balance of GHS ${ledgerEntry.outstandingBalance.toFixed(2)}` });
+    // A short-code or portal charge still waiting is money already on its
+    // way; recording cash over it would pay the same balance twice.
+    const payable = await payableOnLedger(id);
+    if (payAmount > payable + 0.005) {
+      res.status(400).json({
+        error: payable < ledgerEntry.outstandingBalance - 0.005
+          ? `GHS ${(ledgerEntry.outstandingBalance - payable).toFixed(2)} is waiting for a Mobile Money payment. At most GHS ${payable.toFixed(2)} can be recorded now.`
+          : `Amount exceeds outstanding balance of GHS ${ledgerEntry.outstandingBalance.toFixed(2)}`,
+      });
       return;
     }
 
@@ -449,6 +450,7 @@ export async function adminManualPay(req: AuthenticatedRequest, res: Response): 
           amount: payAmount,
           phoneNumber: 'CASH',
           network: 'MANUAL',
+          channel: 'MANUAL',
           status: 'SUCCESS',
           failureReason: null,
           paidAt: new Date(),
@@ -576,5 +578,27 @@ export async function getAdminSummary(req: AuthenticatedRequest, res: Response):
   } catch (error) {
     console.error('getAdminSummary error:', error);
     res.status(500).json({ error: 'Failed to fetch admin summary' });
+  }
+}
+
+// GET /agent-deposits/my-pin — the signed-in agent's own payment PIN, and
+// nobody else's. Issues one if the agent somehow has none.
+export async function getMyPaymentPin(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const admin = req.user as AdminUserPayload;
+    if (req.userType !== 'admin' || !isSellingAgentRole(admin.role)) {
+      res.status(403).json({ error: 'Only agents have a payment PIN.' });
+      return;
+    }
+    const pin = await issuePaymentPin(admin.id);
+    if (!pin) {
+      res.status(403).json({ error: 'Only agents have a payment PIN.' });
+      return;
+    }
+    res.set('Cache-Control', 'no-store');
+    res.json({ pin });
+  } catch (error) {
+    console.error('getMyPaymentPin error:', error);
+    res.status(500).json({ error: 'Failed to load your payment PIN' });
   }
 }

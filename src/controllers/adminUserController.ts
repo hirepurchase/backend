@@ -3,6 +3,25 @@ import bcrypt from 'bcryptjs';
 import prisma from '../config/database';
 import { createAuditLog } from '../services/auditService';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
+import { issuePaymentPin } from '../services/agentPinService';
+import { sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
+
+/**
+ * A staff mobile number: optional, a valid Ghana number, and not anyone
+ * else's — an agent's deposit receipt is texted to it. Returns the value to
+ * store, or an error to show.
+ */
+async function checkStaffPhone(phone: unknown, userId?: string): Promise<{ value: string | null } | { error: string }> {
+  if (phone === null || phone === undefined || String(phone).trim() === '') return { value: null };
+  const value = sanitizePhoneNumber(String(phone));
+  if (!validatePhoneNumber(value)) return { error: 'Enter a valid Ghana mobile number, for example 0241234567.' };
+  const taken = await prisma.adminUser.findFirst({
+    where: { phone: value, ...(userId ? { id: { not: userId } } : {}) },
+    select: { id: true },
+  });
+  if (taken) return { error: 'Another staff member already uses this mobile number.' };
+  return { value };
+}
 
 // Get all admin users
 export async function getAllAdminUsers(req: AuthenticatedRequest, res: Response): Promise<void> {
@@ -101,6 +120,12 @@ export async function createAdminUser(req: AuthenticatedRequest, res: Response):
       return;
     }
 
+    const phoneCheck = await checkStaffPhone(phone);
+    if ('error' in phoneCheck) {
+      res.status(400).json({ error: phoneCheck.error });
+      return;
+    }
+
     const hashedPassword = await bcrypt.hash(password, 12);
 
     const newUser = await prisma.adminUser.create({
@@ -109,7 +134,7 @@ export async function createAdminUser(req: AuthenticatedRequest, res: Response):
         password: hashedPassword,
         firstName,
         lastName,
-        phone,
+        phone: phoneCheck.value,
         roleId,
       },
       include: {
@@ -122,12 +147,16 @@ export async function createAdminUser(req: AuthenticatedRequest, res: Response):
       },
     });
 
+    // A new agent gets a payment PIN for the short code. Not audited: the
+    // PIN is shown to its owner only.
+    await issuePaymentPin(newUser.id);
+
     await createAuditLog({
       userId: req.user!.id,
       action: 'CREATE_ADMIN_USER',
       entity: 'AdminUser',
       entityId: newUser.id,
-      newValues: { email: newUser.email, firstName, lastName, roleId },
+      newValues: { email: newUser.email, firstName, lastName, roleId, phone: newUser.phone },
       ipAddress: req.ip,
       userAgent: req.headers['user-agent'],
     });
@@ -180,7 +209,16 @@ export async function updateAdminUser(req: AuthenticatedRequest, res: Response):
     const updateData: Record<string, unknown> = {};
     if (firstName) updateData.firstName = firstName;
     if (lastName) updateData.lastName = lastName;
-    if (phone !== undefined) updateData.phone = phone;
+    // Checked only when it changes, so an old number on file never blocks
+    // an unrelated edit.
+    if (phone !== undefined && (phone || null) !== (existingUser.phone || null)) {
+      const phoneCheck = await checkStaffPhone(phone, id);
+      if ('error' in phoneCheck) {
+        res.status(400).json({ error: phoneCheck.error });
+        return;
+      }
+      if (phoneCheck.value !== existingUser.phone) updateData.phone = phoneCheck.value;
+    }
     if (roleId && currentUser.role === 'SUPER_ADMIN') updateData.roleId = roleId;
     if (isActive !== undefined && currentUser.role === 'SUPER_ADMIN') updateData.isActive = isActive;
 
@@ -235,6 +273,10 @@ export async function updateAdminUser(req: AuthenticatedRequest, res: Response):
         );
       }
     }
+
+    // Moved into a selling role: they need a payment PIN. Never changes one
+    // they already have.
+    if (roleChanged) await issuePaymentPin(id);
 
     await createAuditLog({
       userId: req.user!.id,

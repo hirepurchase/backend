@@ -4,6 +4,7 @@ import {
   getMySummary,
   payDeposit,
   handleAgentPaymentCallback,
+  getMyPaymentPin,
   getAllAgentLedgers,
   getAdminSummary,
   adminManualPay,
@@ -24,6 +25,7 @@ router.post('/hubtel/callback', handleAgentPaymentCallback);
 
 // Agent routes
 router.get('/my-ledger', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_AGENT_COMMISSIONS), getMyLedger);
+router.get('/my-pin', authenticateAdmin, getMyPaymentPin);
 router.get('/my-summary', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_AGENT_COMMISSIONS), getMySummary);
 router.get('/completion-commissions/mine', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_AGENT_COMMISSIONS), getMyCompletionCommissions);
 router.post('/:id/pay', authenticateAdmin, requireAnyPermission(PERMISSIONS.PAY_AGENT_DEPOSIT), payDeposit);

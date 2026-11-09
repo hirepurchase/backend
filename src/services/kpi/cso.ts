@@ -46,12 +46,14 @@ async function paymentsFor(customerIds: string[], from: Date, to: Date): Promise
       customerId_uuid: { in: customerIds },
       OR: [{ paymentDate: { gte: from, lte: to } }, { createdAt: { gte: from, lte: to } }],
     },
-    select: { customerId_uuid: true, amount: true, paymentDate: true, createdAt: true },
+    select: { customerId_uuid: true, amount: true, unlockFee: true, paymentDate: true, createdAt: true },
   });
   return rows
     .map((p) => ({
       customerId: p.customerId_uuid,
-      amount: p.amount,
+      // Towards the debt only: a temporary unlock's charge does not count as
+      // collected arrears or as keeping a promise to pay.
+      amount: p.amount - (p.unlockFee ?? 0),
       at: p.paymentDate && p.paymentDate > p.createdAt ? p.paymentDate : p.createdAt,
     }))
     .filter((p) => p.at >= from && p.at <= to);
