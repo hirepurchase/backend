@@ -25,6 +25,8 @@ import {
   calculatePenalty,
   sanitizePhoneNumber,
   roundMoney as roundMoneyShared,
+  penaltyPercentageProblem,
+  MAX_PENALTY_PERCENTAGE,
 } from '../utils/helpers';
 import { uploadToSupabase, deleteFromSupabase } from '../services/storageService';
 import { hasAnyPermission, hasPermission, PERMISSIONS } from '../constants/permissions';
@@ -265,6 +267,12 @@ export async function createContract(req: AuthenticatedRequest, res: Response): 
     // Validate required fields
     if (!customerId || !inventoryItemId || !totalPrice || depositAmount === undefined || !paymentFrequency || !totalInstallments) {
       res.status(400).json({ error: 'Missing required fields' });
+      return;
+    }
+
+    const penaltyProblem = penaltyPercentageProblem(penaltyPercentage);
+    if (penaltyProblem) {
+      res.status(400).json({ error: penaltyProblem });
       return;
     }
 
@@ -1008,8 +1016,9 @@ export async function updateOverdueInstallments(req: AuthenticatedRequest, res: 
           });
           updatedCount++;
 
-          // Apply penalty if configured
-          if (contract.penaltyPercentage > 0) {
+          // Apply penalty if configured — never at a rate above the limit,
+          // which can only be a data-entry mistake.
+          if (contract.penaltyPercentage > 0 && contract.penaltyPercentage <= MAX_PENALTY_PERCENTAGE) {
             const remainingAmount = installment.amount - installment.paidAmount;
             const penaltyAmount = calculatePenalty(remainingAmount, contract.penaltyPercentage);
             const penaltyReason = `Late payment penalty for installment #${installment.installmentNo}`;
@@ -1064,6 +1073,14 @@ export async function updateContract(req: AuthenticatedRequest, res: Response): 
   try {
     const { id } = req.params;
     const { gracePeriodDays, penaltyPercentage, paymentMethod, mobileMoneyNetwork, mobileMoneyNumber } = req.body;
+
+    if (penaltyPercentage !== undefined && penaltyPercentage !== null && penaltyPercentage !== '') {
+      const penaltyProblem = penaltyPercentageProblem(penaltyPercentage);
+      if (penaltyProblem) {
+        res.status(400).json({ error: penaltyProblem });
+        return;
+      }
+    }
 
     const contract = await prisma.hirePurchaseContract.findUnique({
       where: { id },
@@ -1997,9 +2014,9 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
     }
 
     if (hasValue(penaltyPercentage)) {
-      const parsedPenaltyPercentage = Number(penaltyPercentage);
-      if (!Number.isFinite(parsedPenaltyPercentage) || parsedPenaltyPercentage < 0) {
-        res.status(400).json({ error: 'Penalty percentage cannot be negative' });
+      const penaltyProblem = penaltyPercentageProblem(penaltyPercentage);
+      if (penaltyProblem) {
+        res.status(400).json({ error: penaltyProblem });
         return;
       }
     }

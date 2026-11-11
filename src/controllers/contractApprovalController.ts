@@ -16,7 +16,7 @@ import {
 import { enrollManagedDeviceForContract } from '../services/deviceControlPolicyService';
 import { createAgentDepositLedgerEntry } from './agentDepositController';
 import { AuthenticatedRequest, AdminUserPayload, PaymentFrequency } from '../types';
-import { calculateInstallmentSchedule, calculateEndDate } from '../utils/helpers';
+import { calculateInstallmentSchedule, calculateEndDate, penaltyPercentageProblem } from '../utils/helpers';
 import { resolveCustomerScope, scopeAllows } from '../services/scopeService';
 import { isSellingAgentRole } from '../constants/roles';
 import { notifyPayTrigger } from '../services/payTrigger/events';
@@ -1022,6 +1022,12 @@ export async function editRevisionRequestedContract(req: AuthenticatedRequest, r
       return;
     }
 
+    const penaltyProblem = penaltyPercentageProblem(newPenaltyPct);
+    if (penaltyProblem) {
+      res.status(400).json({ error: penaltyProblem });
+      return;
+    }
+
     if (newDepositAmount < 0) {
       res.status(400).json({ error: 'Deposit amount cannot be negative' });
       return;
@@ -1203,6 +1209,12 @@ export async function editPendingContract(req: AuthenticatedRequest, res: Respon
 
     if (newTotalPrice <= 0) {
       res.status(400).json({ error: 'Total price must be greater than zero' });
+      return;
+    }
+
+    const penaltyProblem = penaltyPercentageProblem(newPenaltyPct);
+    if (penaltyProblem) {
+      res.status(400).json({ error: penaltyProblem });
       return;
     }
 

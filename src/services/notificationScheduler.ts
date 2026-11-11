@@ -2,7 +2,7 @@ import { sendCombinedOverdueNotification, sendDueTodayNotification } from './not
 import prisma from '../config/database';
 import cron from 'node-cron';
 import { enqueueSingletonJob } from './backgroundJobService';
-import { isOverdue, calculatePenalty } from '../utils/helpers';
+import { isOverdue, calculatePenalty, MAX_PENALTY_PERCENTAGE } from '../utils/helpers';
 import { safelyEvaluateManagedDeviceForContract, evaluateAllActiveContractsWithDevices, relockDriftedWrittenOffDevices, runDailyDeviceAudit } from './deviceControlPolicyService';
 import { closeExpiredTemporaryUnlocks, releaseSettledDefaultedUnlocks, sendTemporaryUnlockReminders } from './temporaryUnlockService';
 import { PENALTY_KIND, recomputePenaltyOutstanding, accrueExpiryPenalties } from './penaltyService';
@@ -36,7 +36,12 @@ export async function markOverdueInstallments(): Promise<{ updated: number; pena
           updated++;
           requiresManagedDeviceEvaluation = true;
 
-          if (contract.penaltyPercentage > 0) {
+          // A rate outside 0–50% is a data-entry mistake (a phone number in
+          // the field once raised GHS 719 million per late instalment):
+          // charge nothing and say so, rather than charge it.
+          if (contract.penaltyPercentage > MAX_PENALTY_PERCENTAGE) {
+            console.warn(`Late charge skipped for ${contract.contractNumber}: rate ${contract.penaltyPercentage}% is above ${MAX_PENALTY_PERCENTAGE}%`);
+          } else if (contract.penaltyPercentage > 0) {
             const remaining = installment.amount - installment.paidAmount;
             const penaltyAmount = calculatePenalty(remaining, contract.penaltyPercentage);
             const penaltyReason = `Late payment penalty for installment #${installment.installmentNo}`;

@@ -164,6 +164,22 @@ export function isOverdue(dueDate: Date, gracePeriodDays: number = 0): boolean {
   return today > dueWithGrace;
 }
 
+/**
+ * The highest late-charge rate a contract may carry. Three contracts were
+ * saved with a phone number in this field (rates of 248–542 million %),
+ * which raised charges of hundreds of millions of cedis per late instalment.
+ */
+export const MAX_PENALTY_PERCENTAGE = 50;
+
+/** Null when the late-charge rate is acceptable, otherwise what to tell the user. */
+export function penaltyPercentageProblem(value: unknown): string | null {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > MAX_PENALTY_PERCENTAGE) {
+    return `Late charge (penalty %) must be a number from 0 to ${MAX_PENALTY_PERCENTAGE}.`;
+  }
+  return null;
+}
+
 export function calculatePenalty(amount: number, penaltyPercentage: number): number {
   return Math.round((amount * penaltyPercentage / 100) * 100) / 100;
 }

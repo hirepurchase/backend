@@ -8,6 +8,7 @@ import {
   sanitizePhoneNumber,
   validatePhoneNumber,
   validateCustomerDateOfBirth,
+  penaltyPercentageProblem,
 } from "../utils/helpers";
 
 interface ImportResult {
@@ -497,6 +498,15 @@ export async function importContracts(
           );
           result.failed++;
           continue;
+        }
+
+        if (row.penaltyPercentage) {
+          const penaltyProblem = penaltyPercentageProblem(row.penaltyPercentage);
+          if (penaltyProblem) {
+            result.errors.push(`Row ${i + 2}: ${penaltyProblem}`);
+            result.failed++;
+            continue;
+          }
         }
 
         // Create contract in transaction
