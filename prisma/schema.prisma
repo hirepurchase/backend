@@ -694,6 +694,10 @@ model KnoxGuardSettings {
   allowPaymentUssdOnLockScreen Boolean  @default(true)
   // Paid temporary unlock: a locked customer pays part of what is overdue and
   // the phone opens for a while. Off until switched on. See paidUnlockService.
+  // How many Knox Guard licence seats the business has bought (from the Knox
+  // portal's licence page). Knox's API gives no count, so seats in use are
+  // counted from enrolled devices and remaining = bought − in use.
+  licenceSeatsPurchased        Int?
   temporaryUnlockEnabled       Boolean  @default(false)
   temporaryUnlockMaxUses       Int      @default(2)
   // Each tier: { percent, hours, feePercent } — the charge is a percentage of

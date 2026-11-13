@@ -26,6 +26,7 @@ import clusterRoutes from './cluster';
 import temporaryUnlockRoutes from './temporaryUnlocks';
 import penaltySettingsRoutes from './penaltySettings';
 import announcementRoutes from './announcements';
+import licenceRoutes from './licences';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
 import { PERMISSIONS } from '../constants/permissions';
 
@@ -36,6 +37,7 @@ router.use('/admin-users', adminUserRoutes);
 router.use('/customers', customerRoutes);
 router.use('/customer', customerRoutes); // Alias for customer self-service
 router.use('/products', productRoutes);
+router.use('/licences', licenceRoutes);
 router.use('/contracts', contractRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/payment-retry', paymentRetryRoutes);
