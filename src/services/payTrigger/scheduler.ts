@@ -3,14 +3,18 @@ import { enqueueSingletonJob } from '../backgroundJobService';
 import { refreshTranssionContracts } from './registry';
 import { getPayTriggerSettings } from './settings';
 import { runMorningSweep } from './sweep';
+import { retryStalledCommands } from './retry';
 
 /**
- * One cron job: the 08:36 morning sweep. Everything else PayTrigger does is
- * triggered by events. Registered with a single line in src/index.ts and
+ * Two cron jobs: the 08:36 morning sweep, and a five-minute pass that picks up
+ * sends that failed or stalled. Everything else PayTrigger does is triggered
+ * by events. Registered with a single line in src/index.ts and
  * wrapped so that nothing here can stop the server starting.
  */
 
 const DEFAULT_CRON = '36 8 * * *';
+/** Failed or stalled sends are picked up again on this tick, not left for the next morning. */
+const RETRY_CRON = '*/5 * * * *';
 
 export function startPayTriggerScheduler(): void {
   try {
@@ -46,5 +50,18 @@ async function init() {
       }
     });
     if (!enqueued) console.log('⏭️  PayTrigger sweep still running — skipped');
+  });
+
+  cron.schedule(RETRY_CRON, () => {
+    enqueueSingletonJob('paytrigger-retry', async () => {
+      try {
+        const r = await retryStalledCommands();
+        if (r.devices || r.abandoned) {
+          console.log(`📱 PayTrigger retry: ${r.devices} device(s) re-checked, ${r.closed} row(s) closed, ${r.abandoned} abandoned`);
+        }
+      } catch (err) {
+        console.error('PayTrigger: retry run failed', err);
+      }
+    });
   });
 }

@@ -593,6 +593,47 @@ export async function getIssues() {
     createdAt: e.createdAt,
   }));
 
+  // Phones whose lock was removed while the customer still owes: they can no
+  // longer be locked. Removal cannot be undone, so they stay listed until the
+  // contract is settled one way or another.
+  const removedDevices = await prisma.payTriggerDevice.findMany({
+    where: { enrollmentStatus: 'REMOVED', contractId: { not: null } },
+    select: { id: true, imei: true, contractId: true, lastError: true, updatedAt: true },
+  });
+  const removedContracts = removedDevices.length
+    ? await prisma.hirePurchaseContract.findMany({
+        where: { id: { in: removedDevices.map((d) => d.contractId!) }, status: { in: ['ACTIVE', 'DEFAULTED', 'PENDING_APPROVAL', 'REVISION_REQUESTED'] } },
+        select: { id: true, contractNumber: true, status: true, outstandingBalance: true, customer: { select: { firstName: true, lastName: true, phone: true } } },
+      })
+    : [];
+  const owingById = new Map(removedContracts.map((c) => [c.id, c]));
+  // Removals we asked for ourselves (a release or a cancelled enrolment) are not news.
+  const askedFor = new Set(
+    (
+      await prisma.payTriggerCommand.findMany({
+        where: { deviceId: { in: removedDevices.map((d) => d.id) }, type: { in: ['RELEASE', 'CANCEL'] }, status: 'SUCCEEDED' },
+        select: { deviceId: true },
+      })
+    ).map((c) => c.deviceId),
+  );
+  const removedWhileOwing = removedDevices
+    .filter((d) => owingById.has(d.contractId!) && !askedFor.has(d.id))
+    .map((d) => {
+      const c = owingById.get(d.contractId!)!;
+      return {
+        deviceId: d.id,
+        imei: d.imei,
+        contractId: c.id,
+        contractNumber: c.contractNumber,
+        contractStatus: c.status,
+        outstanding: c.outstandingBalance,
+        customer: `${c.customer.firstName} ${c.customer.lastName}`,
+        customerPhone: c.customer.phone,
+        lastError: d.lastError,
+        removedAt: d.updatedAt,
+      };
+    });
+
   const sweepLate = !settings.lastSweepAt || now - settings.lastSweepAt.getTime() > 26 * 3600_000;
   return {
     paidStillLocked,
@@ -604,10 +645,12 @@ export async function getIssues() {
     stale,
     soldNotEnrolled,
     callbackErrors,
+    removedWhileOwing,
     sweep: { lastSweepAt: settings.lastSweepAt, late: sweepLate, summary: settings.lastSweepSummary },
     counts: {
       paidStillLocked: paidStillLocked.length,
-      total: paidStillLocked.length + ledgerMissing.length + unconfirmedLocks.length + unenforceable.length + failing.length + soldNotEnrolled.length + callbackErrors.length + (sweepLate ? 1 : 0),
+      removedWhileOwing: removedWhileOwing.length,
+      total: removedWhileOwing.length + paidStillLocked.length + ledgerMissing.length + unconfirmedLocks.length + unenforceable.length + failing.length + soldNotEnrolled.length + callbackErrors.length + (sweepLate ? 1 : 0),
     },
   };
 }

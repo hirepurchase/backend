@@ -44,8 +44,20 @@ export function isRateLimited(code: string | number | undefined | null): boolean
   return code !== undefined && code !== null && RATE_LIMIT_CODES.has(String(code));
 }
 
+const PERMANENT_CODES = new Set(['20001', '20005', '20015', '30021', '50010', '50011', '50014', '50015', '50020', '50078']);
+
 /** Errors no retry will fix — retrying only burns the device's daily quota. */
 export function isPermanent(code: string | number | undefined | null): boolean {
   if (code === undefined || code === null) return false;
-  return ['20001', '20005', '20015', '30021', '50010', '50011', '50014', '50015', '50020', '50078'].includes(String(code));
+  return PERMANENT_CODES.has(String(code));
+}
+
+/**
+ * The same judgement from a stored error text, for rows written before the
+ * code was kept: every rate-limit and permanent code has its own wording above.
+ */
+const NO_RETRY_TEXTS = new Set([...RATE_LIMIT_CODES, ...PERMANENT_CODES].map((code) => MESSAGES[code]).filter(Boolean));
+
+export function isNoRetryError(lastError: string | null | undefined): boolean {
+  return !!lastError && NO_RETRY_TEXTS.has(lastError);
 }

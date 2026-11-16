@@ -77,34 +77,12 @@ export async function runMorningSweep(): Promise<SweepSummary> {
   await refreshTranssionContracts();
 
   // 2. Reconcile every live device, with one breaker across the whole run.
-  const devices = await prisma.payTriggerDevice.findMany({
-    where: { contractId: { not: null }, enrollmentStatus: { in: ['QUEUED', 'ACTIVE', 'UNENFORCEABLE'] } },
-    select: { contractId: true },
-  });
-  const limit = Math.max(BREAKER_MIN_EXTENSIONS, Math.ceil((devices.length * settings.extendBreakerPercent) / 100));
-  let extensions = 0;
-  const breaker = {
-    allowExtend() {
-      if (extensions >= limit) {
-        summary.breakerTripped = true;
-        return false;
-      }
-      extensions++;
-      return true;
-    },
-  };
-  for (const { contractId } of devices) {
-    if (!contractId) continue;
-    try {
-      const outcome = await reconcileContract(contractId, { reasons: ['ADMIN_RECONCILE'], breaker });
-      summary.reconciled++;
-      if (outcome.sent) summary.sent++;
-      else summary.skipped++;
-    } catch (err) {
-      summary.errors++;
-      console.error('PayTrigger sweep: reconcile failed', contractId, err);
-    }
-  }
+  const all = await reconcileAllLinked(settings.extendBreakerPercent, null);
+  summary.reconciled = all.reconciled;
+  summary.sent = all.sent;
+  summary.skipped = all.skipped;
+  summary.errors += all.errors;
+  summary.breakerTripped = all.breakerTripped;
 
   // 2b. Once live: enrolments that were only simulated in dry run (or failed)
   // are sent for real, so no phone is left looking enrolled when it is not.
@@ -140,6 +118,45 @@ export async function runMorningSweep(): Promise<SweepSummary> {
     data: { lastSweepAt: new Date(), lastSweepSummary: summary as any },
   });
   return summary;
+}
+
+/**
+ * Re-judge every contract with a live PayTrigger phone. One circuit breaker
+ * covers the whole run: once more than `extendBreakerPercent` of phones would
+ * be extended, further extensions wait for review. Shared by the sweep and by
+ * a settings change, which can move many lock dates at once.
+ */
+export async function reconcileAllLinked(extendBreakerPercent: number, actorId: string | null) {
+  const out = { reconciled: 0, sent: 0, skipped: 0, errors: 0, breakerTripped: false };
+  const devices = await prisma.payTriggerDevice.findMany({
+    where: { contractId: { not: null }, enrollmentStatus: { in: ['QUEUED', 'ACTIVE', 'UNENFORCEABLE'] } },
+    select: { contractId: true },
+  });
+  const limit = Math.max(BREAKER_MIN_EXTENSIONS, Math.ceil((devices.length * extendBreakerPercent) / 100));
+  let extensions = 0;
+  const breaker = {
+    allowExtend() {
+      if (extensions >= limit) {
+        out.breakerTripped = true;
+        return false;
+      }
+      extensions++;
+      return true;
+    },
+  };
+  for (const { contractId } of devices) {
+    if (!contractId) continue;
+    try {
+      const outcome = await reconcileContract(contractId, { reasons: ['ADMIN_RECONCILE'], breaker, actorId });
+      out.reconciled++;
+      if (outcome.sent) out.sent++;
+      else out.skipped++;
+    } catch (err) {
+      out.errors++;
+      console.error('PayTrigger: reconcile failed', contractId, err);
+    }
+  }
+  return out;
 }
 
 export async function runDueReleases(): Promise<number> {

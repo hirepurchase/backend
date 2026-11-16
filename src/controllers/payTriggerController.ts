@@ -11,6 +11,8 @@ import { registryLoaded, registrySize } from '../services/payTrigger/registry';
 import { EDITABLE_SETTINGS, getPayTriggerSettings, invalidatePayTriggerSettings } from '../services/payTrigger/settings';
 import * as admin from '../services/payTrigger/admin';
 import * as messages from '../services/payTrigger/messages';
+import { reconcileAllLinked } from '../services/payTrigger/sweep';
+import { enqueueSingletonJob } from '../services/backgroundJobService';
 import sharp from 'sharp';
 import { uploadToSupabase } from '../services/storageService';
 
@@ -328,6 +330,44 @@ export async function getSettings(_req: AuthenticatedRequest, res: Response) {
   }
 }
 
+/**
+ * Settings that change what a phone is told: when it locks, how far ahead it
+ * is opened, and the words on its lock screen. A change to any of them is
+ * applied to every phone straight away, not at the next morning sweep.
+ */
+const RECHECK_SETTINGS = [
+  'lockAfterOverdueDays',
+  'lockOnUnpaidAgentDeposit',
+  'holdOnUnpaidPenalties',
+  'maxUnlockHorizonDays',
+  'lockTitle',
+  'lockTips',
+  'depositHoldTitle',
+  'depositHoldTips',
+  'payDeeplink',
+] as const;
+
+let recheckAgain = false;
+
+/** Re-judge every Transsion phone in the background; a change made mid-run triggers one more run. */
+function recheckAllPhones(actorId: string) {
+  recheckAgain = true;
+  enqueueSingletonJob('paytrigger-settings-recheck', async () => {
+    while (recheckAgain) {
+      recheckAgain = false;
+      try {
+        const settings = await getPayTriggerSettings();
+        const r = await reconcileAllLinked(settings.extendBreakerPercent, actorId);
+        console.log(
+          `📱 PayTrigger settings re-check: ${r.reconciled} reconciled, ${r.sent} sent, ${r.errors} errors${r.breakerTripped ? ', BREAKER TRIPPED' : ''}`,
+        );
+      } catch (err) {
+        console.error('PayTrigger: settings re-check failed', err);
+      }
+    }
+  });
+}
+
 export async function putSettings(req: AuthenticatedRequest, res: Response) {
   try {
     const before = await getPayTriggerSettings();
@@ -381,6 +421,8 @@ export async function putSettings(req: AuthenticatedRequest, res: Response) {
         admin.resendUnlinkedMessages().catch((err) => console.error('PayTrigger: no-contract messages failed', err));
       });
     }
+    const recheck = RECHECK_SETTINGS.some((key) => key in data && (before as any)[key] !== data[key]);
+    if (recheck) recheckAllPhones(actor(req).id);
     await createAuditLog({
       userId: actor(req).id,
       action: 'PAYTRIGGER_SETTINGS',
@@ -389,7 +431,7 @@ export async function putSettings(req: AuthenticatedRequest, res: Response) {
       newValues: data,
       ipAddress: req.ip,
     });
-    res.json({ settings });
+    res.json({ settings, recheckingPhones: recheck });
   } catch (err) {
     fail(res, err);
   }
