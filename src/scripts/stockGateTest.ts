@@ -18,7 +18,7 @@ import assert from 'assert';
 import * as crypto from 'crypto';
 import prisma from '../config/database';
 import { setTargets, validateTarget } from '../services/kpi';
-import { getStockGate } from '../services/kpi/stockGate';
+import { checkCanReceiveStock, getStockGate } from '../services/kpi/stockGate';
 import { transferClusterStock } from '../controllers/clusterStockController';
 import { addInventoryItem, updateInventoryItem } from '../controllers/productController';
 
@@ -107,7 +107,28 @@ async function main() {
   });
 
   await setTargets('AGENT', [validateTarget('AGENT', 'NEW_CONTRACTS', 10), validateTarget('AGENT', 'QUALITY_CONTRACTS', 1)], L.id);
+
+  // The switch: targets alone must never block stock.
+  const switchTo = (on: boolean) =>
+    prisma.clusterScorecardSettings.upsert({ where: { id: 'singleton' }, create: { id: 'singleton', stockGateEnabled: on }, update: { stockGateEnabled: on } });
+  await switchTo(false);
+  await check('targets set but the block is switched off → nobody is blocked', async () => {
+    const off = await getStockGate(agents);
+    assert.strictEqual(off.enabled, false);
+    assert.strictEqual(off.active, false);
+    assert.ok(![...off.blocks.values()].some((b) => b.blocked));
+  });
+  await check('switched off: assigning to an agent below target is allowed', async () => {
+    assert.strictEqual(await checkCanReceiveStock(B.id, { role: 'CLUSTER_AGENT' }), null);
+  });
+  await check('preview shows who turning it on would block', async () => {
+    const preview = await getStockGate(agents, new Date(), { preview: true });
+    assert.strictEqual(preview.blocks.get(B.id)?.blocked, true);
+    assert.strictEqual(preview.blocks.get(G.id)?.blocked, false);
+  });
+  await switchTo(true);
   const gate = await getStockGate(agents);
+  await check('switched on → the block applies', () => assert.strictEqual(gate.enabled && gate.active, true));
   await check('judged on last month', () => {
     const last = monthsAgo(1);
     assert.strictEqual(gate.month, `${last.getFullYear()}-${String(last.getMonth() + 1).padStart(2, '0')}`);
@@ -211,6 +232,7 @@ async function main() {
   });
 
   await prisma.kpiTarget.deleteMany({});
+  await prisma.clusterScorecardSettings.updateMany({ data: { stockGateEnabled: false } });
   console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
 }
 

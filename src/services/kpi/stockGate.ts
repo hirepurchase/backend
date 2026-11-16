@@ -19,6 +19,9 @@ import { currentMonth, getTargets, sellerCards } from './index';
  *   - Cluster leaders are not gated: stock reaches agents through them.
  *   - Administrators may assign anyway with a reason, which is audited.
  *     Cluster leaders cannot.
+ *   - It only applies while the switch is on (ClusterScorecardSettings.
+ *     stockGateEnabled), so the targets can be set and shown to agents
+ *     without blocking anyone.
  *
  * Moving devices *away* from a blocked agent is never stopped — that is what a
  * leader is meant to do with stock sitting with someone not selling.
@@ -42,8 +45,10 @@ export interface StockBlock {
 
 export interface StockGate {
   month: string;
-  /** False when no sales or quality target is set — nobody is blocked. */
+  /** False when the switch is off or no sales or quality target is set — nobody is blocked. */
   active: boolean;
+  /** The administrator's switch. */
+  enabled: boolean;
   blocks: Map<string, StockBlock>;
 }
 
@@ -56,11 +61,27 @@ function monthName(month: string): string {
   return monthRange(month).from.toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 }
 
-export async function getStockGate(agentIds: string[], now = new Date()): Promise<StockGate> {
+/** Is the stock block switched on? Fails closed to "off", which never stops stock moving. */
+export async function stockGateEnabled(): Promise<boolean> {
+  try {
+    const s = await prisma.clusterScorecardSettings.findUnique({ where: { id: 'singleton' }, select: { stockGateEnabled: true } });
+    return !!s?.stockGateEnabled;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Who is blocked this month. `preview` works it out as if the switch were on,
+ * to show an administrator what turning it on would do.
+ */
+export async function getStockGate(agentIds: string[], now = new Date(), opts: { preview?: boolean } = {}): Promise<StockGate> {
   const month = previousMonth(now);
-  const gate: StockGate = { month, active: false, blocks: new Map() };
+  const enabled = await stockGateEnabled();
+  const gate: StockGate = { month, active: false, enabled, blocks: new Map() };
   const ids = [...new Set(agentIds.filter(Boolean))];
   if (!ids.length) return gate;
+  if (!enabled && !opts.preview) return gate;
 
   try {
     const targets = (await getTargets()).AGENT;
@@ -111,7 +132,7 @@ export async function getStockGate(agentIds: string[], now = new Date()): Promis
     return gate;
   } catch (err) {
     console.error('Stock gate: KPIs unavailable — devices may be assigned', (err as Error)?.message || err);
-    return { month, active: false, blocks: new Map() };
+    return { month, active: false, enabled, blocks: new Map() };
   }
 }
 

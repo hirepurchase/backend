@@ -18,7 +18,7 @@ import {
   validateTarget,
 } from '../services/kpi';
 import prisma from '../config/database';
-import { canOverrideStockGate, getStockGate } from '../services/kpi/stockGate';
+import { canOverrideStockGate, getStockGate, stockGateEnabled } from '../services/kpi/stockGate';
 
 /**
  * KPI pages, mounted at /api/kpi.
@@ -109,7 +109,12 @@ export async function getPeopleKpis(req: AuthenticatedRequest, res: Response) {
 
 export async function getKpiTargets(req: AuthenticatedRequest, res: Response) {
   try {
-    res.json({ definitions: KPI_DEFINITIONS, targets: await getTargets(), canSetTargets: canSetTargets(user(req)) });
+    res.json({
+      definitions: KPI_DEFINITIONS,
+      targets: await getTargets(),
+      canSetTargets: canSetTargets(user(req)),
+      stockGate: { enabled: await stockGateEnabled() },
+    });
   } catch (err) {
     fail(res, err, 500);
   }
@@ -145,15 +150,48 @@ export async function putKpiTargets(req: AuthenticatedRequest, res: Response) {
 export async function getStockGateStatus(req: AuthenticatedRequest, res: Response) {
   try {
     const u = user(req);
-    if (u.role !== 'SUPER_ADMIN' && !hasAnyPermission(u.permissions, [PERMISSIONS.MANAGE_INVENTORY, PERMISSIONS.EDIT_INVENTORY])) {
-      return res.status(403).json({ error: 'Insufficient permissions' });
-    }
+    const preview = req.query?.preview === '1';
+    const allowed = u.role === 'SUPER_ADMIN'
+      || hasAnyPermission(u.permissions, [PERMISSIONS.MANAGE_INVENTORY, PERMISSIONS.EDIT_INVENTORY])
+      || (preview && canSetTargets(u));
+    if (!allowed) return res.status(403).json({ error: 'Insufficient permissions' });
     const agents = await prisma.adminUser.findMany({ where: { isActive: true, role: { name: { in: KPI_SELLER_ROLES } } }, select: { id: true } });
-    const gate = await getStockGate(agents.map((a) => a.id));
+    // ?preview=1 works it out as if the switch were on: what turning it on would do.
+    const gate = await getStockGate(agents.map((a) => a.id), new Date(), { preview });
     const blocked: Record<string, { reasons: string[] }> = {};
     for (const [id, b] of gate.blocks) if (b.blocked) blocked[id] = { reasons: b.reasons };
-    res.json({ month: gate.month, active: gate.active, canOverride: canOverrideStockGate(u.role), blocked });
+    const judged = [...gate.blocks.values()].filter((b) => !b.exempt).length;
+    res.json({ month: gate.month, active: gate.active, enabled: gate.enabled, judged, canOverride: canOverrideStockGate(u.role), blocked });
   } catch (err) {
     fail(res, err, 500);
+  }
+}
+
+/** Turn the stock block on or off. Same people who may set targets. */
+export async function putStockGate(req: AuthenticatedRequest, res: Response) {
+  const u = user(req);
+  if (!canSetTargets(u)) return res.status(403).json({ error: 'Insufficient permissions' });
+  if (typeof req.body?.enabled !== 'boolean') return fail(res, new Error('enabled must be true or false'));
+  try {
+    const before = await stockGateEnabled();
+    const enabled = req.body.enabled as boolean;
+    await prisma.clusterScorecardSettings.upsert({
+      where: { id: 'singleton' },
+      create: { id: 'singleton', stockGateEnabled: enabled, updatedById: u.id },
+      update: { stockGateEnabled: enabled, updatedById: u.id },
+    });
+    await createAuditLog({
+      userId: u.id,
+      action: 'SET_STOCK_GATE',
+      entity: 'ClusterScorecardSettings',
+      entityId: 'singleton',
+      oldValues: { stockGateEnabled: before },
+      newValues: { stockGateEnabled: enabled },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'] as string,
+    });
+    res.json({ stockGate: { enabled } });
+  } catch (err) {
+    fail(res, err);
   }
 }

@@ -1056,6 +1056,10 @@ model ClusterScorecardSettings {
   parGateCeiling    Float    @default(25)
   gateWithholdsBase Boolean  @default(false)
   depositRemitDays  Int      @default(7)
+  // Whether agents below their sales or quality target last month are refused
+  // new devices. Off by default, so setting those targets never blocks stock
+  // until an administrator chooses to.
+  stockGateEnabled  Boolean  @default(false)
   updatedById       String?
   updatedAt         DateTime @updatedAt
 }
