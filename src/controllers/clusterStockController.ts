@@ -11,7 +11,7 @@ const prismaAny = prisma as any;
  * plus themselves, because a cluster agent sells and holds stock of their own.
  * Returns null for a caller who should see everything.
  */
-async function stockScope(admin: AdminUserPayload): Promise<string[] | null> {
+export async function stockScope(admin: AdminUserPayload): Promise<string[] | null> {
   if (admin.role === 'SUPER_ADMIN' || admin.role === 'ADMIN') return null;
   const rows = await prismaAny.clusterAgentAssignment.findMany({
     where: { clusterAgentId: admin.id },

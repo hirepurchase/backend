@@ -1,3 +1,4 @@
+import { getAgentStockReport } from '../controllers/agentStockReportController';
 import { Router } from 'express';
 import {
   getSalesReport,
@@ -36,6 +37,8 @@ router.get('/sales', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_RE
 router.get('/payments', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getPaymentReport);
 router.get('/defaults', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getDefaultReport);
 router.get('/inventory', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getInventoryReport);
+// Scoped like Stock by Agent: everyone for admins, a cluster for leaders, themselves for agents.
+router.get('/agent-stock', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS, PERMISSIONS.MANAGE_INVENTORY, PERMISSIONS.VIEW_ASSIGNED_CONTRACTS), getAgentStockReport);
 router.get('/preapprovals', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getPreapprovalsReport);
 router.get('/income', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getIncomeReport);
 router.get('/agents', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_REPORTS), getAgentReport);
