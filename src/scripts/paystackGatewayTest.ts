@@ -368,13 +368,13 @@ async function main() {
     await waitFor(async () => (await paymentOf(ref)).status === 'SUCCESS');
   });
 
-  await check('Telecel from an app installed before Paystack goes through Hubtel', async () => {
+  await check('an app installed before Paystack (no code box) pays through Hubtel on every network', async () => {
     const before = hubtelPrompts.length;
     const r = await call(initiateHubtelPayment, { ...customer(P), body: { contractId: P.contract.id, amount: 20, phoneNumber: P.phone, network: 'VODAFONE' } });
     assert.equal(r.body.gateway, 'HUBTEL');
     assert.equal(hubtelPrompts.length, before + 1);
     const mtn = await call(initiateHubtelPayment, { ...customer(P), body: { contractId: P.contract.id, amount: 20, phoneNumber: P.phone, network: 'MTN' } });
-    assert.equal(mtn.body.gateway, 'PAYSTACK', 'MTN needs no code, so an old app can still use Paystack');
+    assert.equal(mtn.body.gateway, 'HUBTEL', 'live Paystack can ask MTN payers for a code too');
   });
 
   // ── Switching mid-flight ──────────────────────────────────────────────────

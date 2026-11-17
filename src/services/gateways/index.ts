@@ -62,16 +62,17 @@ export async function notePaystackEvent(at: Date = new Date()): Promise<void> {
 /**
  * The gateway for a payment starting now on the web or in the app.
  *
- * Paystack only when the switch says so and the key is set. Telecel payers on
- * Paystack get a code by SMS to type back in, so a client that cannot show
- * that box (an app version installed before Paystack) pays Telecel through
- * Hubtel instead.
+ * Paystack only when the switch says so and the key is set, and only for a
+ * client that can show Paystack's code box. Paystack can ask any payer for a
+ * one-time code before the prompt (live MTN does for a number it hasn't seen;
+ * Telecel always asks for a voucher), so a client that cannot ask for it (an
+ * app version installed before Paystack) pays through Hubtel, on every network.
  */
 export async function gatewayFor(section: GatewaySection, opts: { otpCapable?: boolean; network: string }): Promise<Gateway> {
   const settings = await getGatewaySettings();
   const chosen = section === 'CUSTOMER' ? settings.customerGateway : settings.agentDepositGateway;
   if (chosen !== 'PAYSTACK' || !paystack.isPaystackConfigured()) return 'HUBTEL';
-  if (paystack.normaliseNetwork(opts.network) === 'VODAFONE' && !opts.otpCapable) return 'HUBTEL';
+  if (!opts.otpCapable) return 'HUBTEL';
   return 'PAYSTACK';
 }
 
