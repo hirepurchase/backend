@@ -697,7 +697,7 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
       // Fetch all successful payments (no pagination) for accurate stats
       prisma.paymentTransaction.findMany({
         where: { ...where, status: 'SUCCESS' },
-        select: { paymentMethod: true, amount: true, paymentDate: true, createdAt: true },
+        select: { paymentMethod: true, amount: true, paymentDate: true, createdAt: true, gateway: true, gatewayFee: true },
       }),
     ]);
 
@@ -715,6 +715,7 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
       HUBTEL_DIRECT_DEBIT: { count: 0, amount: 0 },
       HUBTEL_MOMO: { count: 0, amount: 0 },
       HUBTEL_REGULAR: { count: 0, amount: 0 },
+      PAYSTACK_MOMO: { count: 0, amount: 0 },
       CASH: { count: 0, amount: 0 },
       BANK_TRANSFER: { count: 0, amount: 0 },
       MOBILE_MONEY: { count: 0, amount: 0 },
@@ -747,6 +748,23 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
       dailyTotals[date] += Number(payment.amount);
     });
 
+    // By gateway, with the fees the gateway kept: what reaches the bank is
+    // received minus fees. Paystack reports its fee; Hubtel's is not recorded.
+    const byGateway: Record<string, { count: number; amount: number; fees: number; feesKnown: number }> = {};
+    for (const p of allSuccessful) {
+      const g = (byGateway[p.gateway] ??= { count: 0, amount: 0, fees: 0, feesKnown: 0 });
+      g.count++;
+      g.amount += Number(p.amount);
+      if (p.gatewayFee != null) {
+        g.fees += Number(p.gatewayFee);
+        g.feesKnown++;
+      }
+    }
+    for (const g of Object.values(byGateway)) {
+      g.amount = Math.round(g.amount * 100) / 100;
+      g.fees = Math.round(g.fees * 100) / 100;
+    }
+
     const stats = {
       totalPayments: allMatchingCount,
       successfulPayments: allSuccessful.length,
@@ -755,6 +773,7 @@ export async function getIncomeReport(req: AuthenticatedRequest, res: Response):
       totalIncome,
       averagePayment: allSuccessful.length > 0 ? totalIncome / allSuccessful.length : 0,
       byPaymentMethod,
+      byGateway,
       byStatus,
       dailyTotals: Object.entries(dailyTotals)
         .map(([date, amount]) => ({ date, amount }))

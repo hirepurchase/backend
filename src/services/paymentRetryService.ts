@@ -89,6 +89,7 @@ export async function getPaymentsForRetry(): Promise<any[]> {
     where: {
       status: 'FAILED',
       isAutoRetryEnabled: true,
+      gateway: 'HUBTEL',
       retryCount: {
         lt: settings.maxRetryAttempts,
       },
@@ -138,6 +139,11 @@ export async function retryPayment(paymentId: string): Promise<{
 
     if (payment.status !== 'FAILED') {
       return { success: false, message: 'Payment is not in FAILED status' };
+    }
+    // Retries charge through Hubtel. A payment that went through Paystack is
+    // not charged again here; the customer simply pays again.
+    if ((payment as any).gateway === 'PAYSTACK') {
+      return { success: false, message: 'Paystack payments are not retried. The customer can make a new payment.' };
     }
 
     const settings = await getRetrySettings();

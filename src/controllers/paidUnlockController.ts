@@ -4,7 +4,7 @@ import { AuthenticatedRequest, AdminUserPayload } from '../types';
 import { createAuditLog } from '../services/auditService';
 import { resolveContractScope, scopeAllows } from '../services/scopeService';
 import { isSellingAgentRole } from '../constants/roles';
-import { initiateHubtelReceiveMoney } from '../services/hubtelService';
+import { gatewayFor, paymentMethodFor, payerEmail, paystack as paystackGateway } from '../services/gateways';
 import { sanitizePhoneNumber, validatePhoneNumber } from '../utils/helpers';
 import {
   getTemporaryUnlockOffer,
@@ -12,7 +12,7 @@ import {
   requestTemporaryUnlock,
   TemporaryUnlockError,
 } from '../services/paidUnlockService';
-import { postRecordedPayment } from './paymentController';
+import { postRecordedPayment, sendCustomerPrompt } from './paymentController';
 
 /**
  * Paid temporary unlock for customers (the app) and for staff taking cash at
@@ -36,13 +36,13 @@ function refuse(res: Response, error: unknown): boolean {
 export async function customerRequestTemporaryUnlock(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const customerUuid = req.user!.id;
-    const { percent, network, phoneNumber, expectedAmount } = req.body || {};
+    const { percent, network, phoneNumber, expectedAmount, otpCapable } = req.body || {};
     if (!percent || !network || !phoneNumber) {
       res.status(400).json({ error: 'Choose an option, a network and a phone number.' });
       return;
     }
-    const net = String(network).toUpperCase();
-    if (!VALID_NETWORKS.includes(net)) {
+    const net = paystackGateway.normaliseNetwork(String(network));
+    if (!net || !VALID_NETWORKS.includes(net)) {
       res.status(400).json({ error: 'Invalid network. Must be MTN, VODAFONE, or AIRTELTIGO' });
       return;
     }
@@ -69,6 +69,7 @@ export async function customerRequestTemporaryUnlock(req: AuthenticatedRequest, 
       expectedAmount: expectedAmount === undefined ? undefined : Number(expectedAmount),
     });
 
+    const gateway = await gatewayFor('CUSTOMER', { otpCapable: otpCapable === true, network: net });
     const payment = await prisma.paymentTransaction.create({
       data: {
         transactionRef: clientReference,
@@ -76,54 +77,62 @@ export async function customerRequestTemporaryUnlock(req: AuthenticatedRequest, 
         customerId_uuid: contract.customerId_uuid,
         amount: option.total,
         unlockFee: option.fee,
-        paymentMethod: 'HUBTEL_MOMO',
+        paymentMethod: paymentMethodFor(gateway),
+        gateway,
         isAutoRetryEnabled: false, // never charged again later; see the USSD path
         mobileMoneyProvider: net,
         mobileMoneyNumber: phone,
         status: 'PENDING',
         metadata: JSON.stringify({
           initiatedAt: new Date().toISOString(),
-          gateway: 'HUBTEL',
+          gateway,
           channel: 'APP',
           temporaryUnlock: { percent: option.percent, hours: option.hours, fee: option.fee },
         }),
       },
     });
 
-    try {
-      const hubtel = await initiateHubtelReceiveMoney({
-        amount: option.total,
-        customerName: `${contract.customer?.firstName ?? ''} ${contract.customer?.lastName ?? ''}`.trim() || 'Customer',
-        customerPhone: phone,
-        customerEmail: contract.customer?.email || undefined,
-        network: net,
-        description: `Temporary unlock for contract ${contract.contractNumber}`,
-        transactionRef: clientReference,
-      });
-      await prisma.paymentTransaction.update({
-        where: { id: payment.id },
-        data: { externalRef: hubtel.transactionId },
-      });
-    } catch (error: any) {
-      // The request may have reached Hubtel before it failed, so the payment
-      // stays PENDING for the status check to settle. Never "failed" here.
-      console.error('Temporary unlock prompt error:', error?.message || error);
+    const result = await sendCustomerPrompt(payment.id, {
+      gateway,
+      reference: clientReference,
+      amount: option.total,
+      phone,
+      network: net,
+      payerName: `${contract.customer?.firstName ?? ''} ${contract.customer?.lastName ?? ''}`.trim() || 'Customer',
+      email: payerEmail(contract.customer?.email, contract.customerId_uuid),
+      description: `Temporary unlock for contract ${contract.contractNumber}`,
+      metadata: { kind: 'PAID_UNLOCK', contractNumber: contract.contractNumber },
+    });
+
+    if (!result) {
+      // The request may have reached the gateway before it failed, so the
+      // payment stays PENDING for the status check to settle. Never "failed" here.
       res.status(202).json({
         message: 'We could not confirm the Mobile Money prompt was sent. If you approve a payment it will still open your phone. Otherwise please try again in a few minutes.',
         transactionRef: clientReference,
         amount: option.total,
         status: 'PENDING',
+        otpRequired: false,
+        gateway,
       });
+      return;
+    }
+    if (result.state === 'FAILED') {
+      res.status(400).json({ error: result.message || 'The payment could not be started. Please try again.', transactionRef: clientReference, status: 'FAILED' });
       return;
     }
 
     res.json({
-      message: 'Approve the Mobile Money prompt on your phone. Your phone opens as soon as the payment comes in.',
+      message: gateway === 'PAYSTACK' && result.message
+        ? result.message
+        : 'Approve the Mobile Money prompt on your phone. Your phone opens as soon as the payment comes in.',
       transactionRef: clientReference,
       amount: option.total,
       fee: option.fee,
       hours: option.hours,
-      status: 'PENDING',
+      status: result.state === 'SUCCESS' ? 'SUCCESS' : 'PENDING',
+      otpRequired: result.state === 'OTP_REQUIRED',
+      gateway,
     });
   } catch (error) {
     if (refuse(res, error)) return;

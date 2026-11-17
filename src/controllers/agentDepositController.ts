@@ -1,7 +1,9 @@
 import { Response } from 'express';
 import prisma from '../config/database';
 import { AuthenticatedRequest, AdminUserPayload } from '../types';
-import { initiateHubtelReceiveMoney, formatPhoneForHubtel, HUBTEL_AGENT_DEPOSIT_CALLBACK_URL } from '../services/hubtelService';
+import { formatPhoneForHubtel, HUBTEL_AGENT_DEPOSIT_CALLBACK_URL } from '../services/hubtelService';
+import { gatewayFor, payerEmail, startPrompt, StartPromptResult, paystack as paystackGateway } from '../services/gateways';
+import { cancelAgentCharge, refreshPaystackAgentCharge } from '../services/gateways/settle';
 import { generateTransactionRef } from '../utils/helpers';
 import { requestManagedDeviceUnlock } from '../services/deviceControlPolicyService';
 import { unlockKnoxGuardDevice } from '../services/knoxGuardService';
@@ -213,7 +215,7 @@ export async function getMySummary(req: AuthenticatedRequest, res: Response): Pr
 export async function payDeposit(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { id } = req.params;
-    const { amount, phoneNumber, network } = req.body;
+    const { amount, phoneNumber, network, otpCapable } = req.body;
     const admin = req.user as AdminUserPayload;
 
     if (!amount || !phoneNumber || !network) {
@@ -221,8 +223,9 @@ export async function payDeposit(req: AuthenticatedRequest, res: Response): Prom
       return;
     }
 
-    const validNetworks = ['MTN', 'VODAFONE', 'TELECEL', 'AIRTELTIGO'];
-    if (!validNetworks.includes(network.toUpperCase())) {
+    // TELECEL is accepted and stored as VODAFONE, the name both gateways use.
+    const net = paystackGateway.normaliseNetwork(String(network));
+    if (!net) {
       res.status(400).json({ error: 'Invalid network' });
       return;
     }
@@ -273,6 +276,8 @@ export async function payDeposit(req: AuthenticatedRequest, res: Response): Prom
     }
 
     const formattedPhone = formatPhoneForHubtel(phoneNumber);
+    // The web page only; the short code always uses Hubtel.
+    const gateway = await gatewayFor('AGENT_DEPOSIT', { otpCapable: otpCapable === true, network: net });
 
     // Create payment record
     const payment = await prisma.agentDepositPayment.create({
@@ -282,52 +287,194 @@ export async function payDeposit(req: AuthenticatedRequest, res: Response): Prom
         transactionRef,
         amount: payAmount,
         phoneNumber: formattedPhone,
-        network: network.toUpperCase(),
+        network: net,
+        gateway,
         status: 'PENDING',
       },
     });
 
-    // Fetch agent name for Hubtel description
+    // Fetch agent name for the prompt
     const agentUser = await prisma.adminUser.findUnique({
       where: { id: admin.id },
-      select: { firstName: true, lastName: true },
+      select: { firstName: true, lastName: true, email: true },
     });
     const agentName = agentUser ? `${agentUser.firstName} ${agentUser.lastName}` : 'Agent';
 
-    let hubtelResponse: { transactionId: string };
+    let result: StartPromptResult;
     try {
-      hubtelResponse = await initiateHubtelReceiveMoney({
+      result = await startPrompt({
+        gateway,
+        reference: transactionRef,
         amount: payAmount,
-        customerName: agentName,
-        customerPhone: formattedPhone,
-        network: network.toUpperCase(),
+        phone: formattedPhone,
+        network: net,
+        payerName: agentName,
+        email: payerEmail(agentUser?.email, `agent${admin.id}`),
         description: `Agent deposit remittance - Contract ${ledgerEntry.contractNumber}`,
-        transactionRef,
-        callbackUrl: HUBTEL_AGENT_DEPOSIT_CALLBACK_URL,
+        hubtelCallbackUrl: HUBTEL_AGENT_DEPOSIT_CALLBACK_URL,
+        metadata: { kind: 'AGENT_DEPOSIT', contractNumber: ledgerEntry.contractNumber },
       });
-    } catch (hubtelError: any) {
+    } catch (gatewayError: any) {
+      if (gateway === 'PAYSTACK') {
+        // It may have reached Paystack: left waiting for the webhook or the
+        // sweep, never marked failed on a guess.
+        res.status(202).json({
+          message: 'We could not confirm the prompt was sent. If you approve a payment it will still be credited. Otherwise try again in a few minutes.',
+          transactionRef,
+          amount: payAmount,
+          status: 'PENDING',
+          otpRequired: false,
+          gateway,
+        });
+        return;
+      }
       await prisma.agentDepositPayment.update({
         where: { id: payment.id },
-        data: { status: 'FAILED', failureReason: hubtelError.message || 'Hubtel initiation failed' },
+        data: { status: 'FAILED', failureReason: gatewayError.message || 'Hubtel initiation failed' },
       });
-      throw hubtelError;
+      throw gatewayError;
     }
 
-    await prisma.agentDepositPayment.update({
-      where: { id: payment.id },
-      data: { hubtelRef: hubtelResponse.transactionId },
-    });
+    if (result.state === 'FAILED') {
+      await failUssdRemittance(transactionRef, result.message || 'The payment could not be started');
+      res.status(400).json({ error: result.message || 'The payment could not be started. Please try again.', transactionRef, status: 'FAILED' });
+      return;
+    }
+    if (result.externalRef) {
+      await prisma.agentDepositPayment.update({ where: { id: payment.id }, data: { hubtelRef: result.externalRef } });
+    }
+    if (result.state === 'SUCCESS') await confirmAgentSuccess(transactionRef, gateway, result.externalRef);
 
     res.status(200).json({
-      message: 'Payment initiated. You will receive a prompt on your phone.',
+      // Paystack's own words when it has some: for MTN they can say how to
+      // approve when no prompt pops up.
+      message: gateway === 'PAYSTACK' && result.message ? result.message : 'Payment initiated. You will receive a prompt on your phone.',
       transactionRef,
-      transactionId: hubtelResponse.transactionId,
+      transactionId: result.externalRef,
       amount: payAmount,
-      status: 'PENDING',
+      status: result.state === 'SUCCESS' ? 'SUCCESS' : 'PENDING',
+      otpRequired: result.state === 'OTP_REQUIRED',
+      gateway,
     });
   } catch (error: any) {
     console.error('payDeposit error:', error);
     res.status(500).json({ error: error.message || 'Failed to initiate payment' });
+  }
+}
+
+/**
+ * A gateway said "paid" in its direct answer. Paystack's is confirmed with the
+ * webhook's lookup (amount checked, fee kept); Hubtel's is settled as it is.
+ */
+async function confirmAgentSuccess(reference: string, gateway: string, externalRef: string | null): Promise<void> {
+  if (gateway !== 'PAYSTACK') {
+    await settleUssdRemittance(reference, externalRef);
+    return;
+  }
+  try {
+    await refreshPaystackAgentCharge(reference);
+  } catch (error: any) {
+    console.error(`[Paystack] confirm agent deposit ${reference}:`, error?.message || error);
+  }
+}
+
+/** The agent's own web deposit charge, by its reference. */
+async function ownWebCharge(req: AuthenticatedRequest) {
+  const admin = req.user as AdminUserPayload;
+  const row = await prisma.agentDepositPayment.findUnique({
+    where: { transactionRef: req.params.ref },
+    select: { id: true, transactionRef: true, agentId: true, status: true, gateway: true, amount: true, createdAt: true, failureReason: true, channel: true },
+  });
+  return row && row.agentId === admin.id && row.channel === 'WEB' ? row : null;
+}
+
+// POST /agent-deposits/payments/:ref/otp { otp } — Telecel on Paystack
+export async function submitAgentDepositOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const otp = String(req.body?.otp ?? '').trim();
+    if (!/^\d{4,8}$/.test(otp)) {
+      res.status(400).json({ error: 'Enter the code from the SMS.' });
+      return;
+    }
+    const row = await ownWebCharge(req);
+    if (!row) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    if (row.gateway !== 'PAYSTACK' || row.status !== 'PENDING') {
+      res.status(400).json({ error: 'This payment is not waiting for a code.', status: row.status });
+      return;
+    }
+    const result = await paystackGateway.submitOtp(row.transactionRef, otp);
+    if (result.state === 'SUCCESS') await confirmAgentSuccess(row.transactionRef, 'PAYSTACK', result.externalRef);
+    else if (result.state === 'FAILED') await failUssdRemittance(row.transactionRef, result.message);
+    const now = (await prisma.agentDepositPayment.findUnique({ where: { id: row.id }, select: { status: true } }))?.status ?? 'PENDING';
+    res.json({
+      transactionRef: row.transactionRef,
+      status: now,
+      otpRequired: now === 'PENDING' && result.state === 'OTP_REQUIRED',
+      message: result.message,
+    });
+  } catch (error: any) {
+    console.error('submitAgentDepositOtp error:', error?.message || error);
+    res.status(502).json({ error: 'Could not reach the payment service. Please try again.' });
+  }
+}
+
+// POST /agent-deposits/payments/:ref/cancel — the agent gave up before paying.
+// Checked with Paystack first, so a payment that went through is credited.
+// Frees the sale for another try straight away instead of after 48 hours.
+export async function cancelAgentDepositPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const row = await ownWebCharge(req);
+    if (!row) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    if (row.status !== 'PENDING') {
+      res.json({ transactionRef: row.transactionRef, status: row.status, message: 'Nothing to cancel.' });
+      return;
+    }
+    const outcome = await cancelAgentCharge(row.transactionRef, row.gateway);
+    const status = (await prisma.agentDepositPayment.findUnique({ where: { id: row.id }, select: { status: true } }))?.status ?? row.status;
+    res.json({
+      transactionRef: row.transactionRef,
+      status,
+      message: outcome === 'SUCCESS' ? 'This payment already went through.' : status === 'FAILED' ? 'Payment cancelled.' : 'Nothing to cancel.',
+    });
+  } catch (error: any) {
+    console.error('cancelAgentDepositPayment error:', error?.message || error);
+    res.status(500).json({ error: 'Could not cancel the payment' });
+  }
+}
+
+const AGENT_POLL_GAP_MS = 10_000;
+const lastAgentPoll = new Map<string, number>();
+
+// GET /agent-deposits/payments/:ref/status — the web page waits on this
+export async function getAgentDepositPaymentStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const row = await ownWebCharge(req);
+    if (!row) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    let status = row.status;
+    const last = lastAgentPoll.get(row.transactionRef) ?? 0;
+    if (status === 'PENDING' && row.gateway === 'PAYSTACK' && Date.now() - last >= AGENT_POLL_GAP_MS && Date.now() - row.createdAt.getTime() >= AGENT_POLL_GAP_MS) {
+      lastAgentPoll.set(row.transactionRef, Date.now());
+      if (lastAgentPoll.size > 2000) lastAgentPoll.clear();
+      try {
+        await refreshPaystackAgentCharge(row.transactionRef);
+        status = (await prisma.agentDepositPayment.findUnique({ where: { id: row.id }, select: { status: true } }))?.status ?? status;
+      } catch (error: any) {
+        console.error(`[Paystack] agent deposit status ${row.transactionRef}:`, error?.message || error);
+      }
+    }
+    res.json({ transactionRef: row.transactionRef, status, amount: row.amount, gateway: row.gateway, failureReason: status === 'FAILED' ? row.failureReason : undefined });
+  } catch (error) {
+    console.error('getAgentDepositPaymentStatus error:', error);
+    res.status(500).json({ error: 'Failed to check the payment' });
   }
 }
 

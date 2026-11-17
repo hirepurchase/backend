@@ -369,6 +369,13 @@ model PaymentTransaction {
   // use amount − unlockFee; collections count the whole amount.
   unlockFee           Float                @default(0)
   paymentMethod       String               @default("MOBILE_MONEY")
+  // Who carried the charge: HUBTEL | PAYSTACK. Fixed when the charge starts;
+  // every later check follows it, whatever the gateway switch says now.
+  gateway             String               @default("HUBTEL")
+  // What the gateway kept from this payment (Paystack reports it); null when
+  // unknown. The contract is credited the full amount either way: this is the
+  // company's cost, for matching settlements to the bank.
+  gatewayFee          Float?
   mobileMoneyProvider String?              // MTN, VODAFONE, AIRTELTIGO
   mobileMoneyNumber   String?
   status              String               @default("PENDING") // PENDING, SUCCESS, FAILED
@@ -389,6 +396,7 @@ model PaymentTransaction {
   @@index([status, nextRetryAt])
   @@index([contractId, createdAt])
   @@index([customerId_uuid, createdAt])
+  @@index([gateway, status])
 }
 
 model PaymentRetry {
@@ -832,7 +840,12 @@ model AgentDepositPayment {
   amount        Float
   phoneNumber   String
   network       String
+  // The gateway's own id for the charge (Hubtel or Paystack; see gateway).
   hubtelRef     String?
+  // HUBTEL | PAYSTACK. Short-code payments are always HUBTEL.
+  gateway       String             @default("HUBTEL")
+  // The gateway's fee on this row's share of the charge (see PaymentTransaction.gatewayFee).
+  gatewayFee    Float?
   status        String             @default("PENDING") // PENDING | SUCCESS | FAILED
   // WEB (agent portal) | USSD (short code) | MANUAL (cash at the office)
   channel       String             @default("WEB")
@@ -847,6 +860,18 @@ model AgentDepositPayment {
   @@index([agentId, status])
   @@index([ledgerEntryId, createdAt])
   @@index([clientReference])
+}
+
+// Which gateway sends Mobile Money prompts for payments started on the web or
+// in the app. One row. The short code always uses Hubtel and never reads this.
+model PaymentGatewaySettings {
+  id                  String    @id @default(uuid())
+  customerGateway     String    @default("HUBTEL") // HUBTEL | PAYSTACK
+  agentDepositGateway String    @default("HUBTEL") // HUBTEL | PAYSTACK
+  lastPaystackEventAt DateTime?
+  updatedById         String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 }
 
 // A wrong agent payment PIN typed on the short code, by the phone that dialled.

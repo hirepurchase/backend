@@ -655,12 +655,13 @@ export async function processHubtelCallback(callbackData: unknown): Promise<void
           )
         : null;
 
+    // Only a payment still waiting, or marked failed, can change here. A
+    // reversed one stays reversed: a late or repeated callback must not credit
+    // it again.
     const updatedPayment = await prisma.paymentTransaction.updateMany({
       where: {
         id: payment.id,
-        status: {
-          not: 'SUCCESS',
-        },
+        status: { in: ['PENDING', 'FAILED'] },
       },
       data: {
         status: paymentStatus,

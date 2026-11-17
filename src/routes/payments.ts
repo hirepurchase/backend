@@ -23,7 +23,11 @@ import {
   handleUssdSession,
   handleUssdFulfillment,
   reconcileHubtelPayments,
+  submitCustomerPaymentOtp,
+  cancelCustomerMomoPayment,
+  reverseGatewayPayment,
 } from '../controllers/paymentController';
+import { handlePaystackWebhook } from '../controllers/paymentGatewayController';
 import { authenticateAdmin, authenticateCustomer, requireAnyPermission, authenticateAny } from '../middleware/auth';
 import {
   CONTRACT_ACCESS_PERMISSIONS,
@@ -35,6 +39,7 @@ const router = Router();
 // Webhook endpoints (no authentication - validated via signature)
 router.post('/webhook', handlePaymentWebhook);
 router.post('/hubtel/callback', handleHubtelCallback);
+router.post('/paystack/webhook', handlePaystackWebhook);
 router.post('/hubtel/preapproval/callback', handlePreapprovalCallback);
 
 // Customer payment routes
@@ -43,12 +48,20 @@ router.post('/hubtel/initiate', authenticateCustomer, initiateHubtelPayment);
 router.post('/hubtel/regular', authenticateAny, initiateHubtelRegularPayment);
 router.get('/status/:transactionRef', authenticateCustomer, getPaymentStatus);
 router.get('/hubtel/status/:transactionRef', authenticateCustomer, checkHubtelStatus);
+// Gateway-neutral names for the same two calls (Hubtel or Paystack, chosen on
+// the server), plus the SMS code step Paystack needs for Telecel.
+router.post('/momo/initiate', authenticateCustomer, initiateHubtelPayment);
+router.get('/momo/status/:transactionRef', authenticateCustomer, checkHubtelStatus);
+router.post('/momo/:transactionRef/otp', authenticateCustomer, submitCustomerPaymentOtp);
+router.post('/momo/:transactionRef/cancel', authenticateCustomer, cancelCustomerMomoPayment);
 
 // Admin payment routes
 router.get('/contract/:contractId', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_PAYMENTS, ...CONTRACT_ACCESS_PERMISSIONS), getContractPayments);
 router.post('/manual', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), recordManualPayment);
 router.put('/manual/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), updateManualPayment);
 router.delete('/manual/:id', authenticateAdmin, requireAnyPermission(PERMISSIONS.RECORD_PAYMENT), deleteManualPayment);
+// Super admins only, checked in the controller.
+router.post('/:id/reverse', authenticateAdmin, reverseGatewayPayment);
 router.get('/admin/status/:transactionRef', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_PAYMENTS), getPaymentStatus);
 router.get('/admin/hubtel/status/:transactionRef', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_PAYMENTS), checkHubtelStatus);
 

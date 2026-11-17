@@ -290,16 +290,18 @@ export async function sweepStuckAgentDeposits(now: Date = new Date()): Promise<{
       channel: { in: ['WEB', 'USSD'] },
       createdAt: { lt: new Date(now.getTime() - SWEEP_AFTER_MS), gt: new Date(now.getTime() - SWEEP_WINDOW_MS) },
     },
-    select: { transactionRef: true, clientReference: true, createdAt: true },
+    select: { transactionRef: true, clientReference: true, createdAt: true, gateway: true },
     orderBy: { createdAt: 'asc' },
     take: 200,
   });
   const references = [...new Set(rows.map((r) => r.clientReference || r.transactionRef))];
   const createdOf = new Map(rows.map((r) => [r.clientReference || r.transactionRef, r.createdAt]));
+  // Each charge is asked about on the gateway that carried it.
+  const paystackRefs = new Set(rows.filter((r) => r.gateway === 'PAYSTACK').map((r) => r.clientReference || r.transactionRef));
   const giveUp = async (reference: string) => {
     const created = createdOf.get(reference);
     if (created && now.getTime() - created.getTime() > GIVE_UP_AFTER_MS) {
-      return (await failUssdRemittance(reference, 'No confirmation from Hubtel after 48 hours')) > 0;
+      return (await failUssdRemittance(reference, 'No confirmation from the payment gateway after 48 hours')) > 0;
     }
     return false;
   };
@@ -307,7 +309,20 @@ export async function sweepStuckAgentDeposits(now: Date = new Date()): Promise<{
   const { hubtelTransactionOutcome } = await import('../controllers/paymentController');
   let settled = 0;
   let failed = 0;
+  const { refreshPaystackAgentCharge } = await import('./gateways/settle');
   for (const reference of references) {
+    if (paystackRefs.has(reference)) {
+      try {
+        const check = await refreshPaystackAgentCharge(reference);
+        if (check?.outcome === 'SUCCESS') settled++;
+        else if (check?.outcome === 'FAILED') failed++;
+        else if (await giveUp(reference)) failed++;
+      } catch (error: any) {
+        if (await giveUp(reference).catch(() => false)) failed++;
+        else console.error(`[AgentDepositSweep] ${reference}:`, error?.message || error);
+      }
+      continue;
+    }
     try {
       const status: any = await checkHubtelPaymentStatus(reference);
       const raw = String(status?.data?.status || status?.Data?.Status || status?.data?.Status || '');

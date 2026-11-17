@@ -49,6 +49,27 @@ interface ContractStatementData {
   }>;
 }
 
+/** How a payment was made, in words a customer reads (the stored codes name gateways). */
+export function paymentMethodLabel(method: string | null | undefined): string {
+  switch (method) {
+    case 'HUBTEL_MOMO':
+    case 'HUBTEL_REGULAR':
+    case 'PAYSTACK_MOMO':
+    case 'MOBILE_MONEY':
+      return 'Mobile Money';
+    case 'HUBTEL_DIRECT_DEBIT':
+      return 'Direct debit';
+    case 'CASH':
+      return 'Cash';
+    case 'BANK_TRANSFER':
+      return 'Bank transfer';
+    case 'CHECK':
+      return 'Cheque';
+    default:
+      return method ? method.replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase()) : '-';
+  }
+}
+
 export function generateContractStatement(data: ContractStatementData): PDFKit.PDFDocument {
   const doc = new PDFDocument({ margin: 50 });
 
@@ -178,7 +199,7 @@ export function generateContractStatement(data: ContractStatementData): PDFKit.P
 
       doc.text(payment.transactionRef, 50, py, { width: 120 });
       doc.text(formatCurrency(payment.amount), 180, py, { width: 80 });
-      doc.text(payment.paymentMethod, 270, py, { width: 80 });
+      doc.text(paymentMethodLabel(payment.paymentMethod), 270, py, { width: 80 });
       doc.text(payment.paymentDate ? new Date(payment.paymentDate).toLocaleDateString() : '-', 360, py, { width: 80 });
       doc.text(payment.status, 450, py, { width: 80 });
 

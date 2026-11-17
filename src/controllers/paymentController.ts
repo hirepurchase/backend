@@ -62,6 +62,17 @@ import {
   openUssdRemittance,
 } from '../services/agentDepositUssdService';
 import { notifyPayTrigger } from '../services/payTrigger/events';
+import {
+  gatewayFor,
+  paymentMethodFor,
+  payerEmail,
+  startPrompt,
+  StartPromptInput,
+  StartPromptResult,
+  paystack as paystackGateway,
+} from '../services/gateways';
+import { submitOtp as submitPaystackOtp, checkCharge as checkPaystackCharge } from '../services/gateways/paystack';
+import { cancelCustomerPayment, refreshPaystackCustomerPayment, settleCustomerPayment } from '../services/gateways/settle';
 
 /**
  * What Hubtel's transaction status service says happened to a payment, from
@@ -375,9 +386,8 @@ export async function handlePaymentWebhook(req: Request, res: Response): Promise
     const updatedPayment = await prisma.paymentTransaction.updateMany({
       where: {
         id: payment.id,
-        status: {
-          not: 'SUCCESS',
-        },
+        // Never a reversed payment: it stays reversed.
+        status: { in: ['PENDING', 'FAILED'] },
       },
       data: {
         status: payload.status,
@@ -716,81 +726,7 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
       });
 
       if (amountDiff !== 0) {
-        // Recalculate contract totals from all successful payments
-        const allPayments = await tx.paymentTransaction.findMany({
-          where: { contractId: payment.contractId, status: 'SUCCESS' },
-        });
-        const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount - (p.unlockFee ?? 0), 0);
-        const contract = payment.contract;
-        const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
-        const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
-        const penaltyDue = (await tx.hirePurchaseContract.findUnique({
-          where: { id: payment.contractId },
-          select: { penaltyOutstanding: true },
-        }))?.penaltyOutstanding ?? 0;
-        const isFullyPaid = newOutstandingBalance <= 0.005 && penaltyDue <= 0.005;
-
-        await tx.hirePurchaseContract.update({
-          where: { id: payment.contractId },
-          data: {
-            totalPaid: newTotalPaid,
-            outstandingBalance: Math.max(0, isFullyPaid ? 0 : newOutstandingBalance),
-            status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
-            // Cleared again by an edit that drops it below the total, so the
-            // month's completion count stays honest.
-            completedAt: isFullyPaid ? (payment.contract.completedAt ?? new Date()) : null,
-          },
-        });
-
-        // Reprocess installments from scratch using remaining amount
-        // Reset affected installments then re-apply all payments in order
-        const installments = await tx.installmentSchedule.findMany({
-          where: { contractId: payment.contractId },
-          orderBy: { installmentNo: 'asc' },
-        });
-
-        // Reset all non-paid installments to recalculate
-        for (const inst of installments) {
-          if (inst.status !== 'PAID' || inst.paidAmount < inst.amount) {
-            await tx.installmentSchedule.update({
-              where: { id: inst.id },
-              data: { paidAmount: 0, status: 'PENDING', paidAt: null },
-            });
-          }
-        }
-
-        // Re-apply total payments sum across installments
-        let remaining = roundMoney(paymentsSum);
-        for (const inst of installments) {
-          if (remaining <= 0) break;
-          const owed = inst.amount;
-          if (isMoneyGte(remaining, owed)) {
-            await tx.installmentSchedule.update({
-              where: { id: inst.id },
-              data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
-            });
-            remaining = roundMoney(remaining - owed);
-          } else {
-            await tx.installmentSchedule.update({
-              where: { id: inst.id },
-              data: { paidAmount: remaining, status: 'PARTIAL', paidAt: null },
-            });
-            remaining = 0;
-          }
-        }
-
-        // Penalties are credited from whatever survives the installments, so a
-        // reduced payment has to give them back too.
-        const penaltyNowDue = await rebuildPenaltyAllocation(payment.contractId, remaining, tx);
-
-        // The completion decision above was taken before penalties were
-        // rebuilt; a revived penalty must be able to reopen the contract.
-        if (isFullyPaid && penaltyNowDue > 0.005) {
-          await tx.hirePurchaseContract.update({
-            where: { id: payment.contractId },
-            data: { status: 'ACTIVE', completedAt: null },
-          });
-        }
+        await rebuildContractFromPayments(payment.contractId, tx);
       }
     });
 
@@ -820,6 +756,87 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
   }
 }
 
+/**
+ * Rebuild a contract after a payment stops counting (a manual payment deleted,
+ * a gateway payment reversed): totals from the payments still SUCCESS,
+ * instalments re-filled oldest first, late charges re-credited from what is
+ * left. Runs inside the caller's transaction.
+ *
+ * The status only moves between COMPLETED and what it was: a contract that
+ * becomes fully paid completes; a completed one that no longer is goes back to
+ * ACTIVE; anything else (DEFAULTED included) keeps its status.
+ */
+export async function rebuildContractFromPayments(contractId: string, tx: any): Promise<void> {
+  const contract = await tx.hirePurchaseContract.findUniqueOrThrow({
+    where: { id: contractId },
+    select: { status: true, depositAmount: true, totalPrice: true, completedAt: true, penaltyOutstanding: true },
+  });
+  const allPayments: Array<{ amount: number; unlockFee: number | null }> = await tx.paymentTransaction.findMany({
+    where: { contractId, status: 'SUCCESS' },
+    select: { amount: true, unlockFee: true },
+  });
+  const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount - (p.unlockFee ?? 0), 0);
+  const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
+  const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
+  const isFullyPaid = newOutstandingBalance <= 0.005 && (contract.penaltyOutstanding ?? 0) <= 0.005;
+  const notCompleted = contract.status === 'COMPLETED' ? 'ACTIVE' : contract.status;
+
+  await tx.hirePurchaseContract.update({
+    where: { id: contractId },
+    data: {
+      totalPaid: newTotalPaid,
+      outstandingBalance: Math.max(0, isFullyPaid ? 0 : newOutstandingBalance),
+      status: isFullyPaid ? 'COMPLETED' : notCompleted,
+      completedAt: isFullyPaid ? (contract.completedAt ?? new Date()) : null,
+    },
+  });
+
+  // Reset and re-apply installments. An unpaid instalment past its due date
+  // is OVERDUE again straight away, so allocation and the device see it.
+  const installments: Array<{ id: string; amount: number; dueDate: Date; status: string }> = await tx.installmentSchedule.findMany({
+    where: { contractId },
+    orderBy: { installmentNo: 'asc' },
+  });
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const unpaidStatus = (i: { dueDate: Date; status: string }) =>
+    i.status === 'WRITTEN_OFF' ? 'WRITTEN_OFF' : new Date(i.dueDate) < today ? 'OVERDUE' : 'PENDING';
+  for (const inst of installments) {
+    await tx.installmentSchedule.update({
+      where: { id: inst.id },
+      data: { paidAmount: 0, status: unpaidStatus(inst), paidAt: null },
+    });
+  }
+
+  let remaining = roundMoney(paymentsSum);
+  for (const inst of installments) {
+    if (remaining <= 0) break;
+    if (inst.status === 'WRITTEN_OFF') continue;
+    const owed = inst.amount;
+    if (isMoneyGte(remaining, owed)) {
+      await tx.installmentSchedule.update({
+        where: { id: inst.id },
+        data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
+      });
+      remaining = roundMoney(remaining - owed);
+    } else {
+      await tx.installmentSchedule.update({
+        where: { id: inst.id },
+        data: { paidAmount: remaining, status: 'PARTIAL', paidAt: null },
+      });
+      remaining = 0;
+    }
+  }
+
+  const penaltyNowDue = await rebuildPenaltyAllocation(contractId, remaining, tx);
+  if (isFullyPaid && penaltyNowDue > 0.005) {
+    await tx.hirePurchaseContract.update({
+      where: { id: contractId },
+      data: { status: notCompleted, completedAt: null },
+    });
+  }
+}
+
 // Delete a manual payment entry (Admin only)
 export async function deleteManualPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
@@ -843,70 +860,7 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
 
     await prisma.$transaction(async (tx) => {
       await tx.paymentTransaction.delete({ where: { id } });
-
-      // Recalculate contract totals
-      const allPayments = await tx.paymentTransaction.findMany({
-        where: { contractId: payment.contractId, status: 'SUCCESS' },
-      });
-      const paymentsSum = allPayments.reduce((sum, p) => sum + p.amount - (p.unlockFee ?? 0), 0);
-      const contract = payment.contract;
-      const newTotalPaid = roundMoney(contract.depositAmount + paymentsSum);
-      const newOutstandingBalance = roundMoney(contract.totalPrice - newTotalPaid);
-      const penaltyDue = (await tx.hirePurchaseContract.findUnique({
-        where: { id: payment.contractId },
-        select: { penaltyOutstanding: true },
-      }))?.penaltyOutstanding ?? 0;
-      const isFullyPaid = newOutstandingBalance <= 0.005 && penaltyDue <= 0.005;
-
-      await tx.hirePurchaseContract.update({
-        where: { id: payment.contractId },
-        data: {
-          totalPaid: newTotalPaid,
-          outstandingBalance: Math.max(0, isFullyPaid ? 0 : newOutstandingBalance),
-          status: isFullyPaid ? 'COMPLETED' : 'ACTIVE',
-          completedAt: isFullyPaid ? (payment.contract.completedAt ?? new Date()) : null,
-        },
-      });
-
-      // Reset and re-apply installments
-      const installments = await tx.installmentSchedule.findMany({
-        where: { contractId: payment.contractId },
-        orderBy: { installmentNo: 'asc' },
-      });
-
-      for (const inst of installments) {
-        await tx.installmentSchedule.update({
-          where: { id: inst.id },
-          data: { paidAmount: 0, status: 'PENDING', paidAt: null },
-        });
-      }
-
-      let remaining = roundMoney(paymentsSum);
-      for (const inst of installments) {
-        if (remaining <= 0) break;
-        const owed = inst.amount;
-        if (isMoneyGte(remaining, owed)) {
-          await tx.installmentSchedule.update({
-            where: { id: inst.id },
-            data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
-          });
-          remaining = roundMoney(remaining - owed);
-        } else {
-          await tx.installmentSchedule.update({
-            where: { id: inst.id },
-            data: { paidAmount: remaining, status: 'PARTIAL', paidAt: null },
-          });
-          remaining = 0;
-        }
-      }
-
-      const penaltyNowDue = await rebuildPenaltyAllocation(payment.contractId, remaining, tx);
-      if (isFullyPaid && penaltyNowDue > 0.005) {
-        await tx.hirePurchaseContract.update({
-          where: { id: payment.contractId },
-          data: { status: 'ACTIVE', completedAt: null },
-        });
-      }
+      await rebuildContractFromPayments(payment.contractId, tx);
     });
 
     await createAuditLog({
@@ -934,11 +888,181 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
   }
 }
 
-// Initiate Hubtel payment (Customer)
+// POST /payments/:id/reverse { reason } — super admins only.
+//
+// Takes back a Mobile Money payment that was credited but must not count: the
+// money was refunded from the gateway's dashboard, charged back, or credited by
+// mistake. The payment stays on record as REVERSED (never deleted) and the
+// contract is rebuilt from the payments that still stand. A paid unlock the
+// payment bought stops counting, and the phone is judged again. No money is
+// moved here: a refund is done at the gateway.
+export async function reverseGatewayPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const admin = req.user as AdminUserPayload;
+    if (req.userType !== 'admin' || admin?.role !== 'SUPER_ADMIN') {
+      res.status(403).json({ error: 'Only a super admin can reverse a payment.' });
+      return;
+    }
+    const reason = String(req.body?.reason ?? '').trim();
+    if (reason.length < 5) {
+      res.status(400).json({ error: 'Give the reason for reversing this payment.' });
+      return;
+    }
+    const payment = await prisma.paymentTransaction.findUnique({ where: { id: req.params.id } });
+    if (!payment) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    let metadata: Record<string, any> = {};
+    try { metadata = JSON.parse(payment.metadata || '{}'); } catch { metadata = {}; }
+    if (metadata.isManual) {
+      res.status(400).json({ error: 'This payment was recorded by hand. Delete it instead.' });
+      return;
+    }
+    if (payment.status !== 'SUCCESS') {
+      res.status(400).json({ error: `Only a successful payment can be reversed (this one is ${payment.status}).` });
+      return;
+    }
+
+    const at = new Date();
+    let claimed = 0;
+    await prisma.$transaction(async (tx) => {
+      // Claimed, so two clicks reverse it once.
+      const r = await tx.paymentTransaction.updateMany({
+        where: { id: payment.id, status: 'SUCCESS' },
+        data: {
+          status: 'REVERSED',
+          isAutoRetryEnabled: false,
+          nextRetryAt: null,
+          failureReason: `Reversed: ${reason}`.slice(0, 250),
+          metadata: JSON.stringify({ ...metadata, reversal: { at: at.toISOString(), by: admin.id, reason } }),
+        },
+      });
+      claimed = r.count;
+      if (claimed > 0) await rebuildContractFromPayments(payment.contractId, tx);
+    });
+    if (claimed === 0) {
+      res.status(409).json({ error: 'This payment has already been reversed.' });
+      return;
+    }
+
+    await createAuditLog({
+      userId: admin.id,
+      action: 'REVERSE_GATEWAY_PAYMENT',
+      entity: 'PaymentTransaction',
+      entityId: payment.id,
+      oldValues: { status: 'SUCCESS', amount: payment.amount, transactionRef: payment.transactionRef, gateway: payment.gateway },
+      newValues: { status: 'REVERSED', reason, contractId: payment.contractId },
+      ipAddress: req.ip,
+      userAgent: req.headers['user-agent'],
+    });
+
+    // A paid unlock bought by this payment no longer counts (it reads its
+    // payment's status), and the balance may be owing again: judge the phone.
+    await settleTemporaryUnlockOnPayment(payment.contractId);
+    await safelyEvaluateManagedDeviceForContract(payment.contractId);
+    notifyPayTrigger(payment.contractId, 'PAYMENT_REVERSED');
+
+    const contract = await prisma.hirePurchaseContract.findUnique({
+      where: { id: payment.contractId },
+      select: { status: true, totalPaid: true, outstandingBalance: true },
+    });
+    res.json({ message: 'Payment reversed. The contract has been recalculated.', payment: { id: payment.id, status: 'REVERSED' }, contract });
+  } catch (error) {
+    console.error('Reverse payment error:', error);
+    res.status(500).json({ error: 'Failed to reverse the payment' });
+  }
+}
+
+// ── Web and app Mobile Money payments (Hubtel or Paystack) ──────────────────
+
+const MOMO_NETWORKS = ['MTN', 'VODAFONE', 'AIRTELTIGO'];
+
+/** MTN, VODAFONE (Telecel) or AIRTELTIGO; null for anything else. */
+function momoNetwork(network: unknown): string | null {
+  const n = paystackGateway.normaliseNetwork(String(network || ''));
+  return n && MOMO_NETWORKS.includes(n) ? n : null;
+}
+
+/**
+ * Send the prompt for a customer payment row already saved as PENDING, and
+ * record what the gateway said. Null when it is unclear whether the prompt
+ * went out: the row is left waiting for the webhook, the screen's polling or
+ * the sweep to settle, and is never marked failed on a guess.
+ */
+export async function sendCustomerPrompt(paymentId: string, input: StartPromptInput): Promise<StartPromptResult | null> {
+  let result: StartPromptResult;
+  try {
+    result = await startPrompt(input);
+  } catch (error: any) {
+    console.error(`[Payments] ${input.gateway} prompt for ${input.reference} unclear:`, error?.message || error);
+    return null;
+  }
+  if (result.state === 'FAILED') {
+    await settleCustomerPayment(paymentId, 'FAILED', { gatewayState: 'FAILED' }, { failureReason: result.message });
+    return result;
+  }
+  if (result.state === 'SUCCESS') {
+    await confirmCustomerSuccess(paymentId, input.gateway, result.externalRef);
+    return result;
+  }
+  const row = await prisma.paymentTransaction.findUnique({ where: { id: paymentId }, select: { metadata: true } });
+  let meta: Record<string, unknown> = {};
+  try { meta = JSON.parse(row?.metadata || '{}'); } catch { meta = {}; }
+  await prisma.paymentTransaction.update({
+    where: { id: paymentId },
+    data: {
+      ...(result.externalRef ? { externalRef: result.externalRef } : {}),
+      metadata: JSON.stringify({
+        ...meta,
+        gatewayState: result.state,
+        ...(input.gateway === 'HUBTEL' ? { hubtelTransactionId: result.externalRef, hubtelStatus: result.state } : {}),
+      }),
+    },
+  });
+  return result;
+}
+
+/**
+ * A gateway said "paid" in its direct answer. Paystack's is confirmed with the
+ * same lookup the webhook uses, so the amount is checked and the fee kept; if
+ * that lookup has not caught up yet, the payment waits for the webhook or the
+ * sweep. Hubtel's direct answer is posted as it is.
+ */
+async function confirmCustomerSuccess(paymentId: string, gateway: string, externalRef: string | null): Promise<void> {
+  if (gateway !== 'PAYSTACK') {
+    await settleCustomerPayment(paymentId, 'SUCCESS', { gatewayState: 'SUCCESS' }, { externalRef });
+    return;
+  }
+  const row = await prisma.paymentTransaction.findUnique({
+    where: { id: paymentId },
+    select: { id: true, transactionRef: true, amount: true, status: true, createdAt: true },
+  });
+  if (!row) return;
+  try {
+    await refreshPaystackCustomerPayment(row);
+  } catch (error: any) {
+    console.error(`[Paystack] confirm ${row.transactionRef}:`, error?.message || error);
+  }
+}
+
+/** Whether the payer still has to type the SMS code (Paystack, Telecel). */
+function awaitingOtp(metadata: string | null | undefined): boolean {
+  try {
+    return JSON.parse(metadata || '{}').gatewayState === 'OTP_REQUIRED';
+  } catch {
+    return false;
+  }
+}
+
+// POST /payments/hubtel/initiate and /payments/momo/initiate (Customer)
+// { contractId, amount, phoneNumber, network, otpCapable? }
+// The gateway is chosen here (gatewayFor); the path keeps its old name so
+// installed apps keep working.
 export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const customerUuid = req.user!.id;
-    const { contractId, amount, phoneNumber, network } = req.body;
+    const { contractId, amount, phoneNumber, network, otpCapable } = req.body;
 
     // Validate required fields
     if (!contractId || !amount || !phoneNumber || !network) {
@@ -946,9 +1070,8 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
       return;
     }
 
-    // Validate network
-    const validNetworks = ['MTN', 'VODAFONE', 'AIRTELTIGO'];
-    if (!validNetworks.includes(network.toUpperCase())) {
+    const net = momoNetwork(network);
+    if (!net) {
       res.status(400).json({ error: 'Invalid network. Must be MTN, VODAFONE, or AIRTELTIGO' });
       return;
     }
@@ -1013,6 +1136,8 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
       exists = await prisma.paymentTransaction.findUnique({ where: { transactionRef } });
     }
 
+    const gateway = await gatewayFor('CUSTOMER', { otpCapable: otpCapable === true, network: net });
+
     // Create payment record
     const payment = await prisma.paymentTransaction.create({
       data: {
@@ -1020,58 +1145,157 @@ export async function initiateHubtelPayment(req: AuthenticatedRequest, res: Resp
         contractId,
         customerId_uuid: contract.customerId_uuid,
         amount: paymentAmount,
-        paymentMethod: 'HUBTEL_MOMO',
-        mobileMoneyProvider: network.toUpperCase(),
+        paymentMethod: paymentMethodFor(gateway),
+        gateway,
+        // Automatic retries go through Hubtel only.
+        ...(gateway === 'PAYSTACK' ? { isAutoRetryEnabled: false } : {}),
+        mobileMoneyProvider: net,
         mobileMoneyNumber: sanitizedPhone,
         status: 'PENDING',
         metadata: JSON.stringify({
           initiatedAt: new Date().toISOString(),
-          gateway: 'HUBTEL',
+          gateway,
         }),
       },
     });
 
-    // Initiate Hubtel receive money
-    const hubtelResponse = await initiateHubtelReceiveMoney({
+    const result = await sendCustomerPrompt(payment.id, {
+      gateway,
+      reference: transactionRef,
       amount: paymentAmount,
-      customerName: `${contract.customer.firstName} ${contract.customer.lastName}`,
-      customerPhone: sanitizedPhone,
-      network: network.toUpperCase(),
+      phone: sanitizedPhone,
+      network: net,
+      payerName: `${contract.customer.firstName} ${contract.customer.lastName}`.trim(),
+      email: payerEmail(contract.customer.email, contract.customer.id_uuid),
       description: `Payment for contract ${contract.contractNumber}`,
-      transactionRef,
+      metadata: { kind: 'CUSTOMER_PAYMENT', contractNumber: contract.contractNumber },
     });
 
-    // Update payment with Hubtel transaction ID
-    await prisma.paymentTransaction.update({
-      where: { id: payment.id },
-      data: {
-        externalRef: hubtelResponse.transactionId,
-        metadata: JSON.stringify({
-          initiatedAt: new Date().toISOString(),
-          gateway: 'HUBTEL',
-          hubtelTransactionId: hubtelResponse.transactionId,
-          hubtelStatus: hubtelResponse.status,
-        }),
-      },
-    });
+    if (!result) {
+      if (gateway === 'HUBTEL') {
+        res.status(500).json({ error: 'Failed to initiate payment' });
+        return;
+      }
+      res.status(202).json({
+        message: 'We could not confirm the Mobile Money prompt was sent. If you approve a payment it will still be credited. Otherwise please try again in a few minutes.',
+        transactionRef,
+        amount: paymentAmount,
+        status: 'PENDING',
+        otpRequired: false,
+        gateway,
+      });
+      return;
+    }
+    if (result.state === 'FAILED') {
+      res.status(400).json({ error: result.message || 'The payment could not be started. Please try again.', transactionRef, status: 'FAILED', gateway });
+      return;
+    }
 
     res.status(200).json({
-      message: 'Payment initiated successfully. Please approve on your phone.',
+      // Paystack's own words when it has some: for MTN they can say how to
+      // approve when no prompt pops up.
+      message: gateway === 'PAYSTACK' && result.message ? result.message : 'Payment initiated successfully. Please approve on your phone.',
       transactionRef,
-      transactionId: hubtelResponse.transactionId,
+      transactionId: result.externalRef,
       amount: paymentAmount,
-      status: 'PENDING',
+      status: result.state === 'SUCCESS' ? 'SUCCESS' : 'PENDING',
+      otpRequired: result.state === 'OTP_REQUIRED',
+      gateway,
     });
   } catch (error: any) {
     console.error('Initiate Hubtel payment error:', error);
     res.status(500).json({
       error: error.message || 'Failed to initiate payment',
-      details: error.response?.data || null,
     });
   }
 }
 
-// Check Hubtel payment status
+// POST /payments/momo/:transactionRef/otp (Customer) { otp }
+// Telecel on Paystack: the code the payer received by SMS.
+export async function submitCustomerPaymentOtp(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const otp = String(req.body?.otp ?? '').trim();
+    if (!/^\d{4,8}$/.test(otp)) {
+      res.status(400).json({ error: 'Enter the code from the SMS.' });
+      return;
+    }
+    const payment = await prisma.paymentTransaction.findUnique({
+      where: { transactionRef: req.params.transactionRef },
+      select: { id: true, transactionRef: true, status: true, gateway: true, metadata: true, amount: true, customerId_uuid: true },
+    });
+    if (!payment || payment.customerId_uuid !== req.user!.id) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    if (payment.gateway !== 'PAYSTACK' || payment.status !== 'PENDING') {
+      res.status(400).json({ error: 'This payment is not waiting for a code.', status: payment.status });
+      return;
+    }
+    const result = await submitPaystackOtp(payment.transactionRef, otp);
+    if (result.state === 'SUCCESS') {
+      await confirmCustomerSuccess(payment.id, 'PAYSTACK', result.externalRef);
+    } else if (result.state === 'FAILED') {
+      await settleCustomerPayment(payment.id, 'FAILED', { gatewayState: 'FAILED' }, { failureReason: result.message });
+    } else {
+      let meta: Record<string, unknown> = {};
+      try { meta = JSON.parse(payment.metadata || '{}'); } catch { meta = {}; }
+      await prisma.paymentTransaction.update({
+        where: { id: payment.id },
+        data: { metadata: JSON.stringify({ ...meta, gatewayState: result.state }) },
+      });
+    }
+    const now = (await prisma.paymentTransaction.findUnique({ where: { id: payment.id }, select: { status: true } }))?.status ?? 'PENDING';
+    res.json({
+      transactionRef: payment.transactionRef,
+      status: now,
+      otpRequired: now === 'PENDING' && result.state === 'OTP_REQUIRED',
+      message: result.message,
+    });
+  } catch (error: any) {
+    console.error('Submit payment OTP error:', error?.message || error);
+    res.status(502).json({ error: 'Could not reach the payment service. Please try again.' });
+  }
+}
+
+// POST /payments/momo/:transactionRef/cancel (Customer)
+// The payer gave up before paying (Cancel on the SMS-code step). Checked with
+// Paystack first, so a payment that did go through is credited, not cancelled.
+export async function cancelCustomerMomoPayment(req: AuthenticatedRequest, res: Response): Promise<void> {
+  try {
+    const payment = await prisma.paymentTransaction.findUnique({
+      where: { transactionRef: req.params.transactionRef },
+      select: { id: true, transactionRef: true, customerId_uuid: true, status: true, metadata: true },
+    });
+    if (!payment || payment.customerId_uuid !== req.user!.id) {
+      res.status(404).json({ error: 'Payment not found' });
+      return;
+    }
+    // Only a web or app payment the payer started can be cancelled this way.
+    let channel = '';
+    try { channel = JSON.parse(payment.metadata || '{}').channel || ''; } catch { channel = ''; }
+    if (channel === 'USSD') {
+      res.status(400).json({ error: 'This payment cannot be cancelled here.' });
+      return;
+    }
+    const outcome = await cancelCustomerPayment(payment.id);
+    const status = (await prisma.paymentTransaction.findUnique({ where: { id: payment.id }, select: { status: true } }))?.status ?? payment.status;
+    res.json({
+      transactionRef: payment.transactionRef,
+      status,
+      message: outcome === 'SUCCESS' ? 'This payment already went through.' : status === 'FAILED' ? 'Payment cancelled.' : 'Nothing to cancel.',
+    });
+  } catch (error: any) {
+    console.error('Cancel payment error:', error?.message || error);
+    res.status(500).json({ error: 'Could not cancel the payment' });
+  }
+}
+
+/** Paystack asks for ten seconds between checks of a pending charge. */
+const PAYSTACK_POLL_GAP_MS = 10_000;
+const lastPaystackPoll = new Map<string, number>();
+
+// Check Hubtel payment status (the path name is historical: it follows the
+// payment's own gateway)
 export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response): Promise<void> {
   try {
     const { transactionRef } = req.params;
@@ -1106,7 +1330,29 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
         status: payment.status,
         amount: payment.amount,
         paymentDate: payment.paymentDate,
+        gateway: payment.gateway,
+        otpRequired: false,
+        failureReason: payment.status === 'FAILED' ? payment.failureReason : undefined,
       });
+      return;
+    }
+
+    if (payment.gateway === 'PAYSTACK') {
+      // Waiting for the payer's SMS code: nothing to ask Paystack yet.
+      const otpRequired = awaitingOtp(payment.metadata);
+      let status = payment.status;
+      const last = lastPaystackPoll.get(payment.transactionRef) ?? 0;
+      if (!otpRequired && Date.now() - last >= PAYSTACK_POLL_GAP_MS && Date.now() - payment.createdAt.getTime() >= PAYSTACK_POLL_GAP_MS) {
+        lastPaystackPoll.set(payment.transactionRef, Date.now());
+        if (lastPaystackPoll.size > 5000) lastPaystackPoll.clear();
+        try {
+          await refreshPaystackCustomerPayment(payment);
+          status = (await prisma.paymentTransaction.findUnique({ where: { id: payment.id }, select: { status: true } }))?.status ?? status;
+        } catch (error: any) {
+          console.error(`[Paystack] status check ${payment.transactionRef}:`, error?.message || error);
+        }
+      }
+      res.json({ transactionRef: payment.transactionRef, status, amount: payment.amount, gateway: 'PAYSTACK', otpRequired: status === 'PENDING' && otpRequired });
       return;
     }
 
@@ -1121,39 +1367,23 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
       try {
         hubtelStatus = await checkHubtelPaymentStatus(payment.transactionRef);
       } catch {
-        res.json({ transactionRef: payment.transactionRef, status: payment.status, amount: payment.amount });
+        res.json({ transactionRef: payment.transactionRef, status: payment.status, amount: payment.amount, gateway: 'HUBTEL', otpRequired: false });
         return;
       }
 
-      // Normalize Hubtel status — check both data.status and top-level ResponseCode
-      const rawHubtelStatus = String(
-        hubtelStatus.data?.status || hubtelStatus.Data?.Status || hubtelStatus.data?.Status || ''
-      ).toUpperCase();
-      const hubtelResponseCode = String(
-        hubtelStatus.ResponseCode || hubtelStatus.responseCode || hubtelStatus.data?.ResponseCode || ''
-      ).trim();
-
-      void hubtelResponseCode;
       // Only the transaction's own status decides. The status service's
       // responseCode "0000" means the lookup worked, not that the customer
       // paid — reading it as paid credited contracts seconds after the
       // prompt was sent, before anyone approved it.
+      const rawHubtelStatus = String(
+        hubtelStatus.data?.status || hubtelStatus.Data?.Status || hubtelStatus.data?.Status || ''
+      ).toUpperCase();
       let newStatus = payment.status;
       const resolved = hubtelTransactionOutcome(rawHubtelStatus);
-      if (resolved) newStatus = resolved;
-
-      if (newStatus !== payment.status) {
-        await prisma.paymentTransaction.update({
-          where: { id: payment.id },
-          data: {
-            status: newStatus,
-            paymentDate: newStatus === 'SUCCESS' ? new Date() : null,
-          },
-        });
-
-        if (newStatus === 'SUCCESS') {
-          await processSuccessfulPayment(payment.id);
-        }
+      if (resolved) {
+        // Claimed, so a callback arriving at the same moment cannot post it twice.
+        await settleCustomerPayment(payment.id, resolved, { hubtelStatus: rawHubtelStatus }, { failureReason: `Hubtel status: ${rawHubtelStatus}` });
+        newStatus = (await prisma.paymentTransaction.findUnique({ where: { id: payment.id }, select: { status: true } }))?.status ?? resolved;
       }
 
       res.json({
@@ -1161,12 +1391,16 @@ export async function checkHubtelStatus(req: AuthenticatedRequest, res: Response
         status: newStatus,
         amount: payment.amount,
         hubtelStatus: hubtelStatus.data?.status || hubtelStatus.Data?.Status,
+        gateway: 'HUBTEL',
+        otpRequired: false,
       });
     } else {
       res.json({
         transactionRef: payment.transactionRef,
         status: payment.status,
         amount: payment.amount,
+        gateway: 'HUBTEL',
+        otpRequired: false,
       });
     }
   } catch (error: any) {
@@ -2830,9 +3064,9 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
           ? OrderInfo.Payment.AmountAfterCharges
           : payment.amount;
 
-      // Update transaction to SUCCESS
-      await prisma.paymentTransaction.update({
-        where: { id: payment.id },
+      // Claimed, so a payment callback arriving at the same moment cannot post it twice.
+      const claimed = await prisma.paymentTransaction.updateMany({
+        where: { id: payment.id, status: { in: ['PENDING', 'FAILED'] } },
         data: {
           status: 'SUCCESS',
           paymentDate: new Date(),
@@ -2847,7 +3081,7 @@ export async function handleUssdFulfillment(req: Request, res: Response): Promis
       });
 
       // Use the canonical processSuccessfulPayment to update installments and contract totals
-      await processSuccessfulPayment(payment.id);
+      if (claimed.count > 0) await processSuccessfulPayment(payment.id);
     }
 
     // Always acknowledge fulfillment to Hubtel with 'success' — regardless of whether we found a matching
@@ -2883,9 +3117,16 @@ export async function reconcileHubtelPayments(req: AuthenticatedRequest, res: Re
     const pendingPayments = await prisma.paymentTransaction.findMany({
       where: {
         status: 'PENDING',
-        paymentMethod: { in: ['HUBTEL_MOMO', 'HUBTEL_REGULAR', 'HUBTEL_DIRECT_DEBIT'] },
-        externalRef: { not: null },
         createdAt: { lt: cutoff },
+        OR: [
+          {
+            gateway: 'HUBTEL',
+            paymentMethod: { in: ['HUBTEL_MOMO', 'HUBTEL_REGULAR', 'HUBTEL_DIRECT_DEBIT'] },
+            externalRef: { not: null },
+          },
+          // Paystack payments are checked on Paystack, prompt id or not.
+          { gateway: 'PAYSTACK' },
+        ],
       },
       include: {
         contract: {
@@ -2909,6 +3150,23 @@ export async function reconcileHubtelPayments(req: AuthenticatedRequest, res: Re
     }[] = [];
 
     for (const payment of pendingPayments) {
+      if (payment.gateway === 'PAYSTACK') {
+        const row = { transactionRef: payment.transactionRef, contractNumber: payment.contract?.contractNumber ?? '', amount: payment.amount, createdAt: payment.createdAt };
+        try {
+          const check = dryRun
+            ? await checkPaystackCharge(payment.transactionRef, payment.amount, payment.createdAt)
+            : await refreshPaystackCustomerPayment(payment);
+          const label = `PAYSTACK ${check.status.toUpperCase()}${check.mismatch ? ' (AMOUNT MISMATCH)' : ''}`;
+          results.push({
+            ...row,
+            hubtelStatus: label,
+            action: check.outcome === 'PENDING' ? 'still_pending' : dryRun ? 'dry_run' : check.outcome === 'SUCCESS' ? 'updated_success' : 'updated_failed',
+          });
+        } catch (err: any) {
+          results.push({ ...row, hubtelStatus: 'ERROR', action: 'error', error: err?.message });
+        }
+        continue;
+      }
       try {
         const hubtelResponse = await checkHubtelPaymentStatus(payment.transactionRef);
 
@@ -2954,23 +3212,13 @@ export async function reconcileHubtelPayments(req: AuthenticatedRequest, res: Re
           continue;
         }
 
-        // Update payment status
-        await prisma.paymentTransaction.update({
-          where: { id: payment.id },
-          data: {
-            status: resolvedStatus,
-            paymentDate: resolvedStatus === 'SUCCESS' ? new Date() : null,
-            metadata: JSON.stringify({
-              ...JSON.parse(payment.metadata || '{}'),
-              reconciledAt: new Date().toISOString(),
-              hubtelStatus: rawStatus,
-            }),
-          },
-        });
-
-        if (resolvedStatus === 'SUCCESS') {
-          await processSuccessfulPayment(payment.id);
-        }
+        // Claimed, so a callback arriving at the same moment cannot post it twice.
+        await settleCustomerPayment(
+          payment.id,
+          resolvedStatus,
+          { reconciledAt: new Date().toISOString(), hubtelStatus: rawStatus },
+          { failureReason: `Hubtel status: ${rawStatus}` },
+        );
 
         results.push({
           transactionRef: payment.transactionRef,

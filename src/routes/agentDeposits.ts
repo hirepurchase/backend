@@ -3,6 +3,9 @@ import {
   getMyLedger,
   getMySummary,
   payDeposit,
+  submitAgentDepositOtp,
+  cancelAgentDepositPayment,
+  getAgentDepositPaymentStatus,
   handleAgentPaymentCallback,
   getMyPaymentPin,
   getAllAgentLedgers,
@@ -29,6 +32,9 @@ router.get('/my-pin', authenticateAdmin, getMyPaymentPin);
 router.get('/my-summary', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_AGENT_COMMISSIONS), getMySummary);
 router.get('/completion-commissions/mine', authenticateAdmin, requireAnyPermission(PERMISSIONS.VIEW_AGENT_COMMISSIONS), getMyCompletionCommissions);
 router.post('/:id/pay', authenticateAdmin, requireAnyPermission(PERMISSIONS.PAY_AGENT_DEPOSIT), payDeposit);
+router.post('/payments/:ref/otp', authenticateAdmin, requireAnyPermission(PERMISSIONS.PAY_AGENT_DEPOSIT), submitAgentDepositOtp);
+router.post('/payments/:ref/cancel', authenticateAdmin, requireAnyPermission(PERMISSIONS.PAY_AGENT_DEPOSIT), cancelAgentDepositPayment);
+router.get('/payments/:ref/status', authenticateAdmin, requireAnyPermission(PERMISSIONS.PAY_AGENT_DEPOSIT), getAgentDepositPaymentStatus);
 
 // Admin routes
 router.post('/:id/admin-pay', authenticateAdmin, requireAnyPermission(PERMISSIONS.MANAGE_AGENT_LEDGER), adminManualPay);
