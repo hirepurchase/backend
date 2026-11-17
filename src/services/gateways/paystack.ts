@@ -116,7 +116,9 @@ async function providerCodeFor(network: string): Promise<string> {
   if (!ours) throw new Error(`Unsupported network: ${network}`);
   try {
     const codes = await mobileMoneyProviders();
-    if (codes[ours]) return codes[ours];
+    // The charge takes the code in lower case (mtn, vod, atl), whatever
+    // case Paystack's list writes it in.
+    if (codes[ours]) return codes[ours].toLowerCase();
   } catch (error) {
     console.warn('[Paystack] provider list unavailable, using the usual codes:', describeError(error));
   }

@@ -94,6 +94,16 @@ export async function startTestCharge(req: AuthenticatedRequest, res: Response):
       userAgent: req.headers['user-agent'] as string,
     });
 
+    // Paystack's answer is kept with the test, so a refusal can be read later.
+    const keep = (state: string, message: string) =>
+      createAuditLog({
+        userId: admin.id,
+        action: 'PAYSTACK_TEST_RESULT',
+        entity: 'PaystackTest',
+        entityId: reference,
+        newValues: { reference, step: 'start', state, message: String(message).slice(0, 500) },
+      }).catch(() => undefined);
+
     let start;
     try {
       start = await startMobileMoneyCharge({
@@ -105,10 +115,13 @@ export async function startTestCharge(req: AuthenticatedRequest, res: Response):
         metadata: { kind: 'TEST', note: 'Paystack test page: not linked to any contract' },
       });
     } catch (error: any) {
+      const message = `No clear answer from Paystack: ${error?.message || error}. The page will keep checking.`;
+      await keep('UNKNOWN', message);
       // It may still have reached Paystack: the page keeps checking.
-      res.status(202).json({ reference, state: 'UNKNOWN', message: `No clear answer from Paystack: ${error?.message || error}. The page will keep checking.` });
+      res.status(202).json({ reference, state: 'UNKNOWN', message });
       return;
     }
+    await keep(start.state, start.message);
     res.json({ reference, state: start.state, message: start.message, externalRef: start.externalRef, amount, network });
   } catch (error: any) {
     console.error('Paystack test charge error:', error?.message || error);
@@ -131,6 +144,12 @@ export async function submitTestOtp(req: AuthenticatedRequest, res: Response): P
   }
   try {
     const result = await submitOtp(reference, otp);
+    await createAuditLog({
+      action: 'PAYSTACK_TEST_RESULT',
+      entity: 'PaystackTest',
+      entityId: reference,
+      newValues: { reference, step: 'otp', state: result.state, message: String(result.message).slice(0, 500) },
+    }).catch(() => undefined);
     res.json({ reference, state: result.state, message: result.message });
   } catch (error: any) {
     res.status(502).json({ error: error?.message || 'Could not reach Paystack' });
@@ -147,7 +166,7 @@ export async function getTestCharge(req: AuthenticatedRequest, res: Response): P
   }
   try {
     const rows = await prisma.auditLog.findMany({
-      where: { entityId: reference, action: { in: ['PAYSTACK_TEST_CHARGE', 'PAYSTACK_TEST_EVENT', 'PAYSTACK_TEST_REFUND'] } },
+      where: { entityId: reference, action: { in: ['PAYSTACK_TEST_CHARGE', 'PAYSTACK_TEST_EVENT', 'PAYSTACK_TEST_REFUND', 'PAYSTACK_TEST_RESULT'] } },
       orderBy: { createdAt: 'asc' },
       select: { action: true, newValues: true, createdAt: true },
     });
@@ -174,6 +193,7 @@ export async function getTestCharge(req: AuthenticatedRequest, res: Response): P
       amountMatches: paystack?.status === 'success' ? requested === expected && Number(paystack.amount) >= expected && paystack.currency === 'GHS' : null,
       events: rows.filter((r) => r.action === 'PAYSTACK_TEST_EVENT').map((r) => ({ at: r.createdAt, ...parse(r.newValues) })),
       refunds: rows.filter((r) => r.action === 'PAYSTACK_TEST_REFUND').map((r) => ({ at: r.createdAt, ...parse(r.newValues) })),
+      answers: rows.filter((r) => r.action === 'PAYSTACK_TEST_RESULT').map((r) => ({ at: r.createdAt, ...parse(r.newValues) })),
     });
   } catch (error: any) {
     console.error('Paystack test lookup error:', error?.message || error);

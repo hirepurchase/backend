@@ -60,7 +60,7 @@ async function main() {
         const b = JSON.parse(body || '{}');
         if (b.mobile_money?.phone === '0200000000') return send(400, { status: false, message: 'Invalid phone number' });
         charges.set(b.reference, b);
-        const status = b.mobile_money?.provider === 'VOD' ? 'send_otp' : 'pay_offline';
+        const status = b.mobile_money?.provider === 'vod' ? 'send_otp' : 'pay_offline';
         return send(200, { status: true, data: { reference: b.reference, status, id: 1000 + charges.size, display_text: status === 'send_otp' ? 'Enter the OTP sent to your phone' : 'Please complete authorization on your phone' } });
       }
       if (req.method === 'POST' && u.pathname === '/charge/submit_otp') {
@@ -256,7 +256,7 @@ async function main() {
     assert.equal(sent.amount, 12050);
     assert.equal(sent.currency, 'GHS');
     assert.equal(sent.mobile_money.phone, P.phone);
-    assert.equal(sent.mobile_money.provider, 'MTN');
+    assert.equal(sent.mobile_money.provider, 'mtn', 'sent in lower case, as the charge takes it');
     assert.match(sent.email, /^pay\+[A-Za-z0-9]+@aidootechsolutions\.com$/);
     const p = await paymentOf(ref1);
     assert.equal(p.gateway, 'PAYSTACK');
@@ -351,7 +351,7 @@ async function main() {
     assert.equal(r.body.gateway, 'PAYSTACK');
     assert.equal(r.body.otpRequired, true);
     const ref = r.body.transactionRef;
-    assert.equal(charges.get(ref).mobile_money.provider, 'VOD');
+    assert.equal(charges.get(ref).mobile_money.provider, 'vod');
     const waiting = await call(checkHubtelStatus, { ...customer(P), params: { transactionRef: ref } });
     assert.equal(waiting.body.otpRequired, true);
     const wrong = await call(submitCustomerPaymentOtp, { ...customer(P), params: { transactionRef: ref }, body: { otp: '999999' } });
@@ -648,6 +648,8 @@ async function main() {
     assert.equal(r.status, 200, JSON.stringify(r.body));
     const ref = r.body.reference;
     assert.match(ref, /^PSTEST[A-Z0-9]+$/);
+    const kept = await prisma.auditLog.findFirst({ where: { action: 'PAYSTACK_TEST_RESULT', entityId: ref } });
+    assert.ok(kept && JSON.parse(kept.newValues).state === 'PENDING', 'Paystack\'s answer is kept with the test');
     assert.equal(charges.get(ref).amount, 100);
     outcome.set(ref, { status: 'success' });
     await webhook(ref);
@@ -658,6 +660,7 @@ async function main() {
     assert.equal(d.body.paystack.status, 'success');
     assert.equal(d.body.amountMatches, true);
     assert.equal(d.body.events[0].event, 'charge.success');
+    assert.equal(d.body.answers[0].step, 'start');
     assert.ok(d.body.events[0].fields.includes('reference'));
     const refund = await call(tp.refundTestCharge, { userType: 'admin', user: superAdmin, params: { reference: ref } });
     assert.equal(refund.status, 200, JSON.stringify(refund.body));
