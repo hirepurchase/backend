@@ -8,6 +8,13 @@ export const PENALTY_KIND = {
   CONTRACT_EXPIRY: 'CONTRACT_EXPIRY',
 } as const;
 
+/**
+ * The waiver reason on late charges taken into a rescheduled balance. They are
+ * owed as part of the new price, so they are not owed on their own any more,
+ * and they no longer count against the cap on charges for a later expiry.
+ */
+export const PENALTY_FOLDED_REASON = 'Added to rescheduled balance';
+
 export const PENALTY_MODE = {
   FIXED: 'FIXED',
   DAILY: 'DAILY',
@@ -122,6 +129,8 @@ interface AccrualContract {
   status: string;
   totalPrice?: number;
   depositAmount?: number;
+  /** Times the balance has been rescheduled; each new term can be charged again. */
+  rescheduleCount?: number;
 }
 
 /**
@@ -165,7 +174,7 @@ export async function planExpiryPenaltiesForContract(
    * query per contract, which across 477 past-term contracts meant hundreds of
    * round trips to a remote pooler on every run.
    */
-  existingCharges?: Array<{ dedupeKey: string | null; amount: number }>,
+  existingCharges?: Array<{ dedupeKey: string | null; amount: number; waiveReason?: string | null }>,
   /** Successful payments on this contract, so a backfilled day can be priced
    *  on the balance that actually stood on it. */
   paymentHistory?: Array<{ amount: number; unlockFee?: number | null; paymentDate: Date }>
@@ -184,10 +193,13 @@ export async function planExpiryPenaltiesForContract(
     existingCharges ??
     (await prismaAny.penalty.findMany({
       where: { contractId: contract.id, kind: PENALTY_KIND.CONTRACT_EXPIRY },
-      select: { dedupeKey: true, amount: true },
+      select: { dedupeKey: true, amount: true, waiveReason: true },
     }));
   const alreadyCharged = new Set(existing.map((row: any) => row.dedupeKey));
-  let chargedSoFar = existing.reduce((sum: number, row: any) => sum + row.amount, 0);
+  // Charges already taken into a rescheduled balance belong to an earlier term.
+  let chargedSoFar = existing
+    .filter((row: any) => row.waiveReason !== PENALTY_FOLDED_REASON)
+    .reduce((sum: number, row: any) => sum + row.amount, 0);
 
   // The cap is measured against what the customer owed on the day the contract
   // ran out of term, not against today's balance. A moving ceiling meant
@@ -206,7 +218,8 @@ export async function planExpiryPenaltiesForContract(
 
   if (settings.expiryPenaltyMode === PENALTY_MODE.FIXED) {
     // One charge for the whole overrun, however long it lasts.
-    const key = `expiry:${contract.id}:fixed`;
+    const term = contract.rescheduleCount ? `:r${contract.rescheduleCount}` : '';
+    const key = `expiry:${contract.id}:fixed${term}`;
     if (alreadyCharged.has(key)) return [];
     const amount = Math.min(
       roundMoney((capBasis * settings.expiryPenaltyRate) / 100),
@@ -370,6 +383,7 @@ export async function accrueExpiryPenalties(options: {
       status: true,
       totalPrice: true,
       depositAmount: true,
+      rescheduleCount: true,
     },
   });
 
@@ -389,12 +403,12 @@ export async function accrueExpiryPenalties(options: {
       kind: PENALTY_KIND.CONTRACT_EXPIRY,
       contractId: { in: contracts.map((c: AccrualContract) => c.id) },
     },
-    select: { contractId: true, dedupeKey: true, amount: true },
+    select: { contractId: true, dedupeKey: true, amount: true, waiveReason: true },
   });
-  const chargesByContract = new Map<string, Array<{ dedupeKey: string | null; amount: number }>>();
+  const chargesByContract = new Map<string, Array<{ dedupeKey: string | null; amount: number; waiveReason?: string | null }>>();
   for (const row of priorCharges) {
     const list = chargesByContract.get(row.contractId) ?? [];
-    list.push({ dedupeKey: row.dedupeKey, amount: row.amount });
+    list.push({ dedupeKey: row.dedupeKey, amount: row.amount, waiveReason: row.waiveReason });
     chargesByContract.set(row.contractId, list);
   }
 
@@ -463,7 +477,7 @@ export async function accrueExpiryPenalties(options: {
     // Whether this contract has ever been charged for running past term. Used
     // below to decide whether the customer is hearing about it for the first
     // time — DAILY mode must not send an SMS every morning.
-    const isFirstCharge = (chargesByContract.get(contract.id) ?? []).length === 0;
+    const isFirstCharge = (chargesByContract.get(contract.id) ?? []).filter((row) => row.waiveReason !== PENALTY_FOLDED_REASON).length === 0;
 
     // skipDuplicates leans on the dedupeKey unique index: a concurrent run
     // that already wrote a charge is the constraint doing its job, not an error.

@@ -799,7 +799,7 @@ export async function rebuildContractFromPayments(contractId: string, tx: any): 
 
   // Reset and re-apply installments. An unpaid instalment past its due date
   // is OVERDUE again straight away, so allocation and the device see it.
-  const installments: Array<{ id: string; amount: number; dueDate: Date; status: string }> = await tx.installmentSchedule.findMany({
+  const installments: Array<{ id: string; amount: number; dueDate: Date; status: string; paidAt: Date | null }> = await tx.installmentSchedule.findMany({
     where: { contractId },
     orderBy: { installmentNo: 'asc' },
   });
@@ -822,7 +822,8 @@ export async function rebuildContractFromPayments(contractId: string, tx: any): 
     if (isMoneyGte(remaining, owed)) {
       await tx.installmentSchedule.update({
         where: { id: inst.id },
-        data: { paidAmount: owed, status: 'PAID', paidAt: new Date() },
+        // An instalment that was already paid keeps the day it was paid.
+        data: { paidAmount: owed, status: 'PAID', paidAt: inst.status === 'PAID' && inst.paidAt ? inst.paidAt : new Date() },
       });
       remaining = roundMoney(remaining - owed);
     } else {

@@ -27,6 +27,8 @@ export interface IndicatorRule {
 }
 
 export interface ScorecardSettings {
+  /** YYYY-MM: the first month leaders are paid for. */
+  effectiveMonth?: string;
   baseAmount: number;
   parGateEnabled: boolean;
   parGateCeiling: number;

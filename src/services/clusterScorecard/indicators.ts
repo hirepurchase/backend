@@ -41,6 +41,8 @@ export interface LeaderMeasures {
   leaderId: string;
   name: string;
   phone: string | null;
+  /** Where to send the money; null until the leader sets it in their portal. */
+  payout: { number: string; network: string | null; registeredName: string | null; check: string | null } | null;
   agentCount: number;
   values: MeasuredValue[];
   detail: Partial<Record<IndicatorKey, Record<string, unknown>>>;
@@ -67,7 +69,7 @@ export async function computeIndicators(month: string, opts: { depositRemitDays:
       ],
       ...(opts.leaderIds ? { id: { in: opts.leaderIds } } : {}),
     },
-    select: { id: true, firstName: true, lastName: true, phone: true },
+    select: { id: true, firstName: true, lastName: true, phone: true, payoutMomoNumber: true, payoutMomoNetwork: true, payoutMomoName: true, payoutMomoCheck: true },
     orderBy: { firstName: 'asc' },
   });
   const leaderIds = new Set(leaders.map((l) => l.id));
@@ -92,6 +94,7 @@ export async function computeIndicators(month: string, opts: { depositRemitDays:
       measureCollectionRate(range, asOf, agentIds, lead, add),
       measureSales(range, agentIds, lead, add),
       measureQualitySales(range, asOf, agentIds, lead, add),
+      measureCompletions(range, agentIds, lead, add),
       measureDeposits(range, agentIds, lead, add, opts.depositRemitDays),
       measureWriteOffs(range, agentIds, lead, add),
       measurePar(asOf, intervals, agentIds, add),
@@ -118,6 +121,7 @@ export async function computeIndicators(month: string, opts: { depositRemitDays:
       { key: 'DEPOSIT_REMITTANCE', value: ratio('DEPOSIT_REMITTANCE'), count: count('DEPOSIT_REMITTANCE') },
       { key: 'NEW_CONTRACTS', value: count('NEW_CONTRACTS'), count: count('NEW_CONTRACTS') },
       { key: 'QUALITY_CONTRACTS', value: count('QUALITY_CONTRACTS'), count: count('QUALITY_CONTRACTS') },
+      { key: 'COMPLETED_IN_TERM', value: count('COMPLETED_IN_TERM'), count: count('COMPLETED_IN_TERM') },
       { key: 'ACTIVE_AGENTS', value: Object.keys(activeAgents).length, count: Object.keys(activeAgents).length },
       { key: 'UNLOCKS_FULFILLED', value: count('UNLOCKS_FULFILLED'), count: count('UNLOCKS_FULFILLED') },
       { key: 'UNLOCKS_DEFAULTED', value: count('UNLOCKS_DEFAULTED'), count: count('UNLOCKS_DEFAULTED') },
@@ -135,6 +139,9 @@ export async function computeIndicators(month: string, opts: { depositRemitDays:
       leaderId: leader.id,
       name: `${leader.firstName} ${leader.lastName}`.trim(),
       phone: leader.phone,
+      payout: leader.payoutMomoNumber
+        ? { number: leader.payoutMomoNumber, network: leader.payoutMomoNetwork, registeredName: leader.payoutMomoName, check: leader.payoutMomoCheck }
+        : null,
       agentCount: new Set(intervals.filter((i) => i.clusterAgentId === leader.id).map((i) => i.agentId)).size,
       values,
       detail,
@@ -230,6 +237,26 @@ export async function measureQualitySales(range: MonthRange, asOf: Date, agentId
   for (const s of sales) {
     const healthy = !['CANCELLED', 'WRITTEN_OFF', 'DEFAULTED'].includes(s.status) && s.installments.length === 0;
     if (healthy) add(lead(s.createdById, s.approvedAt!), 'QUALITY_CONTRACTS', 1);
+  }
+}
+
+/**
+ * COMPLETED_IN_TERM: contracts paid off in the month, on or before the end of
+ * the day the term was first agreed to end. Credited to whoever led the
+ * selling agent on the day it was paid off. Ones paid off late are counted in
+ * the detail only, so the scorecard can show them without paying for them.
+ */
+export async function measureCompletions(range: MonthRange, agentIds: string[], lead: Lead, add: Add) {
+  const rows = await prisma.hirePurchaseContract.findMany({
+    where: { createdById: { in: agentIds }, status: 'COMPLETED', completedAt: { gte: range.from, lt: range.to } },
+    select: { createdById: true, completedAt: true, endDate: true, originalEndDate: true },
+  });
+  for (const r of rows) {
+    const term = r.originalEndDate ?? r.endDate;
+    const lastDay = new Date(Date.UTC(term.getUTCFullYear(), term.getUTCMonth(), term.getUTCDate() + 1));
+    const leader = lead(r.createdById, r.completedAt!);
+    if (r.completedAt! < lastDay) add(leader, 'COMPLETED_IN_TERM', 1, 1, { inTerm: 1 });
+    else add(leader, 'COMPLETED_IN_TERM', 0, 0, { afterTerm: 1 });
   }
 }
 

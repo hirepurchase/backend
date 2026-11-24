@@ -128,6 +128,11 @@ export async function putSettings(req: AuthenticatedRequest, res: Response) {
     if ('depositRemitDays' in b) data.depositRemitDays = Math.round(num(b.depositRemitDays, 0, 90, 'Deposit days'));
     if ('parGateEnabled' in b) data.parGateEnabled = Boolean(b.parGateEnabled);
     if ('gateWithholdsBase' in b) data.gateWithholdsBase = Boolean(b.gateWithholdsBase);
+    if ('effectiveMonth' in b) {
+      const m = /^(\d{4})-(\d{2})$/.exec(String(b.effectiveMonth || ''));
+      if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) throw new Error('Start month must be YYYY-MM');
+      data.effectiveMonth = String(b.effectiveMonth);
+    }
     const before = await prisma.clusterScorecardSettings.upsert({ where: { id: 'singleton' }, create: { id: 'singleton' }, update: {} });
     const after = await prisma.clusterScorecardSettings.update({ where: { id: 'singleton' }, data: { ...data, updatedById: user(req).id } });
     await createAuditLog({

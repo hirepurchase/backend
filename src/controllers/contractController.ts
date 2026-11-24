@@ -2207,6 +2207,7 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
             totalPaid: totalPaidWithDeposit,
             endDate: correctedEndDate,
             status: newContractStatus,
+            completedAt: newContractStatus === 'COMPLETED' ? (contract.completedAt ?? new Date()) : null,
           },
         });
       });
@@ -2307,6 +2308,7 @@ export async function amendContract(req: AuthenticatedRequest, res: Response): P
             outstandingBalance: newOutstandingBalance,
             totalPaid: totalPaidWithDeposit,
             status: newContractStatus,
+            completedAt: newContractStatus === 'COMPLETED' ? (contract.completedAt ?? new Date()) : null,
           },
         });
       });

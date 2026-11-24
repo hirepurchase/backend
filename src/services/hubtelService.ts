@@ -842,14 +842,18 @@ async function processSuccessfulPayment(payment: any, contract: any): Promise<vo
 
     // Same rule as the manual path: unpaid penalties block completion, because
     // completing releases the device and with it any means of collecting them.
-    const penaltyDue = (await tx.hirePurchaseContract.findUnique({
+    const current = await tx.hirePurchaseContract.findUnique({
       where: { id: contract.id },
-      select: { penaltyOutstanding: true },
-    }))?.penaltyOutstanding ?? 0;
+      select: { penaltyOutstanding: true, completedAt: true },
+    });
+    const penaltyDue = current?.penaltyOutstanding ?? 0;
 
     if (newOutstandingBalance <= 0.005 && penaltyDue <= 0.005) {
       contractUpdate.status = 'COMPLETED';
       contractUpdate.outstandingBalance = 0;
+      // Completion pay and the cluster scorecard count completions by this
+      // date; without it a contract paid off through Hubtel never counted.
+      contractUpdate.completedAt = current?.completedAt ?? new Date();
     }
 
     await tx.hirePurchaseContract.update({

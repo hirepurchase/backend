@@ -23,6 +23,7 @@ export interface LeaderScorecard extends PayoutResult {
   leaderId: string;
   name: string;
   phone: string | null;
+  payout: { number: string; network: string | null; registeredName: string | null; check: string | null } | null;
   agentCount: number;
   status: 'PREVIEW' | 'PENDING' | 'PAID';
   paidAt: Date | null;
@@ -33,6 +34,9 @@ export interface MonthScorecard {
   month: string;
   status: 'PREVIEW' | 'CLOSED' | 'APPROVED';
   canClose: boolean;
+  /** The month is before leader pay started: figures are shown, nothing is paid. */
+  beforeEffective: boolean;
+  effectiveMonth: string | null;
   closedAt: Date | null;
   approvedAt: Date | null;
   rules: RulesSnapshot;
@@ -86,8 +90,15 @@ export async function getRules(): Promise<RulesSnapshot> {
       parGateCeiling: settings.parGateCeiling,
       gateWithholdsBase: settings.gateWithholdsBase,
       depositRemitDays: settings.depositRemitDays,
+      effectiveMonth: settings.effectiveMonth,
     },
   };
+}
+
+/** True when leaders are not paid for this month: it is before the scheme started. */
+export function beforeEffective(month: string, rules: RulesSnapshot): boolean {
+  const start = rules.settings.effectiveMonth;
+  return !!start && month < start;
 }
 
 export function validateRule(input: Record<string, unknown>): Partial<IndicatorRule> & { error?: string } {
@@ -140,8 +151,22 @@ export function validateRule(input: Record<string, unknown>): Partial<IndicatorR
 
 // ─── Months ────────────────────────────────────────────────────────────────
 
-function score(measures: LeaderMeasures[], rules: RulesSnapshot): Array<LeaderMeasures & PayoutResult> {
-  return measures.map((m) => ({ ...m, ...applyRules(m.values, rules.indicators, rules.settings) }));
+function score(measures: LeaderMeasures[], rules: RulesSnapshot, unpaid = false): Array<LeaderMeasures & PayoutResult> {
+  return measures.map((m) => {
+    const result = applyRules(m.values, rules.indicators, rules.settings);
+    if (!unpaid) return { ...m, ...result };
+    // Before leader pay started: keep the figures, pay nothing.
+    const note = `Before ${rules.settings.effectiveMonth}: not paid`;
+    return {
+      ...m,
+      ...result,
+      lines: result.lines.map((l) => ({ ...l, payout: 0, explanation: note })),
+      base: 0,
+      variable: 0,
+      deductions: 0,
+      total: 0,
+    };
+  });
 }
 
 function totalsOf(leaders: LeaderScorecard[]) {
@@ -162,7 +187,8 @@ export async function getMonth(month: string, leaderIds?: string[]): Promise<Mon
   if (!period) {
     const rules = await getRules();
     const measures = await computeIndicators(month, { depositRemitDays: rules.settings.depositRemitDays, leaderIds });
-    const leaders: LeaderScorecard[] = score(measures, rules).map((s) => ({
+    const unpaid = beforeEffective(month, rules);
+    const leaders: LeaderScorecard[] = score(measures, rules, unpaid).map((s) => ({
       ...s,
       status: 'PREVIEW',
       paidAt: null,
@@ -171,7 +197,9 @@ export async function getMonth(month: string, leaderIds?: string[]): Promise<Mon
     return {
       month,
       status: 'PREVIEW',
-      canClose: new Date() >= range.to,
+      canClose: new Date() >= range.to && !unpaid,
+      beforeEffective: unpaid,
+      effectiveMonth: rules.settings.effectiveMonth ?? null,
       closedAt: null,
       approvedAt: null,
       rules,
@@ -186,7 +214,7 @@ export async function getMonth(month: string, leaderIds?: string[]): Promise<Mon
   ]);
   const people = await prisma.adminUser.findMany({
     where: { id: { in: payouts.map((p) => p.clusterAgentId) } },
-    select: { id: true, firstName: true, lastName: true, phone: true },
+    select: { id: true, firstName: true, lastName: true, phone: true, payoutMomoNumber: true, payoutMomoNetwork: true, payoutMomoName: true, payoutMomoCheck: true },
   });
   const personById = new Map(people.map((p) => [p.id, p]));
   const rules = period.rulesSnapshot as unknown as RulesSnapshot;
@@ -203,6 +231,9 @@ export async function getMonth(month: string, leaderIds?: string[]): Promise<Mon
         leaderId: p.clusterAgentId,
         name: person ? `${person.firstName} ${person.lastName}`.trim() : 'Former leader',
         phone: person?.phone ?? null,
+        payout: person?.payoutMomoNumber
+          ? { number: person.payoutMomoNumber, network: person.payoutMomoNetwork, registeredName: person.payoutMomoName, check: person.payoutMomoCheck }
+          : null,
         agentCount: Number(detail('_meta').agentCount ?? 0),
         lines: own
           .filter((l) => l.indicatorKey !== '_meta')
@@ -230,6 +261,8 @@ export async function getMonth(month: string, leaderIds?: string[]): Promise<Mon
     month,
     status: period.status === 'APPROVED' ? 'APPROVED' : 'CLOSED',
     canClose: false,
+    beforeEffective: beforeEffective(month, rules),
+    effectiveMonth: rules.settings.effectiveMonth ?? null,
     closedAt: period.closedAt,
     approvedAt: period.approvedAt,
     rules,
@@ -285,6 +318,7 @@ export async function closeMonth(month: string, actorId: string): Promise<MonthS
   if (new Date() < range.to) throw new Error('A month can only be closed after it has ended.');
   if (await prisma.clusterScorecardPeriod.findUnique({ where: { month } })) throw new Error('This month is already closed.');
   const rules = await getRules();
+  if (beforeEffective(month, rules)) throw new Error(`Leader pay starts with ${rules.settings.effectiveMonth}; earlier months are not paid.`);
   const measures = await computeIndicators(month, { depositRemitDays: rules.settings.depositRemitDays });
   const period = await prisma.clusterScorecardPeriod.create({
     data: { month, status: 'CLOSED', rulesSnapshot: rules as any, closedById: actorId },
@@ -299,7 +333,7 @@ export async function recomputeMonth(month: string, actorId: string, useCurrentR
   if (period.status === 'APPROVED') throw new Error('An approved month cannot be recomputed.');
   const rules = useCurrentRules ? await getRules() : (period.rulesSnapshot as unknown as RulesSnapshot);
   const measures = await computeIndicators(month, { depositRemitDays: rules.settings.depositRemitDays });
-  await freeze(period.id, score(measures, rules));
+  await freeze(period.id, score(measures, rules, beforeEffective(month, rules)));
   await prisma.clusterScorecardPeriod.update({
     where: { id: period.id },
     data: { rulesSnapshot: rules as any, closedById: actorId, closedAt: new Date() },

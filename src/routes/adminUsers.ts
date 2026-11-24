@@ -25,6 +25,7 @@ import {
 } from '../controllers/clusterAssignmentController';
 import { authenticateAdmin, requireAnyPermission, requireSuperAdmin } from '../middleware/auth';
 import { getExtraPermissions, putExtraPermissions } from '../controllers/userPermissionController';
+import { getMyPayoutAccount, getPayoutAccountSummary, updateMyPayoutAccount } from '../controllers/payoutAccountController';
 import {
   PERMISSIONS,
   ROLE_DIRECTORY_ACCESS_PERMISSIONS,
@@ -46,6 +47,11 @@ router.post('/change-password', changePassword);
 // An agent's own customer service officers. Authentication only — it returns
 // nothing but the caller's own supervisors, so no extra permission is needed.
 router.get('/me/customer-service', getMyCustomerServiceOfficers);
+
+// Each person's own commission payout number (any signed-in staff member, for themselves only).
+router.get('/me/payout-account', getMyPayoutAccount);
+router.put('/me/payout-account', updateMyPayoutAccount);
+router.get('/payout-accounts/summary', requireAnyPermission(PERMISSIONS.MANAGE_AGENT_LEDGER, PERMISSIONS.MANAGE_COMMISSION_SETTINGS), getPayoutAccountSummary);
 
 // Directory of officers and the agents they cover. Contact details only, no
 // customer data, so any signed-in staff member may read it.

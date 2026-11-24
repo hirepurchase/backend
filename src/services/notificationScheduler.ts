@@ -327,6 +327,21 @@ export function initializeNotificationScheduler(): void {
     }
   });
 
+  // Reschedule requests for expired contracts at 8:20 AM, after the expiry
+  // charges at 8:15 so the late charges taken into the new balance include
+  // today's. Only raises requests; an admin approves each one. A no-op while
+  // the switch is off.
+  cron.schedule('20 8 * * *', () => {
+    const enqueued = enqueueSingletonJob('reschedule-requests', async () => {
+      const { raiseAutomaticReschedules } = await import('./rescheduleService');
+      const result = await raiseAutomaticReschedules();
+      if (result.enabled) console.log(`Reschedules: ${result.raised} request(s) raised for approval, ${result.skipped} skipped`);
+    });
+    if (!enqueued) {
+      console.log('Skipping reschedule requests - previous job still running');
+    }
+  });
+
   // Run upcoming payment check every day at 9:00 AM
   cron.schedule('0 9 * * *', () => {
     const enqueued = enqueueSingletonJob('notifications-upcoming', async () => {
@@ -354,6 +369,7 @@ export function initializeNotificationScheduler(): void {
   console.log('- Knox proactive device evaluate: Daily at 8:32 AM');
   console.log('- Temporary unlock expiry sweep: Daily at 8:05 AM');
   console.log('- Expiry penalty accrual: Daily at 8:15 AM');
+  console.log('- Reschedule requests for expired contracts: Daily at 8:20 AM (when switched on)');
   console.log('- Knox daily full-fleet device audit: Daily at 8:41 AM');
   console.log('- Upcoming payments check: Daily at 9:00 AM');
   console.log('- Overdue payments check: Daily at 10:00 AM');

@@ -12,6 +12,7 @@ export type IndicatorKey =
   | 'DEPOSIT_REMITTANCE'
   | 'NEW_CONTRACTS'
   | 'QUALITY_CONTRACTS'
+  | 'COMPLETED_IN_TERM'
   | 'ACTIVE_AGENTS'
   | 'UNLOCKS_FULFILLED'
   | 'UNLOCKS_DEFAULTED'
@@ -85,6 +86,14 @@ export const INDICATORS: IndicatorDefinition[] = [
     key: 'QUALITY_CONTRACTS',
     label: 'Quality contracts',
     description: 'Contracts approved two months earlier that are still in good standing (not 30+ days late, cancelled or written off).',
+    unit: 'COUNT',
+    payoutTypes: ['PER_UNIT', 'TARGET', 'TIERS'],
+    higherIsBetter: true,
+  },
+  {
+    key: 'COMPLETED_IN_TERM',
+    label: 'Completed within term',
+    description: 'Contracts sold by the leader’s agents that were paid off in the month on or before their original end date. Paying off after the end date does not count, and a rescheduled contract is judged on the end date first agreed.',
     unit: 'COUNT',
     payoutTypes: ['PER_UNIT', 'TARGET', 'TIERS'],
     higherIsBetter: true,

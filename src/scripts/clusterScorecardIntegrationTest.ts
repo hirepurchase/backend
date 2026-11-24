@@ -123,6 +123,27 @@ async function main() {
     await prisma.contactAttempt.create({ data: { customerId_uuid: C1.uuid, officerId: officer, purpose, outcome: 'REACHED', contactedAt: d(when) } });
   }
 
+  // Completions in September. Sold in May so no sale or quality figure moves.
+  const done = async (agentId: string, completedAt: string, endDate: string, originalEndDate?: string) => {
+    n++;
+    const uuid = crypto.randomUUID();
+    await prisma.customer.create({ data: { id_uuid: uuid, membershipId: `${TAG}${n}`, firstName: 'C', lastName: `${n}`, phone: `${TAG}${n}`, createdById: agentId } });
+    await prisma.hirePurchaseContract.create({
+      data: {
+        contractNumber: `${TAG}-${n}`, customerId_uuid: uuid, totalPrice: 2000, depositAmount: 400, financeAmount: 1600, installmentAmount: 400,
+        paymentFrequency: 'WEEKLY', totalInstallments: 4, startDate: d('2026-05-01'), endDate: d(endDate), originalEndDate: originalEndDate ? d(originalEndDate) : null,
+        status: 'COMPLETED', outstandingBalance: 0, totalPaid: 2000, createdById: agentId, approvedAt: d('2026-05-01'), completedAt: d(completedAt),
+      },
+    });
+  };
+  await done(A1.id, '2026-09-12', '2026-09-30'); // Leader 1, in term
+  await done(A1.id, '2026-09-20', '2026-09-01'); // after its end date: not paid for
+  await done(A1.id, '2026-09-18', '2026-12-31', '2026-09-05'); // rescheduled; judged on the first end date: late
+  await done(A2.id, '2026-09-10', '2026-10-31'); // A2 under Leader 1 that day
+  await done(A2.id, '2026-09-25', '2026-09-25'); // Leader 2, on the last day of the term: counts
+  await done(L1.id, '2026-09-14', '2026-10-31'); // the leader's own sale: paid as an agent, not here
+  await done(A1.id, '2026-10-02', '2026-10-31'); // October: not this month
+
   console.log('Indicator values (hand-computed)');
   const measures = await computeIndicators(MONTH, { depositRemitDays: 7, leaderIds: leaders });
   const v = (leader: string, key: string) => measures.find((m) => m.leaderId === leader)!.values.find((x) => x.key === key)!;
@@ -145,6 +166,8 @@ async function main() {
     ['Leader 1', 'WRITE_OFFS', 500],
     ['Leader 1', 'FOLLOW_UP_CALLS', 2 + 1],
     ['Leader 2', 'FOLLOW_UP_CALLS', 0],
+    ['Leader 1', 'COMPLETED_IN_TERM', 2, 2],
+    ['Leader 2', 'COMPLETED_IN_TERM', 1, 1],
     ['Leader 1', 'PAR30', 0],
     ['Leader 2', 'PAR30', 50],
   ];
@@ -157,8 +180,15 @@ async function main() {
     });
   }
 
+  await check('the two late completions show in Leader 1’s detail without being paid for', () => {
+    const det = measures.find((m) => m.leaderId === L1.id)!.detail.COMPLETED_IN_TERM as Record<string, number>;
+    assert.strictEqual(det.afterTerm, 2);
+    assert.strictEqual(det.inTerm, 2);
+  });
+
   console.log('Rates → pay');
   await prisma.clusterScorecardSettings.upsert({ where: { id: 'singleton' }, create: { id: 'singleton' }, update: {} });
+  await prisma.clusterScorecardSettings.update({ where: { id: 'singleton' }, data: { effectiveMonth: '2026-01' } });
   await getMonth(MONTH, leaders); // seeds indicator rows
   await prisma.clusterScorecardIndicator.updateMany({ data: { enabled: false } });
   await prisma.clusterScorecardIndicator.update({ where: { key: 'COLLECTIONS' }, data: { enabled: true, payoutType: 'RATE', rate: 2 } });
@@ -176,6 +206,21 @@ async function main() {
   });
 
   console.log('Lifecycle');
+  await check('a month before leader pay started shows its figures but pays nothing and cannot be closed', async () => {
+    await prisma.clusterScorecardSettings.update({ where: { id: 'singleton' }, data: { effectiveMonth: '2026-10' } });
+    try {
+      const m = await getMonth(MONTH, leaders);
+      assert.strictEqual(m.beforeEffective, true);
+      assert.strictEqual(m.canClose, false);
+      assert.strictEqual(m.totals.total, 0);
+      const l1 = m.leaders.find((l) => l.leaderId === L1.id)!;
+      assert.strictEqual(l1.lines.find((l) => l.key === 'NEW_CONTRACTS')!.count, 1, 'figures still shown');
+      assert.match(l1.lines[0].explanation, /Before 2026-10: not paid/);
+      await assert.rejects(() => closeMonth(MONTH, L1.id), /starts with 2026-10/);
+    } finally {
+      await prisma.clusterScorecardSettings.update({ where: { id: 'singleton' }, data: { effectiveMonth: '2026-01' } });
+    }
+  });
   await check('the month in progress cannot be closed', () => assert.rejects(() => closeMonth('2026-10', L1.id), /after it has ended/));
   const closed = await closeMonth(MONTH, L1.id);
   await check('close freezes September', () => assert.strictEqual(closed.status, 'CLOSED'));

@@ -48,6 +48,14 @@ model AdminUser {
   // the customer rather than whoever asked first.
   area                  String?
   district              String?
+  // Where commission is sent. Set by the person themselves (password needed);
+  // the name the network has on the number is kept so whoever pays can see
+  // whose wallet it is.
+  payoutMomoNumber      String?
+  payoutMomoNetwork     String?               // MTN | TELECEL | AIRTELTIGO
+  payoutMomoName        String?
+  payoutMomoCheck       String?               // MATCHED | PARTIAL | MISMATCH | NOT_REGISTERED | UNAVAILABLE
+  payoutMomoUpdatedAt   DateTime?
   isActive              Boolean               @default(true)
   roleId                String
   role                  Role                  @relation(fields: [roleId], references: [id])
@@ -329,11 +337,71 @@ model HirePurchaseContract {
   contactAttempts     ContactAttempt[]
   agentLedger         AgentDepositLedger?
   temporaryUnlocks    TemporaryUnlockRequest[]
+  // Set the first time an expired contract's balance is rescheduled, so the
+  // term the customer first agreed to is never lost.
+  originalEndDate     DateTime?
+  rescheduleCount     Int                 @default(0)
+  reschedules         ContractReschedule[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
   @@index([status, createdAt])
   @@index([customerId_uuid, status])
+}
+
+// A request to spread an expired contract's balance, with its unpaid late
+// charges and flat interest, over a new schedule. Nothing changes on the
+// contract until a second person approves it.
+model ContractReschedule {
+  id                String               @id @default(uuid())
+  contractId        String
+  contract          HirePurchaseContract @relation(fields: [contractId], references: [id])
+  status            String               @default("PENDING") // PENDING, APPLIED, REJECTED, CANCELLED
+  source            String               @default("MANUAL")  // MANUAL, AUTO
+  // Figures as they stood when requested; replaced by the applied figures on approval.
+  balance           Float
+  lateCharges       Float                @default(0)
+  principal         Float
+  monthlyRate       Float                // flat % per month of the new term
+  termMonths        Float
+  interest          Float
+  newTotal          Float
+  frequency         String               // DAILY, WEEKLY, MONTHLY
+  installments      Int
+  installmentAmount Float
+  firstDueDate      DateTime
+  newEndDate        DateTime?
+  oldEndDate        DateTime
+  // JSON: the instalments as they were before the change.
+  oldSchedule       String?
+  note              String?
+  requestedById     String?
+  decidedById       String?
+  decidedAt         DateTime?
+  rejectReason      String?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+
+  @@index([status, createdAt])
+  @@index([contractId, status])
+}
+
+model RescheduleSettings {
+  id                       String   @id @default(uuid())
+  // Off: requests are only raised by hand. On: a daily job raises one for
+  // each contract that has been past term this many days. Either way an admin
+  // approves before anything changes.
+  autoEnabled              Boolean  @default(false)
+  autoAfterDays            Int      @default(7)
+  defaultMonthlyRate       Float    @default(5)
+  maxMonthlyRate           Float    @default(20)
+  autoFrequency            String   @default("WEEKLY")
+  autoInstallments         Int      @default(8)
+  // The automatic job stops raising requests for a contract after this many.
+  maxReschedulesPerContract Int     @default(2)
+  updatedById              String?
+  createdAt                DateTime @default(now())
+  updatedAt                DateTime @updatedAt
 }
 
 model InstallmentSchedule {
@@ -1085,6 +1153,9 @@ model ClusterScorecardSettings {
   // new devices. Off by default, so setting those targets never blocks stock
   // until an administrator chooses to.
   stockGateEnabled  Boolean  @default(false)
+  // YYYY-MM. Leader pay starts with this month: earlier months show their
+  // figures but pay nothing and cannot be closed.
+  effectiveMonth    String   @default("2026-11")
   updatedById       String?
   updatedAt         DateTime @updatedAt
 }
@@ -1222,4 +1293,54 @@ model CallAllocation {
 
   @@unique([day, customerId_uuid])
   @@index([officerId, day])
+}
+
+// Monthly completion commission for agents: once an agent's customers who
+// finished paying since startMonth reach the threshold, every one of those
+// completions is paid at amountPerCompletion, and each later one too. Paid
+// the same way as cluster leaders: a month is closed, approved, then paid.
+model AgentCompletionPaySettings {
+  id                  String   @id @default("singleton")
+  amountPerCompletion Float    @default(20)
+  threshold           Int      @default(10)
+  startMonth          String   @default("2026-11") // YYYY-MM
+  updatedById         String?
+  updatedAt           DateTime @updatedAt
+}
+
+model AgentCompletionPayPeriod {
+  id               String    @id @default(uuid())
+  month            String    @unique // YYYY-MM
+  status           String    @default("CLOSED") // CLOSED | APPROVED
+  settingsSnapshot Json
+  closedById       String
+  closedAt         DateTime  @default(now())
+  approvedById     String?
+  approvedAt       DateTime?
+  updatedAt        DateTime  @updatedAt
+}
+
+model AgentCompletionPayout {
+  id              String    @id @default(uuid())
+  periodId        String
+  agentId         String
+  // Completions since the start month up to the end of this month.
+  completedToDate Int
+  qualified       Boolean
+  // Completions paid in this month (all of them the month the agent qualifies).
+  count           Int
+  rate            Float
+  total           Float
+  // [{ id, contractNumber, completedAt }] — what this payout covers, so no
+  // completion is ever paid twice.
+  contracts       Json
+  status          String    @default("PENDING") // PENDING | PAID
+  paidAt          DateTime?
+  paidById        String?
+  reference       String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([periodId, agentId])
+  @@index([agentId])
 }
