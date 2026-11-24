@@ -728,7 +728,7 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
       if (amountDiff !== 0) {
         await rebuildContractFromPayments(payment.contractId, tx);
       }
-    });
+    }, REBUILD_TX);
 
     await createAuditLog({
       userId: req.user!.id,
@@ -755,6 +755,12 @@ export async function updateManualPayment(req: AuthenticatedRequest, res: Respon
     res.status(500).json({ error: 'Failed to update payment' });
   }
 }
+
+/**
+ * Transaction limits for a rebuild: one update per instalment, so a long
+ * daily contract can need more than Prisma's default 5 seconds.
+ */
+export const REBUILD_TX = { timeout: 60_000, maxWait: 10_000 };
 
 /**
  * Rebuild a contract after a payment stops counting (a manual payment deleted,
@@ -861,7 +867,7 @@ export async function deleteManualPayment(req: AuthenticatedRequest, res: Respon
     await prisma.$transaction(async (tx) => {
       await tx.paymentTransaction.delete({ where: { id } });
       await rebuildContractFromPayments(payment.contractId, tx);
-    });
+    }, REBUILD_TX);
 
     await createAuditLog({
       userId: req.user!.id,
@@ -940,7 +946,7 @@ export async function reverseGatewayPayment(req: AuthenticatedRequest, res: Resp
       });
       claimed = r.count;
       if (claimed > 0) await rebuildContractFromPayments(payment.contractId, tx);
-    });
+    }, REBUILD_TX);
     if (claimed === 0) {
       res.status(409).json({ error: 'This payment has already been reversed.' });
       return;
