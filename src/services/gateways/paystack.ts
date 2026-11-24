@@ -352,3 +352,103 @@ export async function refundCharge(reference: string, note: string): Promise<{ o
     return { ok: false, status: null, message: describeError(error) };
   }
 }
+
+// ── Transfers (commission payouts) ──────────────────────────────────────────
+//
+// Paystack pays out from the business balance to a "transfer recipient". For
+// Ghana Mobile Money the recipient is type mobile_money with the network's
+// bank code from the same list the charges use (kept in the case Paystack
+// writes it). Transfers are idempotent on our reference.
+
+const FALLBACK_RECIPIENT_CODES: Record<string, string> = { MTN: 'MTN', VODAFONE: 'VOD', AIRTELTIGO: 'ATL' };
+
+async function recipientBankCode(network: string): Promise<string> {
+  const ours = normaliseNetwork(network);
+  if (!ours) throw new Error(`Unsupported network: ${network}`);
+  try {
+    const codes = await mobileMoneyProviders();
+    if (codes[ours]) return codes[ours];
+  } catch (error) {
+    console.warn('[Paystack] provider list unavailable, using the usual recipient codes:', describeError(error));
+  }
+  return FALLBACK_RECIPIENT_CODES[ours];
+}
+
+/** Creates (or Paystack returns the existing) recipient for a wallet. */
+export async function createMobileMoneyRecipient(input: { name: string; phone: string; network: string; description?: string }): Promise<string> {
+  try {
+    const res: any = await client().post('/transferrecipient', {
+      type: 'mobile_money',
+      name: input.name.slice(0, 100),
+      account_number: toLocalGhanaPhone(input.phone),
+      bank_code: await recipientBankCode(input.network),
+      currency: 'GHS',
+      description: input.description,
+    });
+    const code = res.data?.data?.recipient_code;
+    if (!code) throw new Error('Paystack did not return a recipient code');
+    return String(code);
+  } catch (error) {
+    throw new Error(`Could not set up the recipient: ${describeError(error)}`);
+  }
+}
+
+export type TransferState = 'PENDING' | 'SUCCESS' | 'FAILED' | 'REVERSED' | 'OTP';
+
+export function transferStateOf(status: string | undefined): TransferState {
+  const s = String(status || '').toLowerCase();
+  if (s === 'success') return 'SUCCESS';
+  if (s === 'reversed') return 'REVERSED';
+  if (s === 'otp') return 'OTP';
+  if (['failed', 'abandoned', 'blocked', 'rejected'].includes(s)) return 'FAILED';
+  return 'PENDING';
+}
+
+export async function initiateTransfer(input: { amount: number; recipientCode: string; reference: string; reason: string }): Promise<{ state: TransferState; transferCode: string | null; message: string }> {
+  try {
+    const res: any = await client().post('/transfer', {
+      source: 'balance',
+      amount: toPesewas(input.amount),
+      currency: 'GHS',
+      recipient: input.recipientCode,
+      reference: input.reference,
+      reason: input.reason.slice(0, 100),
+    });
+    const data = res.data?.data ?? {};
+    return { state: transferStateOf(data.status), transferCode: data.transfer_code ?? null, message: String(res.data?.message || '') };
+  } catch (error) {
+    const status = (error as AxiosError<any>)?.response?.status;
+    // A response that never arrived is not a refusal: the caller checks by reference.
+    if (!status) throw error;
+    return { state: 'FAILED', transferCode: null, message: describeError(error) };
+  }
+}
+
+/** Where a transfer stands, by our reference. NOT_FOUND means Paystack never received it. */
+export async function verifyTransfer(reference: string): Promise<{ state: TransferState | 'NOT_FOUND'; transferCode: string | null; amountMinor: number | null; message: string }> {
+  try {
+    const res: any = await client().get(`/transfer/verify/${encodeURIComponent(reference)}`);
+    const data = res.data?.data ?? {};
+    return {
+      state: transferStateOf(data.status),
+      transferCode: data.transfer_code ?? null,
+      amountMinor: typeof data.amount === 'number' ? data.amount : null,
+      message: String(data.reason || data.gateway_response || res.data?.message || ''),
+    };
+  } catch (error) {
+    if ((error as AxiosError<any>)?.response?.status === 404) return { state: 'NOT_FOUND', transferCode: null, amountMinor: null, message: describeError(error) };
+    throw error;
+  }
+}
+
+/** The GHS balance available to pay out from, or null if it cannot be read. */
+export async function getGhsBalance(): Promise<number | null> {
+  try {
+    const res: any = await client().get('/balance');
+    const row = (res.data?.data ?? []).find((b: any) => String(b.currency).toUpperCase() === 'GHS');
+    return row && typeof row.balance === 'number' ? row.balance / 100 : null;
+  } catch (error) {
+    console.warn('[Paystack] balance unavailable:', describeError(error));
+    return null;
+  }
+}

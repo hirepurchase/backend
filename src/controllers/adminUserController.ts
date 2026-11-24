@@ -338,7 +338,8 @@ export async function changePassword(req: AuthenticatedRequest, res: Response): 
     const isValidPassword = await bcrypt.compare(currentPassword, user.password);
 
     if (!isValidPassword) {
-      res.status(401).json({ error: 'Current password is incorrect' });
+      // 400, not 401: the app signs people out on any 401, and a typo here must not.
+      res.status(400).json({ error: 'Current password is incorrect' });
       return;
     }
 

@@ -357,6 +357,9 @@ export async function setPaid(month: string, leaderId: string, paid: boolean, ac
   if (!period || period.status !== 'APPROVED') throw new Error('Approve the month before recording payments.');
   const payout = await prisma.clusterPayout.findUnique({ where: { periodId_clusterAgentId: { periodId: period.id, clusterAgentId: leaderId } } });
   if (!payout) throw new Error('No payout for this leader in this month.');
+  const { transferBlocksManualPay } = await import('../payouts/commissionPayouts');
+  const blocked = await transferBlocksManualPay('CLUSTER_LEADER', payout.id);
+  if (blocked) throw new Error(blocked);
   if (paid && !reference?.trim()) throw new Error('Enter the payment reference.');
   await prisma.clusterPayout.update({
     where: { id: payout.id },

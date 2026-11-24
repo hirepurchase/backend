@@ -26,6 +26,13 @@ export function startAgentDepositSweepScheduler(): void {
       } catch (error) {
         console.error('❌ Paystack payment sweep failed:', error);
       }
+      try {
+        const { sweepCommissionTransfers } = await import('./payouts/commissionPayouts');
+        const r = await sweepCommissionTransfers();
+        if (r.checked || r.resumed) console.log(`💸 Commission payouts: ${r.checked} checked, ${r.resumed} resumed`);
+      } catch (error) {
+        console.error('❌ Commission payout sweep failed:', error);
+      }
     });
   });
   console.log('✅ Payment sweep scheduler started (agent deposits, Paystack payments)');

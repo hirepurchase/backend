@@ -56,6 +56,10 @@ model AdminUser {
   payoutMomoName        String?
   payoutMomoCheck       String?               // MATCHED | PARTIAL | MISMATCH | NOT_REGISTERED | UNAVAILABLE
   payoutMomoUpdatedAt   DateTime?
+  // Paystack transfer recipient for the payout number above, and the
+  // number|network it was made for, so a changed number gets a new one.
+  payoutPaystackRecipient    String?
+  payoutPaystackRecipientKey String?
   isActive              Boolean               @default(true)
   roleId                String
   role                  Role                  @relation(fields: [roleId], references: [id])
@@ -936,6 +940,8 @@ model PaymentGatewaySettings {
   id                  String    @id @default(uuid())
   customerGateway     String    @default("HUBTEL") // HUBTEL | PAYSTACK
   agentDepositGateway String    @default("HUBTEL") // HUBTEL | PAYSTACK
+  // Which gateway sends commission payouts to agents' and leaders' wallets.
+  payoutGateway       String    @default("PAYSTACK") // PAYSTACK | HUBTEL
   lastPaystackEventAt DateTime?
   updatedById         String?
   createdAt           DateTime  @default(now())
@@ -1343,4 +1349,36 @@ model AgentCompletionPayout {
 
   @@unique([periodId, agentId])
   @@index([agentId])
+}
+
+// One commission payment sent to an agent's or cluster leader's wallet through
+// a gateway. A payout row (AgentCompletionPayout or ClusterPayout) is marked
+// paid only when its transfer succeeds; at most one transfer per payout row is
+// ever queued, sending or succeeded at a time.
+model CommissionTransfer {
+  id                String    @id @default(uuid())
+  kind              String    // AGENT_COMPLETION | CLUSTER_LEADER
+  month             String    // YYYY-MM
+  payoutId          String    // AgentCompletionPayout.id or ClusterPayout.id
+  recipientId       String    // AdminUser.id
+  amount            Float
+  gateway           String    // PAYSTACK | HUBTEL
+  phone             String
+  network           String
+  registeredName    String?
+  nameCheck         String?
+  confirmedMismatch Boolean   @default(false)
+  // Ours, sent to the gateway; unique so a retry can never pay twice.
+  reference         String    @unique
+  externalRef       String?
+  status            String    @default("QUEUED") // QUEUED | SENDING | PENDING | SUCCESS | FAILED | REVERSED
+  failureReason     String?
+  initiatedById     String
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  completedAt       DateTime?
+
+  @@index([kind, payoutId])
+  @@index([status, updatedAt])
+  @@index([recipientId])
 }

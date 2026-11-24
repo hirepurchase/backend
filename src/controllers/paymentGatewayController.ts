@@ -176,7 +176,11 @@ export async function handlePaystackWebhook(req: Request & { rawBody?: Buffer },
       await recordTestEvent(String(testRef), event, data);
       return;
     }
-    if (event === 'charge.success' && reference) {
+    if (event.startsWith('transfer.') && reference) {
+      const { handlePaystackTransferEvent } = await import('../services/payouts/commissionPayouts');
+      const found = await handlePaystackTransferEvent(reference);
+      console.log(`[Paystack] ${event} ${reference} → ${found ? 'commission payout' : 'unknown transfer'}`);
+    } else if (event === 'charge.success' && reference) {
       const routed = await handlePaystackReference(reference);
       console.log(`[Paystack] ${event} ${reference} → ${routed}`);
     } else if (event.startsWith('refund.') && event !== 'refund.failed') {

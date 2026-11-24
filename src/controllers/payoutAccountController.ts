@@ -64,7 +64,7 @@ export async function updateMyPayoutAccount(req: AuthenticatedRequest, res: Resp
 
     const user = await prisma.adminUser.findUnique({ where: { id: req.user!.id }, select: { ...SELECT, password: true } });
     if (!user) { res.status(404).json({ error: 'User not found' }); return; }
-    if (!(await bcrypt.compare(String(currentPassword), user.password))) { res.status(401).json({ error: 'Password is incorrect' }); return; }
+    if (!(await bcrypt.compare(String(currentPassword), user.password))) { res.status(400).json({ error: 'Password is incorrect' }); return; }
 
     // Whose wallet is it? Saved either way so the person paying can see it;
     // a number the network does not know is refused when checks are enforced.

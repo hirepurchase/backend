@@ -358,6 +358,9 @@ export async function setPaid(month: string, agentId: string, paid: boolean, act
   if (!period || period.status !== 'APPROVED') throw new CompletionPayError('Approve the month before recording payments.', 409);
   const payout = await db.agentCompletionPayout.findUnique({ where: { periodId_agentId: { periodId: period.id, agentId } } });
   if (!payout) throw new CompletionPayError('No payout for this agent in this month.', 404);
+  const { transferBlocksManualPay } = await import('./payouts/commissionPayouts');
+  const blocked = await transferBlocksManualPay('AGENT_COMPLETION', payout.id);
+  if (blocked) throw new CompletionPayError(blocked, 409);
   if (paid) {
     if (payout.total <= 0) throw new CompletionPayError('Nothing is owed to this agent for this month.', 409);
     if (!reference?.trim()) throw new CompletionPayError('Enter the payment reference.');
