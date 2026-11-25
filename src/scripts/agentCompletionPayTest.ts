@@ -58,7 +58,7 @@ async function main() {
   await done(C.id, '2026-08-15');
   await many(S.id, 12, '2026-08-20'); // an office sale, not an agent's
 
-  await svc.saveSettings({ amountPerCompletion: 20, threshold: 10, startMonth: '2026-08' }, A.id);
+  await svc.saveSettings({ amountPerCompletion: 20, threshold: 10, startMonth: '2026-08', maxPerMonth: 10 }, A.id);
   const line = (v: svc.MonthView, id: string) => v.agents.find((a) => a.agentId === id);
 
   console.log('\nPreview and qualifying');
@@ -105,7 +105,8 @@ async function main() {
     await svc.saveSettings({ amountPerCompletion: 25 }, A.id);
     const v = await svc.closeMonth('2026-10', A.id);
     const a = line(v, A.id)!;
-    assert.deepStrictEqual([a.completedToDate, a.qualified, a.count, a.total], [11, true, 11, 275], 'A reaches 11 and is paid for all 11, the late one included');
+    assert.deepStrictEqual([a.completedToDate, a.qualified, a.count, a.carriedOver, a.total], [11, true, 10, 1, 250], 'A reaches 11: paid for 10 (the monthly limit), 1 carried over');
+    assert.ok(a.contracts.every((c) => c.completedAt < '2026-10-11'), 'the oldest ten are paid first');
     const b = line(v, B.id)!;
     assert.deepStrictEqual([b.count, b.total], [1, 25], 'B: only the new one');
     const sep = await svc.getMonth('2026-09', { agentIds: ids });
@@ -125,7 +126,7 @@ async function main() {
     await assert.rejects(() => svc.setPaid('2026-10', C.id, true, B.id, 'X'), /Nothing is owed/);
     const v = await svc.setPaid('2026-10', A.id, true, B.id, 'MOMO1');
     assert.strictEqual(line(v, A.id)!.status, 'PAID');
-    assert.strictEqual(v.totals.paid, 275 + 0);
+    assert.strictEqual(v.totals.paid, 250);
   });
   await check('an approved month cannot be reopened or recalculated', async () => {
     await assert.rejects(() => svc.reopenMonth('2026-10'), /approved/);
@@ -134,14 +135,42 @@ async function main() {
   await check('an agent sees their own progress and pay history', async () => {
     const p = await svc.myProgress(A.id);
     assert.strictEqual(p.qualified, true);
-    assert.ok(p.history.some((h: any) => h.month === '2026-10' && h.total === 275 && h.status === 'PAID'));
+    assert.ok(p.history.some((h: any) => h.month === '2026-10' && h.total === 250 && h.status === 'PAID'));
     const c = await svc.myProgress(C.id);
     assert.strictEqual(c.toGo, 9);
   });
 
+  console.log('\nMonthly limit');
+  await check('the one carried over from October is paid first in November', async () => {
+    const v = await svc.getMonth('2026-11', { agentIds: ids });
+    const a = line(v, A.id)!;
+    assert.deepStrictEqual([a.count, a.carriedOver], [1, 0]);
+    assert.ok(a.contracts[0].completedAt.startsWith('2026-10-1'), 'October’s last completion');
+  });
+  await check('a lower limit pays fewer and carries the rest; changing it back restores', async () => {
+    await svc.saveSettings({ maxPerMonth: 3 }, A.id);
+    const C2 = await mk('AgentC2', agentRole.id);
+    await many(C2.id, 12, '2026-11-05');
+    let v = await svc.getMonth('2026-11', { agentIds: [C2.id] });
+    assert.deepStrictEqual([line(v, C2.id)!.count, line(v, C2.id)!.carriedOver], [3, 9]);
+    await svc.saveSettings({ maxPerMonth: 10 }, A.id);
+    v = await svc.getMonth('2026-11', { agentIds: [C2.id] });
+    assert.deepStrictEqual([line(v, C2.id)!.count, line(v, C2.id)!.carriedOver], [10, 2]);
+  });
+  await check('the limit must be a whole number from 1', async () => {
+    await assert.rejects(() => svc.saveSettings({ maxPerMonth: 0 }, A.id), /from 1/);
+    await assert.rejects(() => svc.saveSettings({ maxPerMonth: 2.5 }, A.id), /from 1/);
+  });
+  await check('a closed month keeps its limit and how many it carried', async () => {
+    const oct = await db.agentCompletionPayPeriod.findUnique({ where: { month: '2026-10' } });
+    assert.strictEqual((oct.settingsSnapshot as any).maxPerMonth, 10);
+    const v = await svc.getMonth('2026-10', { agentIds: ids });
+    assert.strictEqual(line(v, A.id)!.carriedOver, 1);
+  });
+
   await db.agentCompletionPayout.deleteMany({});
   await db.agentCompletionPayPeriod.deleteMany({});
-  await svc.saveSettings({ amountPerCompletion: before.amountPerCompletion, threshold: before.threshold, startMonth: before.startMonth }, A.id);
+  await svc.saveSettings({ amountPerCompletion: before.amountPerCompletion, threshold: before.threshold, startMonth: before.startMonth, maxPerMonth: before.maxPerMonth ?? 10 }, A.id);
   await prisma.$disconnect();
   console.log(failures ? `\n${failures} check(s) failed` : '\nAll checks passed');
   process.exit(failures ? 1 : 0);

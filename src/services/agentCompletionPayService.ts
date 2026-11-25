@@ -8,6 +8,10 @@
  * later completion is paid in the month it happens. Below the threshold,
  * nothing is paid yet; the completions keep counting.
  *
+ * No agent is paid for more than the monthly limit (maxPerMonth) in one
+ * month. Any more are carried to the next month, oldest first, and so on
+ * until all are paid; nothing is lost.
+ *
  * Paid like cluster leaders: a month is previewed while it runs, closed after
  * it ends (in order, from the start month), approved, then each agent is
  * marked paid with the payment reference. A closed month keeps the amount and
@@ -32,6 +36,8 @@ export interface CompletionPaySettings {
   amountPerCompletion: number;
   threshold: number;
   startMonth: string;
+  /** Most completions paid to one agent in one month; absent on months closed before the limit existed (no limit). */
+  maxPerMonth?: number;
   updatedById?: string | null;
   updatedAt?: Date | null;
 }
@@ -53,7 +59,12 @@ export function nextMonth(month: string): string {
 
 export async function getSettings(): Promise<CompletionPaySettings> {
   const row = await db.agentCompletionPaySettings.upsert({ where: { id: 'singleton' }, create: { id: 'singleton' }, update: {} });
-  return { amountPerCompletion: row.amountPerCompletion, threshold: row.threshold, startMonth: row.startMonth, updatedById: row.updatedById, updatedAt: row.updatedAt };
+  return { amountPerCompletion: row.amountPerCompletion, threshold: row.threshold, startMonth: row.startMonth, maxPerMonth: row.maxPerMonth, updatedById: row.updatedById, updatedAt: row.updatedAt };
+}
+
+/** What a closed month keeps of the settings it was closed with. */
+function snapshotOf(s: CompletionPaySettings) {
+  return { amountPerCompletion: s.amountPerCompletion, threshold: s.threshold, startMonth: s.startMonth, maxPerMonth: s.maxPerMonth };
 }
 
 export async function saveSettings(input: Partial<CompletionPaySettings>, adminId: string): Promise<CompletionPaySettings> {
@@ -73,16 +84,21 @@ export async function saveSettings(input: Partial<CompletionPaySettings>, adminI
     monthRange(String(input.startMonth));
     data.startMonth = String(input.startMonth);
   }
+  if (input.maxPerMonth !== undefined) {
+    const n = Number(input.maxPerMonth);
+    if (!Number.isInteger(n) || n < 1 || n > 10_000) throw new CompletionPayError('Most paid per month must be a whole number from 1');
+    data.maxPerMonth = n;
+  }
   const row = await db.agentCompletionPaySettings.update({ where: { id: 'singleton' }, data: { ...data, updatedById: adminId } });
   await createAuditLog({
     userId: adminId,
     action: 'UPDATE_AGENT_COMPLETION_PAY_SETTINGS',
     entity: 'AgentCompletionPaySettings',
     entityId: 'singleton',
-    oldValues: { amountPerCompletion: before.amountPerCompletion, threshold: before.threshold, startMonth: before.startMonth },
+    oldValues: snapshotOf(before),
     newValues: data,
   });
-  return { amountPerCompletion: row.amountPerCompletion, threshold: row.threshold, startMonth: row.startMonth, updatedById: row.updatedById, updatedAt: row.updatedAt };
+  return { amountPerCompletion: row.amountPerCompletion, threshold: row.threshold, startMonth: row.startMonth, maxPerMonth: row.maxPerMonth, updatedById: row.updatedById, updatedAt: row.updatedAt };
 }
 
 // ---------------------------------------------------------------- figures
@@ -123,6 +139,8 @@ export interface AgentLine {
   /** How many more completions are needed to qualify (0 once qualified). */
   toGo: number;
   count: number;
+  /** Owed but over the monthly limit: paid in a later month. */
+  carriedOver: number;
   rate: number;
   total: number;
   contracts: CoveredContract[];
@@ -176,7 +194,10 @@ export async function computeMonth(
     const who = list[0].createdBy;
     const completedToDate = list.length;
     const qualified = completedToDate >= settings.threshold;
-    const due = qualified ? list.filter((c: any) => !paid.has(c.id)) : [];
+    const owed = qualified ? list.filter((c: any) => !paid.has(c.id)) : [];
+    // Oldest first (the list is in completion order), up to the monthly limit.
+    const limit = settings.maxPerMonth && settings.maxPerMonth > 0 ? settings.maxPerMonth : owed.length;
+    const due = owed.slice(0, limit);
     lines.push({
       agentId,
       payout: payoutOf(who),
@@ -188,6 +209,7 @@ export async function computeMonth(
       qualified,
       toGo: Math.max(0, settings.threshold - completedToDate),
       count: due.length,
+      carriedOver: owed.length - due.length,
       rate: settings.amountPerCompletion,
       total: round2(due.length * settings.amountPerCompletion),
       contracts: due.map((c: any) => ({ id: c.id, contractNumber: c.contractNumber, completedAt: c.completedAt.toISOString() })),
@@ -210,7 +232,7 @@ export interface MonthView {
   beforeStart: boolean;
   settings: CompletionPaySettings;
   agents: AgentLine[];
-  totals: { agents: number; qualified: number; count: number; total: number; paid: number };
+  totals: { agents: number; qualified: number; count: number; carriedOver: number; total: number; paid: number };
 }
 
 function totalsOf(agents: AgentLine[]) {
@@ -218,6 +240,7 @@ function totalsOf(agents: AgentLine[]) {
     agents: agents.length,
     qualified: agents.filter((a) => a.qualified).length,
     count: agents.reduce((s, a) => s + a.count, 0),
+    carriedOver: agents.reduce((s, a) => s + a.carriedOver, 0),
     total: round2(agents.reduce((s, a) => s + a.total, 0)),
     paid: round2(agents.reduce((s, a) => s + (a.status === 'PAID' ? a.total : 0), 0)),
   };
@@ -272,6 +295,7 @@ export async function getMonth(month: string, opts: { agentIds?: string[] } = {}
       qualified: p.qualified,
       toGo: Math.max(0, settings.threshold - p.completedToDate),
       count: p.count,
+      carriedOver: p.carriedOver ?? 0,
       rate: p.rate,
       total: p.total,
       contracts,
@@ -293,7 +317,7 @@ async function freeze(periodId: string, lines: AgentLine[], tx: any) {
   await tx.agentCompletionPayout.createMany({
     data: lines.map((l) => ({
       periodId, agentId: l.agentId, completedToDate: l.completedToDate, qualified: l.qualified,
-      count: l.count, rate: l.rate, total: l.total, contracts: l.contracts as any,
+      count: l.count, carriedOver: l.carriedOver, rate: l.rate, total: l.total, contracts: l.contracts as any,
     })),
   });
 }
@@ -306,7 +330,7 @@ export async function closeMonth(month: string, actorId: string): Promise<MonthV
   const lines = await computeMonth(month, settings);
   await db.$transaction(async (tx: any) => {
     const period = await tx.agentCompletionPayPeriod.create({
-      data: { month, status: 'CLOSED', closedById: actorId, settingsSnapshot: { amountPerCompletion: settings.amountPerCompletion, threshold: settings.threshold, startMonth: settings.startMonth } },
+      data: { month, status: 'CLOSED', closedById: actorId, settingsSnapshot: snapshotOf(settings) },
     });
     await freeze(period.id, lines, tx);
   });
@@ -324,7 +348,7 @@ export async function recomputeMonth(month: string, useCurrentSettings = false):
   await db.$transaction(async (tx: any) => {
     await freeze(period.id, lines, tx);
     if (useCurrentSettings) {
-      await tx.agentCompletionPayPeriod.update({ where: { id: period.id }, data: { settingsSnapshot: { amountPerCompletion: settings.amountPerCompletion, threshold: settings.threshold, startMonth: settings.startMonth } } });
+      await tx.agentCompletionPayPeriod.update({ where: { id: period.id }, data: { settingsSnapshot: snapshotOf(settings) } });
     }
   });
   return getMonth(month);
@@ -385,12 +409,12 @@ export async function myProgress(agentId: string) {
   const periods = await db.agentCompletionPayPeriod.findMany({ where: { id: { in: payouts.map((p: any) => p.periodId) } }, select: { id: true, month: true, status: true } });
   const periodById = new Map(periods.map((p: any) => [p.id, p]));
   return {
-    settings: { amountPerCompletion: settings.amountPerCompletion, threshold: settings.threshold, startMonth: settings.startMonth },
+    settings: snapshotOf(settings),
     completedToDate: line?.completedToDate ?? 0,
     qualified: line?.qualified ?? false,
     toGo: line?.toGo ?? settings.threshold,
     /** What this month would pay if it closed now. */
-    thisMonth: { month, count: line?.count ?? 0, total: line?.total ?? 0 },
+    thisMonth: { month, count: line?.count ?? 0, carriedOver: line?.carriedOver ?? 0, total: line?.total ?? 0 },
     history: payouts
       .filter((p: any) => p.total > 0)
       .map((p: any) => ({

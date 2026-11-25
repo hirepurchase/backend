@@ -29,7 +29,7 @@ export async function getCompletionPaySettings(_req: AuthenticatedRequest, res: 
 export async function putCompletionPaySettings(req: AuthenticatedRequest, res: Response) {
   try {
     const b = req.body ?? {};
-    res.json({ settings: await saveSettings({ amountPerCompletion: b.amountPerCompletion, threshold: b.threshold, startMonth: b.startMonth }, me(req).id) });
+    res.json({ settings: await saveSettings({ amountPerCompletion: b.amountPerCompletion, threshold: b.threshold, startMonth: b.startMonth, maxPerMonth: b.maxPerMonth }, me(req).id) });
   } catch (e) { fail(res, e); }
 }
 
