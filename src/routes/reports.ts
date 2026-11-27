@@ -18,9 +18,13 @@ import {
 } from '../controllers/reportController';
 import { getPortfolioAtRiskReport, getAgentAtRiskContracts } from '../controllers/portfolioRiskController';
 import { authenticateAdmin, requireAnyPermission } from '../middleware/auth';
+import { getAttention } from '../controllers/attentionController';
 import { DASHBOARD_ACCESS_PERMISSIONS, DAILY_PAYMENTS_ACCESS_PERMISSIONS, PERMISSIONS } from '../constants/permissions';
 
 const router = Router();
+
+// What is waiting on someone; each item is shown only to those who can act on it.
+router.get('/attention', authenticateAdmin, getAttention);
 
 // Dashboard statistics. The grouped access rule keeps dashboard behavior aligned
 // across the main dashboard and the agent-scoped dashboard.

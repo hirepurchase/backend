@@ -342,6 +342,16 @@ export function initializeNotificationScheduler(): void {
     }
   });
 
+  // Commission month-end reminders: 9:10 on the 2nd, 5th and 8th, by SMS to
+  // super admins, only if last month is not closed, approved and paid.
+  cron.schedule('10 9 2,5,8 * *', () => {
+    enqueueSingletonJob('commission-month-end-reminder', async () => {
+      const { sendMonthEndReminders } = await import('./monthEndService');
+      const r = await sendMonthEndReminders();
+      if (r.issues.length) console.log(`Commission month-end reminder: ${r.sent} SMS sent — ${r.issues.join(' ')}`);
+    });
+  });
+
   // Run upcoming payment check every day at 9:00 AM
   cron.schedule('0 9 * * *', () => {
     const enqueued = enqueueSingletonJob('notifications-upcoming', async () => {
